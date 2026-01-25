@@ -153,13 +153,14 @@ MENDER_ARTIFACT_COMPRESSION ?= "gzip"
 # =============================================================
 # SPDX / License Compliance Configuration
 # =============================================================
-# If you're using SPDX generation (common in enterprise/compliance builds)
-# and encounter errors with externalsrc recipes, uncomment the following:
+# IMPORTANT: If using NXP i.MX (fsl-imx-*), Poky, or any distro that enables
+# SPDX globally, you MUST disable SPDX to avoid build errors:
 #
-# INHERIT:remove = "create-spdx"
+INHERIT:remove = "create-spdx"
 #
-# Note: The soc-ota-agent recipe includes workarounds for SPDX compatibility,
-# but some build configurations may still require this setting.
+# This is required because soc-ota-agent uses externalsrc (local Go code),
+# which is incompatible with SPDX generation. Without this line, you'll see:
+#   ERROR: No SPDX file found for package soc-ota-agent
 
 # =============================================================
 # Integration with Existing BSP
