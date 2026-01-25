@@ -2,6 +2,22 @@
 
 This directory contains the public keys used to verify firmware signatures on the device.
 
+## IMPORTANT: Example Keys Included
+
+This directory includes **example placeholder keys** (`example-rsa-public.pem` and
+`example-ecdsa-public.pem`) for development and testing purposes only.
+
+**DO NOT USE THESE KEYS IN PRODUCTION!**
+
+For production builds, you MUST either:
+1. Replace the example keys with your actual production public keys
+2. Set `SOC_OTA_VERIFICATION_KEYS` in your `local.conf` to point to your production keys
+
+Example in `local.conf`:
+```bitbake
+SOC_OTA_VERIFICATION_KEYS = "/path/to/your/production-rsa-public.pem /path/to/your/production-ecdsa-public.pem"
+```
+
 ## Directory Structure
 
 ```

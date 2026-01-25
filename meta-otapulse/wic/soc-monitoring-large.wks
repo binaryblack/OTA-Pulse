@@ -1,0 +1,33 @@
+# SoC Monitoring WIC Kickstart File - LARGE IMAGE VARIANT
+# Partition layout for A/B OTA updates with large rootfs (Qt, multimedia, etc.)
+#
+# Use this WKS file for images larger than 1GB (e.g., Qt applications).
+# Requires minimum 16GB eMMC/SD card.
+#
+# To use this layout, set in local.conf:
+#   WKS_FILE = "soc-monitoring-large.wks"
+#
+# Or customize sizes via variables:
+#   SOC_WKS_BOOT_SIZE = "256M"
+#   SOC_WKS_ROOTFS_SIZE = "6G"
+#   SOC_WKS_DATA_SIZE = "2G"
+#
+# Storage requirement: 256M + 2×6G + 2G + overhead = ~14.5GB minimum
+# Recommended: 16GB or 32GB eMMC/SD
+
+# Boot partition (FAT32, contains kernel and DTB)
+# Larger boot for additional DTBs, overlays, or multiboot
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size ${SOC_WKS_BOOT_SIZE}
+
+# Root filesystem A (primary)
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs-a --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
+
+# Root filesystem B (backup for A/B updates)
+part --ondisk mmcblk0 --fstype=ext4 --label rootfs-b --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
+
+# Data partition (persistent across updates)
+# Larger data partition for application data, logs, caches
+part /data --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size ${SOC_WKS_DATA_SIZE}
+
+# Bootloader
+bootloader --ptable gpt

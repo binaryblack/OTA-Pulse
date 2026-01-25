@@ -1,17 +1,35 @@
 # SoC Monitoring WIC Kickstart File
 # Partition layout for A/B OTA updates
+#
+# This is the DEFAULT layout for small/medium images (<1GB rootfs).
+# For larger images (Qt, multimedia, etc.), use soc-monitoring-large.wks
+# or set custom partition sizes in local.conf.
+#
+# Partition sizes can be customized via variables in local.conf:
+#   SOC_WKS_BOOT_SIZE      - Boot partition size (default: 100M)
+#   SOC_WKS_ROOTFS_SIZE    - Root filesystem size for A/B (default: 1G)
+#   SOC_WKS_DATA_SIZE      - Persistent data partition size (default: 500M)
+#
+# Example for 5GB Qt image (requires 16GB+ storage):
+#   SOC_WKS_ROOTFS_SIZE = "6G"
+#   SOC_WKS_DATA_SIZE = "2G"
+#
+# Minimum storage requirement calculation:
+#   Total = boot + (2 × rootfs) + data + overhead
+#   Default: 100M + 2×1G + 500M + ~400M overhead = ~3GB minimum
+#   Large:   100M + 2×6G + 2G + ~400M overhead = ~14.5GB minimum
 
 # Boot partition (FAT32, contains kernel and DTB)
-part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 100M
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size ${SOC_WKS_BOOT_SIZE}
 
 # Root filesystem A (primary)
-part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs-a --align 4096 --size 1G
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs-a --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
 
 # Root filesystem B (backup for A/B updates)
-part --ondisk mmcblk0 --fstype=ext4 --label rootfs-b --align 4096 --size 1G
+part --ondisk mmcblk0 --fstype=ext4 --label rootfs-b --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
 
 # Data partition (persistent across updates)
-part /data --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size 500M
+part /data --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size ${SOC_WKS_DATA_SIZE}
 
 # Bootloader
 bootloader --ptable gpt

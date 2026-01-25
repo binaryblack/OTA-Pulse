@@ -52,6 +52,9 @@ IMAGE_FSTYPES = "wic wic.gz ext4"
 # SOC_MONITORING_API_URL = "https://your-api-server.com"
 # SOC_MONITORING_API_KEY = "your-api-key"
 
+# OTA Server URL (REQUIRED - set to your OTAPulse server)
+OTA_SERVER_URL = "https://ota.example.com"
+
 # Firmware version (auto-incremented or set manually)
 DISTRO_VERSION = "1.0.0"
 
@@ -106,3 +109,49 @@ MENDER_ARTIFACT_COMPRESSION ?= "gzip"
 # EXTRA_IMAGE_FEATURES:remove = "debug-tweaks"
 # IMAGE_FEATURES:remove = "ssh-server-openssh"
 # IMAGE_INSTALL:remove = "strace gdb"
+
+# =============================================================
+# Partition Size Configuration (for WIC images)
+# =============================================================
+# Default partition sizes work for images < 1GB
+# For larger images (Qt, multimedia), increase these values
+
+# Boot partition size (kernel, DTB, overlays)
+# SOC_WKS_BOOT_SIZE = "100M"
+
+# Root filesystem size (both A and B partitions)
+# Default: 1G, increase for Qt/multimedia images
+# SOC_WKS_ROOTFS_SIZE = "1G"
+
+# For 5GB+ Qt images, use:
+# SOC_WKS_ROOTFS_SIZE = "6G"
+# SOC_WKS_DATA_SIZE = "2G"
+# WKS_FILE = "soc-monitoring-large.wks"
+
+# Persistent data partition size
+# SOC_WKS_DATA_SIZE = "500M"
+
+# Storage requirements:
+#   Default (1G rootfs): 4GB minimum (boot + 2×1G + data + overhead)
+#   Large (6G rootfs): 16GB minimum (boot + 2×6G + data + overhead)
+
+# =============================================================
+# SPDX / License Compliance Configuration
+# =============================================================
+# If you're using SPDX generation (common in enterprise/compliance builds)
+# and encounter errors with externalsrc recipes, uncomment the following:
+#
+# INHERIT:remove = "create-spdx"
+#
+# Note: The soc-ota-agent recipe includes workarounds for SPDX compatibility,
+# but some build configurations may still require this setting.
+
+# =============================================================
+# Integration with Existing BSP
+# =============================================================
+# If integrating into an existing Yocto build (NXP i.MX, TI, etc.):
+#
+# 1. Add meta-otapulse to your bblayers.conf
+# 2. Set OTA_SERVER_URL above
+# 3. Add to your image: IMAGE_INSTALL:append = " soc-ota-agent"
+# 4. For production, set SOC_OTA_VERIFICATION_KEYS to your public key path

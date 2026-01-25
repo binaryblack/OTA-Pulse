@@ -3,23 +3,31 @@
 #
 # Configuration:
 #   SOC_OTA_VERIFICATION_KEYS - Space-separated list of custom public key paths
-#                               If not set, default production keys are used
+#                               If not set, example placeholder keys are used
+#
+# IMPORTANT: For production builds, you MUST either:
+#   1. Set SOC_OTA_VERIFICATION_KEYS in local.conf to point to your production keys
+#   2. Replace the example keys in files/ with your actual production keys
+#
+# Example in local.conf:
+#   SOC_OTA_VERIFICATION_KEYS = "/path/to/your/production-rsa-public.pem"
 
 SUMMARY = "Firmware signing public keys for secure OTA updates"
 DESCRIPTION = "Deploys cryptographic public keys used to verify firmware signatures on device"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-SRC_URI = " \
-    file://production-rsa-public.pem \
-    file://production-ecdsa-public.pem \
-    file://README.md \
-"
+# Custom verification keys (space-separated paths, set in local.conf)
+# When set, these keys are used instead of the default example keys
+SOC_OTA_VERIFICATION_KEYS ?= ""
+
+# SRC_URI is conditional:
+# - If custom keys are specified, only include README (keys come from custom paths)
+# - If no custom keys, include example placeholder keys from files/ directory
+SRC_URI = "file://README.md"
+SRC_URI:append = "${@'' if d.getVar('SOC_OTA_VERIFICATION_KEYS') else ' file://example-rsa-public.pem file://example-ecdsa-public.pem'}"
 
 S = "${WORKDIR}"
-
-# Custom verification keys (space-separated paths, set in local.conf)
-SOC_OTA_VERIFICATION_KEYS ?= ""
 
 # Directory where public keys will be installed
 SIGNING_KEYS_DIR = "${sysconfdir}/soc-monitoring/signing-keys"
@@ -64,15 +72,19 @@ python do_install() {
             else:
                 bb.warn("Custom verification key not found: %s" % key_path)
     else:
-        # Install default production keys
-        bb.note("Installing default production keys")
-        for key_file in ['production-rsa-public.pem', 'production-ecdsa-public.pem']:
+        # Install example placeholder keys (for development/testing only)
+        # WARNING: Replace with production keys for actual deployment!
+        bb.warn("Installing EXAMPLE placeholder keys - NOT FOR PRODUCTION USE!")
+        bb.warn("Set SOC_OTA_VERIFICATION_KEYS in local.conf for production builds")
+        for key_file in ['example-rsa-public.pem', 'example-ecdsa-public.pem']:
             src_path = os.path.join(workdir, key_file)
             if os.path.exists(src_path):
-                dest_path = os.path.join(dest_active, key_file)
+                # Install with 'production-' prefix for compatibility with soc-ota-agent
+                dest_name = key_file.replace('example-', 'production-')
+                dest_path = os.path.join(dest_active, dest_name)
                 shutil.copy2(src_path, dest_path)
                 os.chmod(dest_path, 0o444)
-                bb.note("Installed key: %s" % key_file)
+                bb.note("Installed example key as: %s" % dest_name)
 }
 
 FILES:${PN} = " \

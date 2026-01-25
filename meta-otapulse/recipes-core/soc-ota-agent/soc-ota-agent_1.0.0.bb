@@ -229,5 +229,11 @@ INHIBIT_SYSROOT_STRIP = "1"
 INHIBIT_PACKAGE_DEBUG_SPLIT = "1"
 
 # Skip SPDX generation - not compatible with externalsrc
-deltask do_create_spdx
-deltask do_create_runtime_spdx
+# Using noexec instead of deltask to maintain task chain integrity
+# This prevents "Unable to find SPDX provider" errors during image builds
+do_create_spdx[noexec] = "1"
+do_create_runtime_spdx[noexec] = "1"
+
+# Ensure SPDX tasks don't fail even when SPDX generation is enabled globally
+# This is needed for compatibility with builds that have INHERIT += "create-spdx"
+SPDX_INCLUDE_SOURCES = "0"
