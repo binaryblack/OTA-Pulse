@@ -1,0 +1,187 @@
+#!/bin/sh
+# SoC OTA Agent Provisioning Script (OTAPulse)
+# Configures the device for OTA updates on first boot
+#
+# Usage: soc-ota-provision --server URL --token TOKEN [--device-id ID]
+#
+# This script:
+# 1. Provisions the device with the SoC Monitoring server
+# 2. Receives an API key for the device
+# 3. Configures credentials in writable config location
+
+set -e
+
+# OTAPulse paths (with mender fallback for backward compatibility)
+CONFIG_DIR="/var/lib/otapulse"
+CONFIG_FILE="${CONFIG_DIR}/otapulse.conf"
+PROVISION_MARKER="${CONFIG_DIR}/.provisioned"
+
+# Fallback to mender paths if otapulse doesn't exist
+if [ ! -d "/etc/otapulse" ] && [ -d "/etc/mender" ]; then
+    CONFIG_DIR="/var/lib/mender"
+    CONFIG_FILE="${CONFIG_DIR}/mender.conf"
+    PROVISION_MARKER="${CONFIG_DIR}/.provisioned"
+fi
+
+usage() {
+    echo "Usage: $0 --server URL --token TOKEN [--device-id ID]"
+    echo ""
+    echo "Options:"
+    echo "  --server URL     SoC Monitoring server URL (e.g., https://monitoring.example.com)"
+    echo "  --token TOKEN    Provisioning token from server"
+    echo "  --device-id ID   Optional device identifier (defaults to MAC address)"
+    echo "  --force          Force re-provisioning even if already provisioned"
+    echo ""
+    echo "Example:"
+    echo "  $0 --server https://monitoring.example.com --token prov_xxxx"
+    exit 1
+}
+
+get_device_id() {
+    # Try to get MAC address from first ethernet interface
+    for iface in eth0 enp0s3 end0 wlan0; do
+        if [ -f "/sys/class/net/$iface/address" ]; then
+            cat "/sys/class/net/$iface/address" | tr -d ':' | tr '[:upper:]' '[:lower:]'
+            return 0
+        fi
+    done
+
+    # Fallback to machine-id
+    if [ -f /etc/machine-id ]; then
+        head -c 12 /etc/machine-id
+        return 0
+    fi
+
+    echo "unknown-$(date +%s)"
+}
+
+get_hardware_version() {
+    # Check OTAPulse path first, then mender fallback
+    if [ -f /etc/otapulse/device_type ]; then
+        grep "device_type=" /etc/otapulse/device_type | cut -d= -f2
+    elif [ -f /etc/mender/device_type ]; then
+        grep "device_type=" /etc/mender/device_type | cut -d= -f2
+    else
+        echo "unknown"
+    fi
+}
+
+# Parse arguments
+SERVER_URL=""
+PROV_TOKEN=""
+DEVICE_ID=""
+FORCE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --server)
+            SERVER_URL="$2"
+            shift 2
+            ;;
+        --token)
+            PROV_TOKEN="$2"
+            shift 2
+            ;;
+        --device-id)
+            DEVICE_ID="$2"
+            shift 2
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+# Validate arguments
+if [ -z "$SERVER_URL" ] || [ -z "$PROV_TOKEN" ]; then
+    echo "Error: --server and --token are required"
+    usage
+fi
+
+# Check if already provisioned
+if [ -f "$PROVISION_MARKER" ] && [ "$FORCE" -eq 0 ]; then
+    echo "Device already provisioned. Use --force to re-provision."
+    exit 0
+fi
+
+# Get device ID if not provided
+if [ -z "$DEVICE_ID" ]; then
+    DEVICE_ID=$(get_device_id)
+fi
+
+HARDWARE_VERSION=$(get_hardware_version)
+FIRMWARE_VERSION="unknown"
+if [ -f /etc/build-info ]; then
+    FIRMWARE_VERSION=$(grep "VERSION=" /etc/build-info | cut -d= -f2 | tr -d '"' || echo "unknown")
+fi
+
+echo "Provisioning device..."
+echo "  Server: $SERVER_URL"
+echo "  Device ID: $DEVICE_ID"
+echo "  Hardware: $HARDWARE_VERSION"
+
+# Call provisioning endpoint
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+    "${SERVER_URL}/api/v1/provision" \
+    -H "X-Provisioning-Token: $PROV_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"device_id\": \"$DEVICE_ID\",
+        \"hardware_version\": \"$HARDWARE_VERSION\",
+        \"firmware_version\": \"$FIRMWARE_VERSION\"
+    }")
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+BODY=$(echo "$RESPONSE" | head -n -1)
+
+if [ "$HTTP_CODE" != "200" ]; then
+    echo "Error: Provisioning failed with HTTP $HTTP_CODE"
+    echo "$BODY"
+    exit 1
+fi
+
+# Extract API key from response
+API_KEY=$(echo "$BODY" | jq -r '.api_key // empty')
+DEVICE_UUID=$(echo "$BODY" | jq -r '.device_id // empty')
+
+if [ -z "$API_KEY" ]; then
+    echo "Error: No API key received from server"
+    echo "$BODY"
+    exit 1
+fi
+
+echo "Provisioning successful!"
+echo "  Device UUID: $DEVICE_UUID"
+echo "  API Key: ${API_KEY:0:12}..."
+
+# Create config directory if it doesn't exist
+mkdir -p "$CONFIG_DIR"
+
+# Write credentials to writable config location
+# This file will be loaded as fallback config by the agent
+cat > "$CONFIG_FILE" << EOF
+{
+    "SoCAPIKey": "$API_KEY",
+    "SoCDeviceID": "$DEVICE_UUID"
+}
+EOF
+chmod 0600 "$CONFIG_FILE"
+
+echo "Credentials saved to: $CONFIG_FILE"
+
+# Create provisioning marker
+echo "provisioned=$(date -Iseconds)" > "$PROVISION_MARKER"
+echo "device_id=$DEVICE_ID" >> "$PROVISION_MARKER"
+echo "device_uuid=$DEVICE_UUID" >> "$PROVISION_MARKER"
+
+# Restart OTA agent to pick up new config
+if systemctl is-active --quiet soc-ota-agent; then
+    echo "Restarting soc-ota-agent service..."
+    systemctl restart soc-ota-agent
+fi
+
+echo "Device provisioning complete!"

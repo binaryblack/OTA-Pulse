@@ -1,0 +1,50 @@
+cd#!/bin/bash
+# Display current build version and information
+
+VERSION_FILE="/etc/build-version"
+INFO_FILE="/etc/build-info"
+
+if [ -f "$VERSION_FILE" ]; then
+    echo "════════════════════════════════════════════════════════"
+    echo "          BUILD VERSION INFORMATION"
+    echo "════════════════════════════════════════════════════════"
+    echo ""
+    echo "📦 Build Version: $(cat $VERSION_FILE)"
+    echo ""
+    
+    if [ -f "$INFO_FILE" ]; then
+        echo "📋 Detailed Information:"
+        echo "────────────────────────────────────────────────────────"
+        while IFS='=' read -r key value; do
+            case "$key" in
+                BUILD_NUMBER)
+                    echo "   🔢 Build Number:     $value"
+                    ;;
+                BUILD_TIMESTAMP)
+                    echo "   🕐 Build Timestamp:  $value"
+                    ;;
+                GIT_COMMIT)
+                    echo "   🔗 Git Commit:       $value"
+                    ;;
+                MACHINE)
+                    echo "   🖥️  Machine:          $value"
+                    ;;
+                DISTRO)
+                    echo "   📀 Distribution:     $value"
+                    ;;
+                DISTRO_VERSION)
+                    echo "   📌 Distro Version:   $value"
+                    ;;
+                IMAGE_BASENAME)
+                    echo "   📦 Image Type:       $value"
+                    ;;
+            esac
+        done < "$INFO_FILE"
+    fi
+    
+    echo ""
+    echo "════════════════════════════════════════════════════════"
+else
+    echo "❌ Build version information not available"
+    echo "   File not found: $VERSION_FILE"
+fi

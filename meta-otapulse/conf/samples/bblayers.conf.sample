@@ -1,0 +1,27 @@
+# Sample bblayers.conf for SoC Monitoring builds
+# Copy this to your build/conf/bblayers.conf and adjust paths
+
+# POKY_BBLAYERS_CONF_VERSION is increased each time build/conf/bblayers.conf
+# changes incompatibly
+POKY_BBLAYERS_CONF_VERSION = "2"
+
+BBPATH = "${TOPDIR}"
+BBFILES ?= ""
+
+# Adjust these paths to match your workspace
+YOCTO_ROOT := "${@os.path.dirname(d.getVar('TOPDIR'))}"
+
+BBLAYERS ?= " \
+  ${YOCTO_ROOT}/poky/meta \
+  ${YOCTO_ROOT}/poky/meta-poky \
+  ${YOCTO_ROOT}/poky/meta-yocto-bsp \
+  ${YOCTO_ROOT}/meta-openembedded/meta-oe \
+  ${YOCTO_ROOT}/meta-soc-monitoring \
+"
+
+# Optional layers for specific hardware:
+# ${YOCTO_ROOT}/meta-raspberrypi \
+# ${YOCTO_ROOT}/meta-rockchip \
+# ${YOCTO_ROOT}/meta-freescale \
+# ${YOCTO_ROOT}/meta-ti \
+# ${YOCTO_ROOT}/meta-arm \

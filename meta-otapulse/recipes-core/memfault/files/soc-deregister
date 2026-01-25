@@ -1,0 +1,144 @@
+#!/bin/bash
+#
+# soc-deregister - Deregister this device from SoC Monitoring Server
+#
+# Usage: soc-deregister [--force]
+#
+# This script:
+# 1. Notifies the server that this device is being deregistered
+# 2. Removes local credentials
+# 3. Device will re-register on next boot if provisioning token exists
+#
+
+set -e
+
+# Configuration paths
+CONFIG_FILE="/etc/memfault/config.json"
+API_KEY_FILE="/var/lib/memfault/api_key"
+DEVICE_ID_FILE="/var/lib/memfault/device_id"
+PROVISIONING_TOKEN_FILE="/etc/memfault/provisioning_token"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    log_error "Please run as root (sudo soc-deregister)"
+    exit 1
+fi
+
+# Parse arguments
+FORCE=false
+if [ "$1" = "--force" ] || [ "$1" = "-f" ]; then
+    FORCE=true
+fi
+
+# Confirmation prompt
+if [ "$FORCE" = false ]; then
+    echo ""
+    echo "This will deregister this device from the SoC Monitoring Server."
+    echo ""
+    echo "What happens:"
+    echo "  - Device will be removed from the server"
+    echo "  - Local API credentials will be deleted"
+    echo "  - Device can re-register on next boot (if provisioning token exists)"
+    echo ""
+    read -p "Are you sure you want to continue? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Cancelled."
+        exit 0
+    fi
+fi
+
+# Stop the memfaultd service
+log_info "Stopping memfaultd service..."
+systemctl stop memfaultd 2>/dev/null || true
+
+# Read server URL from config
+SERVER_URL=""
+if [ -f "$CONFIG_FILE" ]; then
+    SERVER_URL=$(jq -r '.server.base_url // .server_url // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+fi
+
+# Read API key
+API_KEY=""
+if [ -f "$API_KEY_FILE" ]; then
+    API_KEY=$(cat "$API_KEY_FILE" 2>/dev/null || echo "")
+fi
+
+# Read device ID
+DEVICE_ID=""
+if [ -f "$DEVICE_ID_FILE" ]; then
+    DEVICE_ID=$(cat "$DEVICE_ID_FILE" 2>/dev/null || echo "")
+fi
+
+# Try to notify server (best effort)
+if [ -n "$SERVER_URL" ] && [ -n "$API_KEY" ] && [ -n "$DEVICE_ID" ]; then
+    log_info "Notifying server of deregistration..."
+    
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        "${SERVER_URL}/api/device/deregister" \
+        -H "X-API-Key: ${API_KEY}" \
+        -H "X-Device-ID: ${DEVICE_ID}" \
+        -H "Content-Type: application/json" \
+        --connect-timeout 10 \
+        --max-time 30 2>/dev/null || echo -e "\n000")
+    
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    
+    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
+        log_info "Server notified successfully"
+    elif [ "$HTTP_CODE" = "000" ]; then
+        log_warn "Could not reach server (device will be removed locally)"
+    else
+        log_warn "Server returned HTTP $HTTP_CODE (continuing with local cleanup)"
+    fi
+else
+    log_warn "Missing credentials, skipping server notification"
+fi
+
+# Remove local credentials
+log_info "Removing local credentials..."
+
+if [ -f "$API_KEY_FILE" ]; then
+    rm -f "$API_KEY_FILE"
+    log_info "  Removed: $API_KEY_FILE"
+fi
+
+if [ -f "$DEVICE_ID_FILE" ]; then
+    rm -f "$DEVICE_ID_FILE"
+    log_info "  Removed: $DEVICE_ID_FILE"
+fi
+
+# Check if provisioning token exists for re-registration
+echo ""
+if [ -f "$PROVISIONING_TOKEN_FILE" ]; then
+    log_info "Provisioning token found - device will re-register on next boot"
+else
+    log_warn "No provisioning token found - device will NOT auto-register"
+    log_warn "To re-register, add a provisioning token or API key to the config"
+fi
+
+echo ""
+log_info "Device deregistered successfully!"
+echo ""
+echo "Next steps:"
+echo "  - Reboot to re-register: sudo reboot"
+echo "  - Or start service manually: sudo systemctl start memfaultd"
+echo ""

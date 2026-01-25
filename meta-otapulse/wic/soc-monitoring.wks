@@ -1,0 +1,17 @@
+# SoC Monitoring WIC Kickstart File
+# Partition layout for A/B OTA updates
+
+# Boot partition (FAT32, contains kernel and DTB)
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 100M
+
+# Root filesystem A (primary)
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs-a --align 4096 --size 1G
+
+# Root filesystem B (backup for A/B updates)
+part --ondisk mmcblk0 --fstype=ext4 --label rootfs-b --align 4096 --size 1G
+
+# Data partition (persistent across updates)
+part /data --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size 500M
+
+# Bootloader
+bootloader --ptable gpt

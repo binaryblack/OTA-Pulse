@@ -1,0 +1,385 @@
+// Copyright 2026 SoC Monitoring
+//
+// Firmware Signature Verification Client
+// Integrates with OTA update flow to verify firmware signatures before installation
+
+package client
+
+import (
+	"encoding/base64"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"time"
+
+	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
+
+	"github.com/mendersoftware/mender/signature"
+)
+
+const (
+	// Default keys directory on device
+	DefaultKeysDirectory = "/etc/soc-monitoring/signing-keys/active"
+
+	// Maximum consecutive verification failures before lockdown
+	MaxVerificationFailures = 5
+
+	// Time window for failure counting (24 hours)
+	FailureWindowHours = 24
+)
+
+// SignatureVerifier handles firmware signature verification
+type SignatureVerifier struct {
+	keysDirectory         string
+	verificationEnabled   bool
+	rejectUnsigned        bool
+	alertOnFailure        bool
+	deleteOnFailure       bool
+	maxFailures           int
+	failureCount          int32
+	lastFailureTime       time.Time
+	lockdownActive        bool
+	verifier              *signature.Verifier
+	keys                  []*signature.PublicKey
+}
+
+// VerificationResult contains the result of signature verification
+type VerificationResult struct {
+	Valid          bool
+	Algorithm      string
+	KeyFingerprint string
+	Error          string
+	VerifiedAt     time.Time
+}
+
+// VerificationLog is sent to the server for audit purposes
+type VerificationLog struct {
+	DeviceID       string    `json:"device_id"`
+	FirmwareURL    string    `json:"firmware_url"`
+	Result         string    `json:"result"` // "success" or "failure"
+	Algorithm      string    `json:"algorithm,omitempty"`
+	KeyFingerprint string    `json:"key_fingerprint,omitempty"`
+	Error          string    `json:"error,omitempty"`
+	VerifiedAt     time.Time `json:"verified_at"`
+}
+
+// NewSignatureVerifier creates a new signature verifier instance
+func NewSignatureVerifier(keysDirectory string, enabled bool) (*SignatureVerifier, error) {
+	if keysDirectory == "" {
+		keysDirectory = DefaultKeysDirectory
+	}
+
+	sv := &SignatureVerifier{
+		keysDirectory:       keysDirectory,
+		verificationEnabled: enabled,
+		rejectUnsigned:      true,
+		alertOnFailure:      true,
+		deleteOnFailure:     true,
+		maxFailures:         MaxVerificationFailures,
+		failureCount:        0,
+		lockdownActive:      false,
+	}
+
+	if enabled {
+		if err := sv.loadKeys(); err != nil {
+			return nil, errors.Wrap(err, "failed to load signing keys")
+		}
+	}
+
+	return sv, nil
+}
+
+// loadKeys loads all public keys from the keys directory
+func (sv *SignatureVerifier) loadKeys() error {
+	log.Infof("Loading public keys from: %s", sv.keysDirectory)
+
+	// Check if directory exists
+	if _, err := os.Stat(sv.keysDirectory); os.IsNotExist(err) {
+		return errors.Errorf("keys directory does not exist: %s", sv.keysDirectory)
+	}
+
+	// Load all public keys from directory
+	keys, err := signature.LoadPublicKeysFromDirectory(sv.keysDirectory)
+	if err != nil {
+		return errors.Wrap(err, "failed to load public keys")
+	}
+
+	if len(keys) == 0 {
+		return errors.New("no public keys found in keys directory")
+	}
+
+	sv.keys = keys
+	sv.verifier = signature.NewVerifier(keys)
+
+	log.Infof("Loaded %d public key(s) successfully", len(keys))
+	for _, key := range keys {
+		log.Debugf("  - %s: %s", key.Algorithm, key.Fingerprint)
+	}
+
+	return nil
+}
+
+// VerifyFirmware verifies firmware signature before installation
+func (sv *SignatureVerifier) VerifyFirmware(
+	firmwareData []byte,
+	signatureB64 string,
+	firmwareURL string,
+) (*VerificationResult, error) {
+
+	if !sv.verificationEnabled {
+		log.Info("Signature verification is disabled - skipping")
+		return &VerificationResult{
+			Valid:      true,
+			VerifiedAt: time.Now(),
+		}, nil
+	}
+
+	if sv.lockdownActive {
+		return nil, errors.New("device is in security lockdown - updates disabled")
+	}
+
+	log.Infof("Verifying firmware signature (size: %d bytes)", len(firmwareData))
+
+	// Perform verification using the signature package
+	result := sv.verifier.VerifyFirmware(firmwareData, signatureB64)
+
+	verifyResult := &VerificationResult{
+		Valid:          result.Valid,
+		Algorithm:      result.Algorithm,
+		KeyFingerprint: result.KeyFingerprint,
+		Error:          result.Error,
+		VerifiedAt:     time.Now(),
+	}
+
+	if result.Valid {
+		// Reset failure counter on success
+		atomic.StoreInt32(&sv.failureCount, 0)
+		log.Infof("✓ Signature verified successfully: %s (%s)",
+			result.Algorithm, result.KeyFingerprint)
+	} else {
+		// Handle verification failure
+		sv.handleVerificationFailure(firmwareURL, result.Error)
+		log.Errorf("✗ Signature verification failed: %s", result.Error)
+	}
+
+	return verifyResult, nil
+}
+
+// handleVerificationFailure handles actions when signature verification fails
+func (sv *SignatureVerifier) handleVerificationFailure(firmwareURL string, reason string) {
+	// Increment failure counter
+	failures := atomic.AddInt32(&sv.failureCount, 1)
+	sv.lastFailureTime = time.Now()
+
+	log.Warnf("Verification failure count: %d/%d", failures, sv.maxFailures)
+
+	// Write to security log for forensics
+	sv.writeSecurityLog(firmwareURL, reason)
+
+	// Check if lockdown threshold exceeded
+	if int(failures) >= sv.maxFailures {
+		sv.enterSecurityLockdown()
+	}
+}
+
+// writeSecurityLog writes security event to local log
+func (sv *SignatureVerifier) writeSecurityLog(firmwareURL string, reason string) {
+	logEntry := fmt.Sprintf(
+		"[SECURITY] Signature verification failed: url=%s, reason=%s, failures=%d, time=%s\n",
+		firmwareURL,
+		reason,
+		atomic.LoadInt32(&sv.failureCount),
+		time.Now().Format(time.RFC3339),
+	)
+
+	// Write to dedicated security log file
+	logFile := "/var/log/soc-ota-security.log"
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Errorf("Failed to write security log: %v", err)
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(logEntry); err != nil {
+		log.Errorf("Failed to write security log entry: %v", err)
+	}
+}
+
+// enterSecurityLockdown activates security lockdown mode
+func (sv *SignatureVerifier) enterSecurityLockdown() {
+	sv.lockdownActive = true
+
+	log.Errorf("⚠️  SECURITY LOCKDOWN ACTIVATED - Multiple signature verification failures detected")
+	log.Errorf("    Automatic updates are now DISABLED")
+	log.Errorf("    Manual intervention required to restore service")
+	log.Errorf("    Failures: %d/%d", atomic.LoadInt32(&sv.failureCount), sv.maxFailures)
+
+	// Write lockdown event to security log
+	sv.writeSecurityLog("LOCKDOWN_ACTIVATED", fmt.Sprintf(
+		"Threshold exceeded: %d failures", sv.maxFailures))
+}
+
+// ResetFailureCount resets the verification failure counter
+func (sv *SignatureVerifier) ResetFailureCount() {
+	atomic.StoreInt32(&sv.failureCount, 0)
+	sv.lockdownActive = false
+	log.Info("Verification failure counter reset")
+}
+
+// GetFailureCount returns the current failure count
+func (sv *SignatureVerifier) GetFailureCount() int {
+	return int(atomic.LoadInt32(&sv.failureCount))
+}
+
+// IsLockdownActive returns whether security lockdown is active
+func (sv *SignatureVerifier) IsLockdownActive() bool {
+	return sv.lockdownActive
+}
+
+// DownloadAndVerifyFirmware downloads firmware and signature, then verifies
+func DownloadAndVerifyFirmware(
+	api ApiRequester,
+	firmwareURL string,
+	verifier *SignatureVerifier,
+) ([]byte, *VerificationResult, error) {
+
+	// 1. Download firmware
+	log.Infof("Downloading firmware from: %s", firmwareURL)
+	req, err := http.NewRequest("GET", firmwareURL, nil)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to create firmware download request")
+	}
+
+	resp, err := api.Do(req)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "firmware download failed")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, errors.Errorf("firmware download failed with status: %d", resp.StatusCode)
+	}
+
+	firmwareData, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to read firmware data")
+	}
+
+	log.Infof("Downloaded firmware: %d bytes", len(firmwareData))
+
+	// 2. Download signature
+	signatureURL := firmwareURL + ".sig"
+	log.Infof("Downloading signature from: %s", signatureURL)
+
+	sigReq, err := http.NewRequest("GET", signatureURL, nil)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to create signature download request")
+	}
+
+	sigResp, err := api.Do(sigReq)
+	if err != nil {
+		if verifier.rejectUnsigned {
+			return nil, nil, errors.Wrap(err, "signature download failed - rejecting unsigned firmware")
+		}
+		log.Warn("Signature download failed but rejectUnsigned=false, allowing installation")
+		return firmwareData, &VerificationResult{Valid: true, VerifiedAt: time.Now()}, nil
+	}
+	defer sigResp.Body.Close()
+
+	if sigResp.StatusCode != http.StatusOK {
+		if verifier.rejectUnsigned {
+			return nil, nil, errors.Errorf("signature download failed with status: %d", sigResp.StatusCode)
+		}
+		log.Warnf("Signature download failed (status %d) but rejectUnsigned=false", sigResp.StatusCode)
+		return firmwareData, &VerificationResult{Valid: true, VerifiedAt: time.Now()}, nil
+	}
+
+	signatureB64, err := ioutil.ReadAll(sigResp.Body)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to read signature data")
+	}
+
+	log.Infof("Downloaded signature: %d bytes", len(signatureB64))
+
+	// 3. Verify signature
+	result, err := verifier.VerifyFirmware(firmwareData, string(signatureB64), firmwareURL)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "signature verification failed")
+	}
+
+	if !result.Valid {
+		// Verification failed - do not return firmware data
+		return nil, result, errors.Errorf("signature verification failed: %s", result.Error)
+	}
+
+	// Verification succeeded
+	return firmwareData, result, nil
+}
+
+// SaveVerifiedFirmware saves verified firmware to a temporary file
+func SaveVerifiedFirmware(firmwareData []byte) (string, error) {
+	tmpDir := "/tmp/soc-ota-verified"
+	if err := os.MkdirAll(tmpDir, 0700); err != nil {
+		return "", errors.Wrap(err, "failed to create temp directory")
+	}
+
+	tmpFile, err := ioutil.TempFile(tmpDir, "firmware-*.bin")
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create temp file")
+	}
+	defer tmpFile.Close()
+
+	if _, err := tmpFile.Write(firmwareData); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", errors.Wrap(err, "failed to write firmware to temp file")
+	}
+
+	log.Infof("Verified firmware saved to: %s", tmpFile.Name())
+	return tmpFile.Name(), nil
+}
+
+// CleanupVerifiedFirmware removes temporary verified firmware file
+func CleanupVerifiedFirmware(path string) error {
+	if path == "" {
+		return nil
+	}
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "failed to cleanup verified firmware")
+	}
+
+	// Also cleanup temp directory if empty
+	tmpDir := filepath.Dir(path)
+	_ = os.Remove(tmpDir) // Ignore errors - dir may not be empty
+
+	return nil
+}
+
+// SendVerificationLog sends verification result to server for auditing
+func SendVerificationLog(
+	api ApiRequester,
+	serverURL string,
+	logEntry VerificationLog,
+) error {
+	// This would POST to /api/signing/verify-log endpoint
+	// Implementation depends on server API structure
+
+	log.Debugf("Sending verification log to server: %+v", logEntry)
+
+	// TODO: Implement actual API call when server endpoint is ready
+	// For now, just log locally
+	log.Infof("Verification log: device=%s, url=%s, result=%s, algorithm=%s",
+		logEntry.DeviceID,
+		logEntry.FirmwareURL,
+		logEntry.Result,
+		logEntry.Algorithm,
+	)
+
+	return nil
+}

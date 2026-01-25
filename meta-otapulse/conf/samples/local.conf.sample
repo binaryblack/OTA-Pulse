@@ -1,0 +1,108 @@
+# Sample local.conf for SoC Monitoring builds
+# Copy this to your build/conf/local.conf and customize
+
+# Target machine configuration
+# Choose one of: qemuarm64, qemuarm, raspberrypi4-64, etc.
+MACHINE ?= "qemuarm64"
+
+# Distribution
+DISTRO ?= "soc-monitoring"
+
+# Package format
+PACKAGE_CLASSES ?= "package_ipk"
+
+# Build optimization
+BB_NUMBER_THREADS ?= "${@oe.utils.cpu_count()}"
+PARALLEL_MAKE ?= "-j ${@oe.utils.cpu_count()}"
+
+# Download and cache directories (adjust paths)
+DL_DIR ?= "${TOPDIR}/../downloads"
+SSTATE_DIR ?= "${TOPDIR}/../sstate-cache"
+TMPDIR = "${TOPDIR}/tmp"
+
+# License acceptance
+LICENSE_FLAGS_ACCEPTED += "commercial"
+
+# Extra image features for development
+EXTRA_IMAGE_FEATURES += "debug-tweaks ssh-server-openssh"
+
+# SDK configuration
+SDKMACHINE ?= "x86_64"
+
+# Disk space monitoring
+BB_DISKMON_DIRS ??= "\
+    STOPTASKS,${TMPDIR},1G,100K \
+    STOPTASKS,${DL_DIR},1G,100K \
+    STOPTASKS,${SSTATE_DIR},1G,100K \
+    STOPTASKS,/tmp,100M,100K \
+    HALT,${TMPDIR},100M,1K \
+    HALT,${DL_DIR},100M,1K \
+    HALT,${SSTATE_DIR},100M,1K \
+    HALT,/tmp,10M,1K"
+
+# QEMU configuration (for testing)
+QEMU_USE_KVM = "1"
+QB_MEM = "-m 1024"
+
+# Image types
+IMAGE_FSTYPES = "wic wic.gz ext4"
+
+# SoC Monitoring specific configuration
+# Uncomment and set your API endpoint
+# SOC_MONITORING_API_URL = "https://your-api-server.com"
+# SOC_MONITORING_API_KEY = "your-api-key"
+
+# Firmware version (auto-incremented or set manually)
+DISTRO_VERSION = "1.0.0"
+
+# Enable/disable debug build (affects symbol generation)
+DEBUG_BUILD = "0"
+
+# =============================================================
+# OTA Signature Configuration
+# =============================================================
+
+# Enable/disable signature verification on device
+# When enabled, the device will only accept signed firmware updates
+# Options: "1" (enabled) or "0" (disabled)
+SOC_OTA_SIGNATURE_VERIFICATION = "1"
+
+# Private key for signing Mender artifacts during build
+# This key will be used to sign the .mender artifact automatically
+# Supports RSA (recommended: RSA-4096) and ECDSA (ECDSA-P384) keys
+# Leave empty to disable automatic signing
+SOC_OTA_SIGNING_KEY = "/home/krishna/radxa-cm5/testkeys/Test_private.pem"
+
+# Optional: Signing certificate (required for some key types)
+# If your private key requires a certificate chain, specify it here
+# Example: SOC_OTA_SIGNING_CERT = "/path/to/certificate.pem"
+SOC_OTA_SIGNING_CERT ?= ""
+
+# Public key(s) for signature verification on device
+# These keys will be deployed to /etc/soc-monitoring/signing-keys/active/
+# Multiple keys can be specified (space-separated) for key rotation
+# Leave empty to use the default production-rsa-public.pem from the layer
+# Example: SOC_OTA_VERIFICATION_KEYS = "/path/to/custom-public-key.pem"
+SOC_OTA_VERIFICATION_KEYS ?= ""
+
+# Directory where signing keys are stored on the device
+# Default: /etc/soc-monitoring/signing-keys
+SOC_OTA_SIGNING_KEYS_DIR ?= "/etc/soc-monitoring/signing-keys"
+
+# =============================================================
+# Mender Artifact Configuration
+# =============================================================
+
+# Device type identifier for Mender artifacts
+# This must match the device_type file on the target device
+MENDER_DEVICE_TYPE ?= "${MACHINE}"
+
+# Compression algorithm for artifacts: "gzip", "lzma", "none"
+MENDER_ARTIFACT_COMPRESSION ?= "gzip"
+
+# =============================================================
+
+# For production builds, uncomment:
+# EXTRA_IMAGE_FEATURES:remove = "debug-tweaks"
+# IMAGE_FEATURES:remove = "ssh-server-openssh"
+# IMAGE_INSTALL:remove = "strace gdb"

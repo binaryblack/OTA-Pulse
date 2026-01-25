@@ -1,0 +1,17 @@
+[Unit]
+Description=OTAPulse OTA Update Service
+Documentation=https://otapulse.io/docs
+Wants=network-online.target
+After=systemd-resolved.service network-online.target data.mount
+Conflicts=mender.service mender-client.service
+
+[Service]
+Type=idle
+User=root
+Group=root
+ExecStart=/usr/bin/otapulse --no-syslog daemon
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+# /etc/fstab: static file system information.
+#
+# SoC Monitoring Platform fstab
+
+/dev/root            /                    auto       defaults              1  1
+proc                 /proc                proc       defaults              0  0
+devpts               /dev/pts             devpts     mode=0620,ptmxmode=0666,gid=5      0  0
+tmpfs                /run                 tmpfs      mode=0755,nodev,nosuid,strictatime 0  0
+tmpfs                /var/volatile        tmpfs      defaults              0  0
+
+# Data partition for OTA downloads and persistent storage
+# nofail ensures boot continues even if partition is missing
+/dev/mmcblk0p5       /data                ext4       defaults,nofail       0  2

@@ -1,0 +1,7 @@
+{
+  "InventoryPollIntervalSeconds": 28800,
+  "RetryPollIntervalSeconds": 300,
+  "ServerURL": "https://ota.example.com/",
+  "TenantToken": "Paste your OTAPulse tenant token here",
+  "UpdatePollIntervalSeconds": 1800
+}

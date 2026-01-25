@@ -1,0 +1,48 @@
+# Build artifacts
+build/
+tmp/
+*.o
+*.a
+*.so
+
+# Go
+vendor/
+*.exe
+*.exe~
+*.test
+*.out
+coverage.*
+
+# Yocto/BitBake
+sstate-cache/
+downloads/
+cache/
+tmp*/
+*.pyc
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.*
+
+# Credentials (never commit)
+*.pem
+*.key
+!*.pub
+signing-keys/files/*.pem
+!signing-keys/files/*-public.pem

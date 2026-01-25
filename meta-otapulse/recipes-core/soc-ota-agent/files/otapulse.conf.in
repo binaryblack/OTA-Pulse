@@ -1,0 +1,24 @@
+{
+    "ServerURL": "@SERVER_URL@",
+
+    "RootfsPartA": "/dev/disk/by-partlabel/rootfs_a",
+    "RootfsPartB": "/dev/disk/by-partlabel/rootfs_b",
+
+    "UseFileBasedBootEnv": true,
+
+    "UpdatePollIntervalSeconds": 60,
+    "InventoryPollIntervalSeconds": 300,
+    "RetryPollIntervalSeconds": 30,
+    "RetryPollCount": 10,
+
+    "StateScriptTimeoutSeconds": 600,
+    "StateScriptRetryTimeoutSeconds": 180,
+    "StateScriptRetryIntervalSeconds": 60,
+    "ModuleTimeoutSeconds": 14400,
+
+    "SkipVerify": @SKIP_TLS_VERIFY@,
+
+    "UseSoCMonitoring": true,
+
+    "UpdateLogPath": "/var/lib/otapulse/update.log"@ARTIFACT_VERIFY_KEYS_LINE@
+}

@@ -1,0 +1,55 @@
+// Copyright 2026 SoC Monitoring
+//
+// Configuration for firmware signature verification
+
+package conf
+
+// SignatureConfig holds configuration for signature verification
+type SignatureConfig struct {
+	// Enable/disable signature verification
+	VerifySignatures bool `json:"verify_signatures"`
+
+	// Reject firmware without valid signature
+	RejectUnsigned bool `json:"reject_unsigned"`
+
+	// Directory containing public keys
+	KeysDirectory string `json:"keys_directory"`
+
+	// Maximum consecutive verification failures before lockdown
+	MaxVerificationFailures int `json:"max_verification_failures"`
+
+	// Send alert to server on verification failure
+	AlertOnFailure bool `json:"alert_on_failure"`
+
+	// Delete firmware file on verification failure
+	DeleteOnFailure bool `json:"delete_on_failure"`
+
+	// Disable auto-update when in lockdown
+	LockdownDisableAutoUpdate bool `json:"lockdown_disable_auto_update"`
+}
+
+// DefaultSignatureConfig returns default signature configuration
+func DefaultSignatureConfig() SignatureConfig {
+	return SignatureConfig{
+		VerifySignatures:          true,
+		RejectUnsigned:            true,
+		KeysDirectory:             "/etc/soc-monitoring/signing-keys/active",
+		MaxVerificationFailures:   5,
+		AlertOnFailure:            true,
+		DeleteOnFailure:           true,
+		LockdownDisableAutoUpdate: true,
+	}
+}
+
+// Validate validates the signature configuration
+func (sc *SignatureConfig) Validate() error {
+	if sc.VerifySignatures && sc.KeysDirectory == "" {
+		return ErrMissingConfig("signature verification enabled but keys_directory not configured")
+	}
+
+	if sc.MaxVerificationFailures < 1 {
+		sc.MaxVerificationFailures = 5
+	}
+
+	return nil
+}

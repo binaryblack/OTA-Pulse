@@ -1,0 +1,43 @@
+# Custom Metrics Configuration for SoC Monitoring
+#
+# This file allows you to define custom metrics that will be collected
+# and sent to the server along with the standard system metrics.
+#
+# Format:
+#   metric_name=command_to_execute [unit]
+#
+# The command should output a single numeric value.
+# The unit is optional and specified in square brackets.
+#
+# Examples:
+#   gpu_temp=cat /sys/class/hwmon/hwmon1/temp1_input | awk '{print $1/1000}' [celsius]
+#   battery_level=cat /sys/class/power_supply/battery/capacity [percent]
+#   wifi_signal=iw dev wlan0 link | grep signal | awk '{print $2}' [dBm]
+#
+# Lines starting with # are comments and will be ignored.
+# Empty lines are also ignored.
+
+# GPU Temperature (if available on your device)
+# gpu_temp=cat /sys/class/hwmon/hwmon1/temp1_input | awk '{print $1/1000}' [celsius]
+
+# Battery level (for portable devices)
+# battery_level=cat /sys/class/power_supply/battery/capacity [percent]
+
+# WiFi signal strength
+# wifi_signal=iw dev wlan0 link | grep signal | awk '{print $2}' [dBm]
+
+# Process count
+# process_count=ps aux | wc -l [count]
+
+# Load average (1 minute)
+# load_avg_1m=awk '{print $1}' /proc/loadavg [load]
+
+# Swap usage percentage
+# swap_usage=free | awk '/Swap/ {if($2>0) printf "%.1f", $3/$2*100; else print "0"}' [percent]
+
+# Number of network connections
+# network_connections=ss -t | wc -l [count]
+
+# Custom application metrics (example: reading from a file your app writes)
+# app_queue_size=cat /var/run/myapp/queue_size [count]
+# app_requests_per_sec=cat /var/run/myapp/rps [requests/s]

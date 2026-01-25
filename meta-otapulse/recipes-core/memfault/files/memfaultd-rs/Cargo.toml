@@ -1,0 +1,90 @@
+[package]
+name = "memfaultd"
+version = "1.0.0"
+edition = "2021"
+authors = ["SoC Monitoring Team"]
+description = "Embedded systems monitoring daemon for SoC Monitoring platform"
+license = "Apache-2.0"
+repository = "https://github.com/example/soc-monitoring"
+readme = "README.md"
+
+[[bin]]
+name = "memfaultd"
+path = "src/main.rs"
+
+[[bin]]
+name = "memfault-watchdog"
+path = "src/bin/watchdog.rs"
+
+[[bin]]
+name = "memfault-core-handler"
+path = "src/bin/core_handler.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full", "rt-multi-thread", "sync", "time", "fs", "io-util", "net", "signal", "process"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# System interaction
+nix = { version = "0.27", features = ["fs", "signal", "socket", "user", "hostname"] }
+libc = "0.2"
+
+# Compression
+flate2 = "1.0"
+
+# Cryptography for OTA verification
+ring = "0.17"
+base64 = "0.21"
+
+# Unix socket
+tokio-stream = { version = "0.1", features = ["net"] }
+
+# Command line parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Datetime
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1.6", features = ["v4"] }
+
+# File watching
+notify = "6.1"
+
+# Hostname
+hostname = "0.3"
+
+# Signal handling for watchdog
+ctrlc = "3.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = "0.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-embedded]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

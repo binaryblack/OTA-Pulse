@@ -1,0 +1,40 @@
+[Unit]
+Description=OTAPulse - SoC OTA Agent for Firmware Updates
+Documentation=https://github.com/binaryblack/OTA-Pulse
+After=network-online.target systemd-resolved.service
+Wants=network-online.target
+Requires=data.mount
+Conflicts=mender.service mender-client.service
+
+[Service]
+Type=simple
+User=root
+# Check for config file (new OTAPulse path with fallback to legacy Mender path)
+ExecStartPre=/bin/sh -c 'test -f /etc/otapulse/otapulse.conf || test -f /etc/mender/mender.conf'
+ExecStart=/usr/bin/soc-ota-agent daemon
+Restart=on-failure
+RestartSec=30
+# Disable watchdog - OTA updates for 6GB images can take 30+ minutes
+# The agent has its own timeout handling for network operations
+WatchdogSec=0
+
+# Hardening - use 'full' instead of 'strict' to allow /data writes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=no
+
+# Allow write access to required paths
+# Note: Legacy /etc/mender and /var/lib/mender paths removed to prevent
+# mount namespacing failures on clean OTAPulse installations.
+# Backward compatibility is handled by the agent code's fallback logic.
+ReadWritePaths=/var/lib/otapulse
+ReadWritePaths=/etc/otapulse
+ReadWritePaths=/data
+ReadWritePaths=/data/ota
+
+# Environment
+Environment="PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+
+[Install]
+WantedBy=multi-user.target

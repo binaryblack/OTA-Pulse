@@ -1,0 +1,14 @@
+[Unit]
+Description=Data Partition Mount for OTA Storage
+Documentation=https://github.com/example/soc-monitoring
+Before=memfaultd.service
+ConditionPathExists=/dev/mmcblk0p5
+
+[Mount]
+What=/dev/mmcblk0p5
+Where=/data
+Type=ext4
+Options=defaults
+
+[Install]
+WantedBy=local-fs.target
