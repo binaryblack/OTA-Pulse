@@ -40,9 +40,13 @@ logs/
 .env
 .env.*
 
-# Credentials (never commit)
-*.pem
+# Credentials (never commit private keys)
 *.key
 !*.pub
-signing-keys/files/*.pem
-!signing-keys/files/*-public.pem
+
+# PEM files - block private keys, allow public keys
+*-private.pem
+*-private-*.pem
+
+# Allow example public keys for OTA-Pulse (these are placeholders, not real secrets)
+!meta-otapulse/recipes-core/signing-keys/files/example-*.pem
