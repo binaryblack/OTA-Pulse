@@ -26,46 +26,75 @@ This layer depends on:
 - Nanbield
 - Scarthgap
 
-## Quick Start
+## Quick Start (3 Steps)
 
-### 1. Add the Layer
-
-```bash
-cd /path/to/your/yocto/build
-bitbake-layers add-layer /path/to/meta-otapulse
-```
-
-### 2. Configure local.conf
+### Step 1: Add the Layer
 
 ```bash
-# Set your target machine
-MACHINE = "your-machine"
+cd /path/to/yocto/sources
+git clone https://github.com/binaryblack/OTA-Pulse.git ota-pulse
 
-# Enable systemd (required)
-DISTRO_FEATURES:append = " systemd usrmerge"
-INIT_MANAGER = "systemd"
-
-# OTAPulse Configuration
-OTAPULSE_SERVER_URL = "https://your-otapulse-server.com"
-OTAPULSE_TENANT_TOKEN = "your-tenant-token"
-OTAPULSE_DEVICE_TYPE = "${MACHINE}"
-
-# Optional: Customize poll intervals (seconds)
-OTAPULSE_UPDATE_POLL_INTERVAL = "1800"
-OTAPULSE_INVENTORY_POLL_INTERVAL = "28800"
+# Add to bblayers.conf
+bitbake-layers add-layer /path/to/ota-pulse/meta-otapulse
 ```
 
-### 3. Build the Image
+### Step 2: Add to Your Image Recipe
+
+**For standard images (<1GB rootfs):**
+```bitbake
+# In your image recipe (e.g., my-image.bb)
+inherit otapulse
+```
+
+**For large images (Qt, multimedia >1GB rootfs):**
+```bitbake
+# In your image recipe
+inherit otapulse-large
+```
+
+### Step 3: Configure OTA Server
+
+Add to `local.conf`:
+```bitbake
+OTA_SERVER_URL = "https://your-ota-server.com"
+```
+
+**That's it!** Build your image and `.mender` artifacts will be generated automatically.
 
 ```bash
-bitbake soc-monitoring-image
+bitbake your-image
+# Output: tmp/deploy/images/<MACHINE>/your-image-<MACHINE>.mender
 ```
 
-### 4. Flash and Run
+---
+
+## What `inherit otapulse` Does Automatically
+
+- Adds `soc-ota-agent` to the image
+- Enables mender artifact generation (`.mender` files)
+- Adds ext4 to IMAGE_FSTYPES (required for mender)
+- Includes partition tools (gptfdisk)
+- Disables SPDX (externalsrc compatibility)
+
+## What `inherit otapulse-large` Adds
+
+- Everything from `otapulse`
+- Sets 6GB rootfs partitions (A/B = 12GB)
+- Uses large WKS template (requires 16GB+ storage)
+
+---
+
+## Alternative: Manual Configuration
+
+If you prefer not to use the integration classes, see [Integration into Existing Yocto Builds](#integration-into-existing-yocto-builds) below.
+
+---
+
+## Flash and Run
 
 ```bash
 # Flash the WIC image to your device
-sudo dd if=soc-monitoring-image-<MACHINE>.wic of=/dev/sdX bs=4M status=progress
+sudo dd if=your-image-<MACHINE>.wic of=/dev/sdX bs=4M status=progress
 ```
 
 ## Integration into Existing Yocto Builds

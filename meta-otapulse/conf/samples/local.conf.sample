@@ -1,12 +1,27 @@
-# Sample local.conf for SoC Monitoring builds
-# Copy this to your build/conf/local.conf and customize
+# Sample local.conf for OTAPulse integration
+# Copy relevant sections to your build/conf/local.conf
+#
+# MINIMAL CONFIGURATION (just 1 line needed!):
+#   OTA_SERVER_URL = "https://your-ota-server.com"
+#
+# Then in your image recipe, add:
+#   inherit otapulse        # For standard images
+#   inherit otapulse-large  # For Qt/multimedia images (>1GB)
+
+# =============================================================
+# REQUIRED: OTA Server Configuration
+# =============================================================
+OTA_SERVER_URL = "https://ota.example.com"
+
+# =============================================================
+# OPTIONAL: Below settings have sensible defaults
+# =============================================================
 
 # Target machine configuration
-# Choose one of: qemuarm64, qemuarm, raspberrypi4-64, etc.
 MACHINE ?= "qemuarm64"
 
-# Distribution
-DISTRO ?= "soc-monitoring"
+# Distribution (use your BSP's distro, e.g., fsl-imx-xwayland for NXP)
+# DISTRO ?= "soc-monitoring"
 
 # Package format
 PACKAGE_CLASSES ?= "package_ipk"
