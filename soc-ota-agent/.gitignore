@@ -30,3 +30,8 @@ mender
 
 # Build cache
 .cache/
+ 
+# Local Yocto build artifacts and produced binary
+oe-logs
+oe-workdir
+otapulse
