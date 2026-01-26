@@ -1,0 +1,16 @@
+# OTAPulse Dynamic A/B WKS for Raspberry Pi
+# Minimal image - A/B partitions created on first boot
+#
+# Usage:
+#   WKS_FILE = "otapulse-dynamic-ab-rpi.wks"
+#   IMAGE_INSTALL:append = " otapulse-firstboot"
+
+# Raspberry Pi boot partition (contains firmware, kernel, DTBs)
+# RPi firmware must be in boot partition, not raw on disk
+part /boot --source bootimg-partition --ondisk mmcblk --fstype=vfat --label boot --part-name boot --active --align 4096 --size 100
+
+# Root filesystem A - sized to content, GPT label for OTA agent
+part / --source rootfs --ondisk mmcblk --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
+
+# GPT partition table
+bootloader --ptable gpt

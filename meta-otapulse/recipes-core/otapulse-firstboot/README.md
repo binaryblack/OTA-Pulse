@@ -120,3 +120,41 @@ WKS_FILE = "your-static-ab.wks"  # With fixed partition sizes
 ```
 
 Static mode does not include `otapulse-firstboot`.
+
+## Cross-Platform Support
+
+### Included WKS Templates
+
+| Template | Platform | Bootloader |
+|----------|----------|------------|
+| `otapulse-dynamic-ab-imx.wks` | NXP i.MX8 | imx-boot @ 32KB |
+| `otapulse-dynamic-ab-rpi.wks` | Raspberry Pi | Boot partition |
+| `otapulse-dynamic-ab-generic.wks` | Template | Customize |
+
+### Adding Support for New Platforms
+
+1. Copy `otapulse-dynamic-ab-generic.wks` to your layer
+2. Add bootloader section for your platform:
+
+```bash
+# i.MX8:
+part u-boot --source rawcopy --sourceparams="file=imx-boot" --no-table --align 32
+
+# STM32MP:
+part fsbl --source rawcopy --sourceparams="file=tf-a.stm32" --no-table --align 17
+
+# Rockchip:
+part idbloader --source rawcopy --sourceparams="file=idbloader.img" --no-table --align 64
+```
+
+3. Set in local.conf:
+```bitbake
+WKS_FILE = "your-platform-ab.wks"
+```
+
+### Requirements for All Platforms
+
+- GPT partition table (for partition labels)
+- `gptfdisk` package (sgdisk command)
+- `e2fsprogs` package (mkfs.ext4)
+- Sufficient free space after rootfs_a
