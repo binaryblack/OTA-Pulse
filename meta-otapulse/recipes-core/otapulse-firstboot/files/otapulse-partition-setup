@@ -67,16 +67,23 @@ fi
 log "Current partition layout:"
 sgdisk -p "$BASE_DEV"
 
-# Check if rootfs_b already exists (partition label)
+# Check if rootfs_b already exists and is formatted
 if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then
-    log "rootfs_b partition already exists"
-    touch "$MARKER_FILE"
-    exit 0
+    ROOTFS_B_FSTYPE=$(lsblk -no FSTYPE /dev/disk/by-partlabel/rootfs_b 2>/dev/null || true)
+    if [ -n "$ROOTFS_B_FSTYPE" ]; then
+        log "rootfs_b partition already exists and formatted ($ROOTFS_B_FSTYPE)"
+        mkdir -p "$(dirname $MARKER_FILE)"
+        touch "$MARKER_FILE"
+        exit 0
+    else
+        log "rootfs_b partition exists but not formatted, will format it"
+    fi
 fi
 
 # Get rootfs_a size (in sectors)
 ROOTFS_A_SIZE=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" | grep "Partition size" | awk '{print $3}')
-SECTOR_SIZE=$(sgdisk -p "$BASE_DEV" | grep "Sector size" | awk '{print $4}')
+# Get sector size - sgdisk shows "512/512" (logical/physical), we need just the logical size
+SECTOR_SIZE=$(blockdev --getss "$BASE_DEV")
 
 log "rootfs_a size: $ROOTFS_A_SIZE sectors ($SECTOR_SIZE bytes/sector)"
 
@@ -118,26 +125,41 @@ ROOTFS_B_END=$((ROOTFS_B_START + ROOTFS_A_SIZE - 1))
 DATA_START=$((ROOTFS_B_END + 1))
 DATA_END=$LAST_SECTOR
 
-log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
-log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
+# Check if partitions already exist (from previous interrupted run)
+PARTITIONS_EXIST=0
+if [ -e "/dev/disk/by-partlabel/rootfs_b" ] && [ -e "/dev/disk/by-partlabel/data" ]; then
+    log "Partitions already exist, skipping creation"
+    PARTITIONS_EXIST=1
+fi
 
-# Create partitions
-log "Creating rootfs_b partition..."
-sgdisk -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
-       -c "$ROOTFS_B_PART_NUM:rootfs_b" \
-       -t "$ROOTFS_B_PART_NUM:8300" \
-       "$BASE_DEV"
+if [ "$PARTITIONS_EXIST" -eq 0 ]; then
+    log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
+    log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
 
-log "Creating data partition..."
-sgdisk -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
-       -c "$DATA_PART_NUM:data" \
-       -t "$DATA_PART_NUM:8300" \
-       "$BASE_DEV"
+    # Create partitions
+    log "Creating rootfs_b partition..."
+    sgdisk -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
+           -c "$ROOTFS_B_PART_NUM:rootfs_b" \
+           -t "$ROOTFS_B_PART_NUM:8300" \
+           "$BASE_DEV"
 
-# Inform kernel of partition changes
-log "Updating kernel partition table..."
-partprobe "$BASE_DEV" || true
-sleep 2
+    log "Creating data partition..."
+    sgdisk -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
+           -c "$DATA_PART_NUM:data" \
+           -t "$DATA_PART_NUM:8300" \
+           "$BASE_DEV"
+
+    # Inform kernel of partition changes
+    log "Updating kernel partition table..."
+    # Use partx (util-linux) as partprobe may not be available
+    if command -v partprobe &> /dev/null; then
+        partprobe "$BASE_DEV" || true
+    else
+        # partx -u updates the kernel's partition table
+        partx -u "$BASE_DEV" || true
+    fi
+    sleep 2
+fi
 
 # Wait for partition devices to appear
 for i in $(seq 1 10); do
@@ -157,12 +179,22 @@ else
     DATA_DEV="${BASE_DEV}${DATA_PART_NUM}"
 fi
 
-# Format partitions
-log "Formatting rootfs_b ($ROOTFS_B_DEV)..."
-mkfs.ext4 -F -L "rootfs_b" "$ROOTFS_B_DEV"
+# Format partitions (only if not already formatted)
+ROOTFS_B_FSTYPE=$(lsblk -no FSTYPE "$ROOTFS_B_DEV" 2>/dev/null || true)
+if [ -z "$ROOTFS_B_FSTYPE" ]; then
+    log "Formatting rootfs_b ($ROOTFS_B_DEV)..."
+    mkfs.ext4 -F -L "rootfs_b" "$ROOTFS_B_DEV"
+else
+    log "rootfs_b already formatted ($ROOTFS_B_FSTYPE), skipping"
+fi
 
-log "Formatting data ($DATA_DEV)..."
-mkfs.ext4 -F -L "data" "$DATA_DEV"
+DATA_FSTYPE=$(lsblk -no FSTYPE "$DATA_DEV" 2>/dev/null || true)
+if [ -z "$DATA_FSTYPE" ]; then
+    log "Formatting data ($DATA_DEV)..."
+    mkfs.ext4 -F -L "data" "$DATA_DEV"
+else
+    log "data already formatted ($DATA_FSTYPE), skipping"
+fi
 
 # Update rootfs_a partition label if needed
 ROOTFS_A_DEV="$ROOT_PART"
@@ -181,7 +213,11 @@ if [ "$BOOT_LABEL" != "boot" ]; then
 fi
 
 # Final partition table update
-partprobe "$BASE_DEV" || true
+if command -v partprobe &> /dev/null; then
+    partprobe "$BASE_DEV" || true
+else
+    partx -u "$BASE_DEV" || true
+fi
 sleep 2
 
 # Verify partitions were created
