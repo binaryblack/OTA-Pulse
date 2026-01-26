@@ -1,0 +1,19 @@
+[Unit]
+Description=OTAPulse First-Boot Partition Setup
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Run early in boot, before OTA agent
+DefaultDependencies=no
+After=local-fs.target
+Before=soc-ota-agent.service memfaultd.service
+ConditionPathExists=!/var/lib/otapulse/.partitions-created
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/otapulse-partition-setup
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

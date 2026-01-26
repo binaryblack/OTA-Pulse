@@ -1,0 +1,42 @@
+# OTAPulse Dynamic A/B WKS Template
+# Minimal image - A/B partitions created on first boot
+#
+# This WKS creates a minimal image with only boot + rootfs.
+# The otapulse-firstboot package creates rootfs_b and data
+# partitions dynamically on first boot.
+#
+# Benefits:
+# - Small image size (~3-4GB vs 10-17GB for pre-allocated A/B)
+# - Fast flashing with any tool (Rufus, RPi Imager, dd, etc.)
+# - Works on any storage size (16GB, 32GB, 64GB)
+# - Platform agnostic
+#
+# Partition Layout (initial):
+#  - ---------- ---------- --------------
+# | | imx-boot |   boot   |   rootfs_a   | [free space]
+#  - ---------- ---------- --------------
+#
+# After first boot:
+#  - ---------- ---------- -------------- -------------- ----------
+# | | imx-boot |   boot   |   rootfs_a   |   rootfs_b   |   data   |
+#  - ---------- ---------- -------------- -------------- ----------
+#
+# Usage:
+#   WKS_FILE = "otapulse-dynamic-ab.wks.in"
+#   IMAGE_INSTALL:append = " otapulse-firstboot"
+
+# Bootloader (imx-boot for i.MX, u-boot for others)
+# Written at 32KB offset, no partition table entry
+part u-boot --source rawcopy --sourceparams="file=${IMX_BOOT_BINARY}" --ondisk mmcblk --no-table --align ${IMX_BOOT_SEEK}
+
+# Boot partition (FAT32, contains kernel and DTB)
+part /boot --source bootimg-partition --ondisk mmcblk --fstype=vfat --label boot --part-name boot --active --align 8192 --size 64
+
+# Root filesystem A (primary) - sized to content
+# GPT partition label set for OTA agent to identify
+part / --source rootfs --ondisk mmcblk --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
+
+# Use GPT partition table (required for partition labels)
+bootloader --ptable gpt
+
+# Note: rootfs_b and data partitions are created by otapulse-firstboot service
