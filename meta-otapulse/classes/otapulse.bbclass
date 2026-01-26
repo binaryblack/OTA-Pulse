@@ -53,6 +53,18 @@ IMAGE_INSTALL:append = " gptfdisk"
 # Add first-boot partition setup for dynamic mode
 IMAGE_INSTALL:append = " ${@bb.utils.contains('OTAPULSE_PARTITION_MODE', 'dynamic', 'otapulse-firstboot', '', d)}"
 
+# A/B Boot Script Configuration
+# Set OTAPULSE_BOOT_SCRIPT = "1" in local.conf or machine config to enable
+# This is platform-specific and requires a matching boot.cmd for your board
+# Supported: i.MX8 (NXP), other platforms need custom boot.cmd
+OTAPULSE_BOOT_SCRIPT ?= "0"
+
+# Add A/B boot script only when explicitly enabled
+IMAGE_INSTALL:append = " ${@bb.utils.contains('OTAPULSE_BOOT_SCRIPT', '1', 'otapulse-boot-script', '', d)}"
+
+# Add boot.scr to boot partition only when boot script is enabled
+IMAGE_BOOT_FILES:append = " ${@bb.utils.contains('OTAPULSE_BOOT_SCRIPT', '1', 'boot.scr', '', d)}"
+
 # WKS dependencies for partition tools
 WKS_FILE_DEPENDS:append = " gptfdisk-native e2fsprogs-native"
 

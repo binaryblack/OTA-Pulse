@@ -184,7 +184,93 @@ func (f *FileBasedBootEnv) writeMenderBootPart(partNum string) error {
 		}
 	}
 
+	// Sync boot slot to boot partition for U-Boot access
+	// This is critical for platforms where U-Boot reads from FAT32 boot partition
+	f.syncBootSlotToBootPartition(partNum)
+
 	return nil
+}
+
+// syncBootSlotToBootPartition copies the mender_boot_part file to the boot partition
+// so that U-Boot can read it during boot. U-Boot cannot read from ext4 data partition.
+// Supports multiple platforms: i.MX, Raspberry Pi, Rockchip, generic ARM boards.
+func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
+	// Common boot partition mount points across different platforms
+	// /boot/firmware - Raspberry Pi (Ubuntu/Debian)
+	// /boot - Generic Linux, some Yocto builds
+	// /mnt/boot - OTAPulse default mount point
+	bootMountPoints := []string{"/mnt/boot", "/boot/firmware", "/boot"}
+	bootFile := ""
+
+	// Read mounts once before the loop for efficiency
+	mountData, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		log.Warnf("FileBasedBootEnv: Failed to read /proc/self/mounts: %v", err)
+		// Continue anyway - we'll try to mount the boot partition
+	}
+	mountLines := strings.Split(string(mountData), "\n")
+
+	// Find where boot partition is mounted (must be FAT32/vfat for U-Boot access)
+	for _, mount := range bootMountPoints {
+		if _, err := os.Stat(mount); err == nil {
+			// Check if it's a mounted vfat filesystem
+			for _, line := range mountLines {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 && fields[1] == mount && fields[2] == "vfat" {
+					bootFile = filepath.Join(mount, "mender_boot_part")
+					log.Debugf("FileBasedBootEnv: Found boot partition at %s", mount)
+					break
+				}
+			}
+		}
+		if bootFile != "" {
+			break
+		}
+	}
+
+	// If boot partition not mounted, try to mount it
+	if bootFile == "" {
+		log.Debug("FileBasedBootEnv: Boot partition not mounted, attempting to mount")
+		// Common boot partition devices across platforms
+		bootDevices := []string{
+			"/dev/disk/by-partlabel/boot",   // GPT label (OTAPulse standard)
+			"/dev/disk/by-label/boot",       // Filesystem label
+			"/dev/disk/by-label/BOOT",       // Filesystem label (uppercase)
+			"/dev/mmcblk1p1",                // eMMC (i.MX8, etc.)
+			"/dev/mmcblk0p1",                // SD card
+			"/dev/sda1",                     // USB/SATA
+		}
+		for _, dev := range bootDevices {
+			if _, err := os.Stat(dev); err == nil {
+				mountPoint := "/mnt/boot"
+				if err := os.MkdirAll(mountPoint, 0755); err != nil {
+					log.Warnf("FileBasedBootEnv: Failed to create mount point: %v", err)
+					continue
+				}
+				cmd := f.Commander.Command("mount", dev, mountPoint)
+				if err := cmd.Run(); err == nil {
+					bootFile = filepath.Join(mountPoint, "mender_boot_part")
+					log.Infof("FileBasedBootEnv: Mounted boot partition %s at %s", dev, mountPoint)
+					break
+				}
+			}
+		}
+	}
+
+	if bootFile == "" {
+		log.Warn("FileBasedBootEnv: Could not find or mount boot partition for boot slot sync")
+		return
+	}
+
+	// Write to boot partition
+	if err := os.WriteFile(bootFile, []byte(partNum+"\n"), 0644); err != nil {
+		log.Warnf("FileBasedBootEnv: Failed to sync boot slot to boot partition: %v", err)
+		return
+	}
+
+	// Sync filesystem
+	syscall.Sync()
+	log.Infof("FileBasedBootEnv: Synced boot slot %s to %s", partNum, bootFile)
 }
 
 // slotToPartitionNumber converts slot letter (a/b) to partition number.
