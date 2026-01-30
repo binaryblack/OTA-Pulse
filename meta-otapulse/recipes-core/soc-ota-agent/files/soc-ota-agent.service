@@ -1,9 +1,9 @@
 [Unit]
 Description=OTAPulse - SoC OTA Agent for Firmware Updates
 Documentation=https://github.com/binaryblack/OTA-Pulse
-After=network-online.target systemd-resolved.service
+After=network-online.target systemd-resolved.service otapulse-partition-setup.service
 Wants=network-online.target
-Requires=data.mount
+Requires=otapulse-partition-setup.service
 Conflicts=mender.service mender-client.service
 
 [Service]
