@@ -9,5 +9,8 @@ tmpfs                /run                 tmpfs      mode=0755,nodev,nosuid,stri
 tmpfs                /var/volatile        tmpfs      defaults              0  0
 
 # Data partition for OTA downloads and persistent storage
-# nofail ensures boot continues even if partition is missing
-/dev/mmcblk0p5       /data                ext4       defaults,nofail       0  2
+# NOTE: /data is mounted by otapulse-partition-setup.service which:
+#   - Handles dynamic partition creation on first boot
+#   - Auto-detects device (mmcblk0/mmcblk1/etc.) using partlabel
+#   - Runs early in boot before other services need /data
+# Do NOT add /data here - it would conflict with the partition setup service

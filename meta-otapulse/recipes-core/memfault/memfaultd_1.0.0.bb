@@ -35,12 +35,12 @@ PACKAGECONFIG ??= ""
 PACKAGECONFIG[dashboard] = ",,,python3-core"
 
 # Source files (base)
+# NOTE: data.mount removed - /data is handled by otapulse-partition-setup.service
 SRC_URI = " \
     file://memfaultd-rs \
     file://memfaultd \
     file://memfault-watchdog \
     file://memfaultd.service \
-    file://data.mount \
     file://memfault-watchdog.service \
     file://memfaultd.init \
     file://memfaultd.json \
@@ -80,7 +80,8 @@ CARGO_BUILD_FLAGS = "--release"
 PACKAGE_ARCH = "${MACHINE_ARCH}"
 
 # Systemd service configuration (if systemd is used)
-SYSTEMD_SERVICE:${PN} = "memfaultd.service memfault-watchdog.service data.mount"
+# NOTE: data.mount removed - /data is handled by otapulse-partition-setup.service
+SYSTEMD_SERVICE:${PN} = "memfaultd.service memfault-watchdog.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 # SysVinit configuration (if sysvinit is used)
@@ -132,9 +133,9 @@ do_install() {
     # Install init scripts based on init system
     if ${@bb.utils.contains('DISTRO_FEATURES', 'systemd', 'true', 'false', d)}; then
         # Install systemd service files
+        # NOTE: data.mount not installed - /data is handled by otapulse-partition-setup.service
         install -d ${D}${systemd_unitdir}/system
         install -m 0644 ${WORKDIR}/memfaultd.service ${D}${systemd_unitdir}/system/memfaultd.service
-        install -m 0644 ${WORKDIR}/data.mount ${D}${systemd_unitdir}/system/data.mount
         install -m 0644 ${WORKDIR}/memfault-watchdog.service ${D}${systemd_unitdir}/system/memfault-watchdog.service
 
         # Create tmpfiles.d configuration for runtime directories
@@ -193,7 +194,8 @@ FILES:${PN} = " \
     "
 
 # Add systemd files if systemd is used
-FILES:${PN} += "${@bb.utils.contains('DISTRO_FEATURES', 'systemd', '${systemd_unitdir}/system/memfaultd.service ${systemd_unitdir}/system/data.mount ${systemd_unitdir}/system/memfault-watchdog.service ${nonarch_libdir}/tmpfiles.d/memfault.conf', '', d)}"
+# NOTE: data.mount removed - /data is handled by otapulse-partition-setup.service
+FILES:${PN} += "${@bb.utils.contains('DISTRO_FEATURES', 'systemd', '${systemd_unitdir}/system/memfaultd.service ${systemd_unitdir}/system/memfault-watchdog.service ${nonarch_libdir}/tmpfiles.d/memfault.conf', '', d)}"
 
 # Add SysVinit script if sysvinit is used
 FILES:${PN} += "${@bb.utils.contains('DISTRO_FEATURES', 'sysvinit', '${sysconfdir}/init.d/memfaultd', '', d)}"
