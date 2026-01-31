@@ -1,0 +1,57 @@
+#!/bin/sh
+# OTA-Pulse State Script: Switch boot slot on commit
+# For Rockchip platforms using PARTUUID-based boot switching
+#
+# This script is executed just before the OTA commit completes.
+# It uses the switch-boot-slot.sh script to swap PARTUUIDs so
+# the kernel cmdline root=PARTUUID=614e0000-0000 matches the new partition.
+
+set -e
+
+log() {
+    echo "[ArtifactCommit] $*"
+    logger -t otapulse-commit "$*" 2>/dev/null || true
+}
+
+# Determine which slot we're switching TO
+# The agent writes the target slot to mender_boot_part
+BOOT_PART_FILE="/data/ota/mender_boot_part"
+CURRENT_ROOT=$(mount | grep 'on / ' | awk '{print $1}')
+
+log "Current root partition: $CURRENT_ROOT"
+
+# Determine target slot based on current partition
+# p3 = rootfs_a = slot A, p4 = rootfs_b = slot B
+case "$CURRENT_ROOT" in
+    *p3|*rootfs_a)
+        TARGET_SLOT="B"
+        log "Currently on slot A, switching to slot B"
+        ;;
+    *p4|*rootfs_b)
+        TARGET_SLOT="A"
+        log "Currently on slot B, switching to slot A"
+        ;;
+    *)
+        log "ERROR: Cannot determine current slot from $CURRENT_ROOT"
+        exit 1
+        ;;
+esac
+
+# Call the switch-boot-slot script
+if [ -x /usr/sbin/switch-boot-slot.sh ]; then
+    log "Executing switch-boot-slot.sh $TARGET_SLOT"
+    /usr/sbin/switch-boot-slot.sh "$TARGET_SLOT"
+    RESULT=$?
+    if [ $RESULT -eq 0 ]; then
+        log "Boot slot switch to $TARGET_SLOT successful"
+    else
+        log "WARNING: Boot slot switch returned $RESULT"
+        # Don't fail the commit - the preference is stored
+    fi
+else
+    log "ERROR: switch-boot-slot.sh not found!"
+    exit 1
+fi
+
+log "ArtifactCommit_Enter completed"
+exit 0

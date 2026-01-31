@@ -25,8 +25,19 @@ RDEPENDS:${PN} = " \
     bash \
 "
 
+# Boot switching infrastructure - recommended for A/B OTA support
+# These packages provide switch-boot-slot.sh and partition tools
+# Platforms can override or omit if using different boot switching methods
+RRECOMMENDS:${PN} = " \
+    u-boot-env-config \
+    gptfdisk \
+"
+
 # Only depend on signing-keys if signature verification is enabled
 RDEPENDS:${PN}:append = " ${@bb.utils.contains('SOC_OTA_SIGNATURE_VERIFICATION', '1', 'signing-keys', '', d)}"
+
+# For Rockchip platforms, include the PARTUUID-based boot switching state script
+RRECOMMENDS:${PN}:append:rockchip = " otapulse-rockchip-bootenv"
 
 # Use externalsrc for local Go project
 inherit externalsrc systemd goarch
@@ -50,7 +61,7 @@ SOC_OTA_SIGNING_KEYS_DIR ?= "/etc/soc-monitoring/signing-keys"
 # Example: "production-rsa-public.pem production-ecdsa-public.pem"
 SOC_OTA_VERIFY_KEY_FILES ?= "production-rsa-public.pem"
 # OTA server URL - MUST be set in your platform-specific layer or local.conf
-OTA_SERVER_URL ?= "https://ota.example.com"
+OTA_SERVER_URL ?= "http://192.168.0.122:8000"
 
 S = "${EXTERNALSRC}"
 

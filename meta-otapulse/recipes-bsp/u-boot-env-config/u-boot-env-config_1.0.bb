@@ -10,8 +10,9 @@ SRC_URI = " \
     file://switch-boot-slot.sh \
 "
 
-# Depend on u-boot-tools for fw_printenv/fw_setenv
-RDEPENDS:${PN} = "u-boot-fw-utils"
+# Recommend u-boot-tools for fw_printenv/fw_setenv (not hard dependency)
+# Some platforms may use different boot switching methods (extlinux, PARTUUID swap, etc.)
+RRECOMMENDS:${PN} = "u-boot-fw-utils"
 
 do_install() {
     # Install fw_env.config template
