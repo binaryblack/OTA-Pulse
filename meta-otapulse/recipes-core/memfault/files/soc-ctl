@@ -10,12 +10,13 @@ API_KEY_FILE="/var/lib/memfault/api_key"
 SERVER_DEVICE_ID_FILE="/var/lib/memfault/server_device_id"
 PROVISIONING_TOKEN_FILE="/etc/memfault/provisioning_token"
 LOG_DIR="/var/log/memfault"
-# OTAPulse config paths (with mender fallback for backward compatibility)
+# OTAPulse config paths - use persistent /data partition for credentials
+# This ensures API key and device ID persist across A/B OTA updates
 OTAPULSE_CONFIG_DIR="/etc/otapulse"
-OTAPULSE_WRITABLE_DIR="/var/lib/otapulse"
+OTAPULSE_WRITABLE_DIR="${OTAPULSE_DATASTORE_DIR:-/data/otapulse}"
 OTAPULSE_WRITABLE_CONFIG="${OTAPULSE_WRITABLE_DIR}/otapulse.conf"
 
-# Fallback to mender paths if otapulse doesn't exist
+# Fallback to mender paths if otapulse doesn't exist (legacy systems)
 if [ ! -d "${OTAPULSE_CONFIG_DIR}" ] && [ -d "/etc/mender" ]; then
     OTAPULSE_CONFIG_DIR="/etc/mender"
     OTAPULSE_WRITABLE_DIR="/var/lib/mender"
@@ -233,15 +234,30 @@ cmd_status() {
     local server_url=$(get_server_url)
     echo "  Server URL:    ${server_url:-Not configured}"
     
+    # Check API key from memfault file or OTAPulse config
+    local api_key=""
     if [ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ]; then
-        local api_key=$(cat "${API_KEY_FILE}" | tr -d '[:space:]')
+        api_key=$(cat "${API_KEY_FILE}" | tr -d '[:space:]')
+    elif [ -f "${OTAPULSE_WRITABLE_CONFIG}" ]; then
+        api_key=$(jq -r '.SoCAPIKey // ""' "${OTAPULSE_WRITABLE_CONFIG}" 2>/dev/null || echo "")
+    fi
+
+    if [ -n "${api_key}" ]; then
         echo "  API Key:       ${api_key:0:12}... (provisioned)"
     else
         echo "  API Key:       Not provisioned"
     fi
-    
+
+    # Check Server ID from memfault file or OTAPulse config
+    local server_id=""
     if [ -f "${SERVER_DEVICE_ID_FILE}" ]; then
-        echo "  Server ID:     $(cat "${SERVER_DEVICE_ID_FILE}")"
+        server_id=$(cat "${SERVER_DEVICE_ID_FILE}")
+    elif [ -f "${OTAPULSE_WRITABLE_CONFIG}" ]; then
+        server_id=$(jq -r '.SoCDeviceID // ""' "${OTAPULSE_WRITABLE_CONFIG}" 2>/dev/null || echo "")
+    fi
+
+    if [ -n "${server_id}" ]; then
+        echo "  Server ID:     ${server_id}"
     else
         echo "  Server ID:     Not registered"
     fi

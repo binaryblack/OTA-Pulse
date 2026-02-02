@@ -32,9 +32,13 @@ ReadWritePaths=/var/lib/otapulse
 ReadWritePaths=/etc/otapulse
 ReadWritePaths=/data
 ReadWritePaths=/data/ota
+ReadWritePaths=/data/otapulse
 
 # Environment
 Environment="PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+# Use persistent /data partition for runtime config (API key, device ID)
+# This ensures credentials persist across A/B OTA updates
+Environment="OTAPULSE_DATASTORE_DIR=/data/otapulse"
 
 [Install]
 WantedBy=multi-user.target

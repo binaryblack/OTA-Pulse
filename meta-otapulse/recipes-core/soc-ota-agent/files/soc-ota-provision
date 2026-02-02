@@ -11,12 +11,13 @@
 
 set -e
 
-# OTAPulse paths (with mender fallback for backward compatibility)
-CONFIG_DIR="/var/lib/otapulse"
+# OTAPulse paths - use persistent /data partition for credentials
+# This ensures API key and device ID persist across A/B OTA updates
+CONFIG_DIR="${OTAPULSE_DATASTORE_DIR:-/data/otapulse}"
 CONFIG_FILE="${CONFIG_DIR}/otapulse.conf"
 PROVISION_MARKER="${CONFIG_DIR}/.provisioned"
 
-# Fallback to mender paths if otapulse doesn't exist
+# Fallback to mender paths if on legacy system
 if [ ! -d "/etc/otapulse" ] && [ -d "/etc/mender" ]; then
     CONFIG_DIR="/var/lib/mender"
     CONFIG_FILE="${CONFIG_DIR}/mender.conf"
