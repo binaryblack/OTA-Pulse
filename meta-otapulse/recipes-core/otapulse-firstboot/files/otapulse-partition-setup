@@ -230,14 +230,97 @@ fi
 log "Current partition layout:"
 sgdisk -p "$BASE_DEV"
 
-# Check if rootfs_b already exists and is formatted
+# EARLY CHECK: If all required partitions exist with correct labels and are formatted,
+# we don't need to do anything. This handles WIC images that pre-create partitions.
+check_all_partitions_ready() {
+    local all_ready=1
+
+    # Check rootfs_a (should be the current root)
+    if [ ! -e "/dev/disk/by-partlabel/rootfs_a" ]; then
+        log "rootfs_a partition label not found"
+        all_ready=0
+    fi
+
+    # Check rootfs_b
+    if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then
+        local fstype=$(lsblk -no FSTYPE /dev/disk/by-partlabel/rootfs_b 2>/dev/null || true)
+        if [ -z "$fstype" ]; then
+            log "rootfs_b exists but not formatted"
+            all_ready=0
+        fi
+    else
+        log "rootfs_b partition not found"
+        all_ready=0
+    fi
+
+    # Check data partition
+    if [ -e "/dev/disk/by-partlabel/data" ]; then
+        local fstype=$(lsblk -no FSTYPE /dev/disk/by-partlabel/data 2>/dev/null || true)
+        if [ -z "$fstype" ]; then
+            log "data partition exists but not formatted"
+            all_ready=0
+        fi
+    else
+        log "data partition not found"
+        all_ready=0
+    fi
+
+    return $((1 - all_ready))
+}
+
+if check_all_partitions_ready; then
+    log "All partitions (rootfs_a, rootfs_b, data) already exist and are formatted"
+    log "Partition setup not needed - likely a WIC image with pre-created partitions"
+
+    # Mount data partition if not already mounted
+    if [ -e "/dev/disk/by-partlabel/data" ]; then
+        if [ ! -d "/data" ]; then
+            mkdir -p /data
+        fi
+        if ! mountpoint -q /data; then
+            mount /dev/disk/by-partlabel/data /data 2>/dev/null || true
+            log "Mounted data partition at /data"
+        fi
+    fi
+
+    # Initialize boot environment files for A/B partition management
+    if [ -d "/data" ] && mountpoint -q /data; then
+        OTA_DIR="/data/ota"
+        mkdir -p "$OTA_DIR"
+
+        # Initialize boot env files if they don't exist
+        if [ ! -f "$OTA_DIR/mender_boot_part" ]; then
+            echo "$ROOT_PART_NUM" > "$OTA_DIR/mender_boot_part"
+            log "Initialized mender_boot_part=$ROOT_PART_NUM"
+        fi
+        if [ ! -f "$OTA_DIR/boot_count" ]; then
+            echo "0" > "$OTA_DIR/boot_count"
+            log "Initialized boot_count=0"
+        fi
+        if [ ! -f "$OTA_DIR/upgrade_available" ]; then
+            echo "0" > "$OTA_DIR/upgrade_available"
+            log "Initialized upgrade_available=0"
+        fi
+        if [ ! -f "$OTA_DIR/current_slot" ]; then
+            echo "a" > "$OTA_DIR/current_slot"
+            log "Initialized current_slot=a"
+        fi
+        log "Boot environment initialized"
+    fi
+
+    # Create marker file
+    mkdir -p "$(dirname $MARKER_FILE)"
+    touch "$MARKER_FILE"
+    log "Partition setup complete (pre-existing partitions detected)"
+    exit 0
+fi
+
+# Check if rootfs_b already exists and is formatted (partial setup)
 if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then
     ROOTFS_B_FSTYPE=$(lsblk -no FSTYPE /dev/disk/by-partlabel/rootfs_b 2>/dev/null || true)
     if [ -n "$ROOTFS_B_FSTYPE" ]; then
         log "rootfs_b partition already exists and formatted ($ROOTFS_B_FSTYPE)"
-        mkdir -p "$(dirname $MARKER_FILE)"
-        touch "$MARKER_FILE"
-        exit 0
+        # Continue to check/create data partition
     else
         log "rootfs_b partition exists but not formatted, will format it"
     fi
@@ -415,6 +498,45 @@ log "Created persistent directories: /data/otapulse, /data/ota"
 # Ensure machine-id and SSH keys are persistent (now that /data is definitely mounted)
 ensure_persistent_machine_id || log "Warning: machine-id persistence failed"
 ensure_persistent_ssh_keys || log "Warning: SSH key persistence failed"
+
+# Initialize boot environment files for OTA agent
+# These files are required for A/B partition management
+initialize_boot_env() {
+    local ota_dir="/data/ota"
+    mkdir -p "$ota_dir"
+
+    # Determine current boot partition number
+    # rootfs_a is partition $ROOT_PART_NUM, rootfs_b is $ROOTFS_B_PART_NUM
+    local current_part="$ROOT_PART_NUM"
+
+    # Initialize mender_boot_part with current partition
+    if [ ! -f "$ota_dir/mender_boot_part" ]; then
+        echo "$current_part" > "$ota_dir/mender_boot_part"
+        log "Initialized mender_boot_part=$current_part"
+    fi
+
+    # Initialize boot_count to 0 (fresh boot)
+    if [ ! -f "$ota_dir/boot_count" ]; then
+        echo "0" > "$ota_dir/boot_count"
+        log "Initialized boot_count=0"
+    fi
+
+    # Initialize upgrade_available to 0 (no pending upgrade)
+    if [ ! -f "$ota_dir/upgrade_available" ]; then
+        echo "0" > "$ota_dir/upgrade_available"
+        log "Initialized upgrade_available=0"
+    fi
+
+    # Initialize current_slot to 'a' (booting from rootfs_a)
+    if [ ! -f "$ota_dir/current_slot" ]; then
+        echo "a" > "$ota_dir/current_slot"
+        log "Initialized current_slot=a"
+    fi
+
+    log "Boot environment initialized in $ota_dir"
+}
+
+initialize_boot_env
 
 log "OTAPulse partition setup completed successfully!"
 exit 0

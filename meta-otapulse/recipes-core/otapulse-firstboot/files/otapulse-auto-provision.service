@@ -1,0 +1,23 @@
+[Unit]
+Description=OTAPulse Auto-Provisioning
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Run after network is available and partitions are set up
+After=network-online.target otapulse-partition-setup.service
+Wants=network-online.target
+# Don't run if already provisioned
+ConditionPathExists=!/data/otapulse/.auto-provisioned
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/otapulse-auto-provision
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=180
+
+# Environment for admin credentials (override in local.conf if needed)
+Environment="OTAPULSE_ADMIN_EMAIL=krishna.slanger@gmail.com"
+Environment="OTAPULSE_ADMIN_PASSWORD=test1234"
+
+[Install]
+WantedBy=multi-user.target

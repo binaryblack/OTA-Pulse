@@ -1,0 +1,218 @@
+#!/bin/bash
+# OTAPulse Auto-Provisioning Script
+# Automatically registers the device and obtains API credentials on first boot
+#
+# This script:
+# 1. Detects device identity (machine-id based)
+# 2. Registers with the OTA server
+# 3. Obtains an API key for device authentication
+# 4. Saves credentials to persistent config location
+
+set -e
+
+LOG_TAG="otapulse-provision"
+PROVISION_MARKER="/data/otapulse/.auto-provisioned"
+CONFIG_DIR="/data/otapulse"
+CONFIG_FILE="${CONFIG_DIR}/otapulse.conf"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    logger -t "$LOG_TAG" "$1"
+}
+
+error() {
+    log "ERROR: $1"
+    # Don't exit with error - let the service succeed so it doesn't keep retrying
+    exit 0
+}
+
+# Check if already provisioned
+if [ -f "$PROVISION_MARKER" ]; then
+    log "Device already auto-provisioned, skipping"
+    exit 0
+fi
+
+# Get server URL from main config
+SERVER_URL=""
+if [ -f /etc/otapulse/otapulse.conf ]; then
+    SERVER_URL=$(python3 -c "import json; f=open('/etc/otapulse/otapulse.conf'); d=json.load(f); print(d.get('ServerURL',''))" 2>/dev/null || true)
+fi
+
+if [ -z "$SERVER_URL" ]; then
+    log "No ServerURL configured in /etc/otapulse/otapulse.conf, skipping auto-provision"
+    exit 0
+fi
+
+log "Starting OTAPulse auto-provisioning..."
+log "Server URL: $SERVER_URL"
+
+# Wait for network
+NETWORK_TIMEOUT=60
+WAITED=0
+while [ $WAITED -lt $NETWORK_TIMEOUT ]; do
+    # Try to reach the server
+    if curl -sf --max-time 5 "${SERVER_URL}/health" >/dev/null 2>&1; then
+        log "Server reachable"
+        break
+    fi
+    log "Waiting for network... ($WAITED/$NETWORK_TIMEOUT)"
+    sleep 5
+    WAITED=$((WAITED + 5))
+done
+
+if [ $WAITED -ge $NETWORK_TIMEOUT ]; then
+    log "Network timeout - server not reachable, will retry on next boot"
+    exit 0
+fi
+
+# Get device identity
+get_device_id() {
+    # Use machine-id as the base for device ID
+    if [ -f /etc/machine-id ]; then
+        cat /etc/machine-id
+        return 0
+    fi
+
+    # Fallback: Try MAC address
+    for iface in eth0 end0 mlan0 wlan0; do
+        if [ -f "/sys/class/net/$iface/address" ]; then
+            cat "/sys/class/net/$iface/address" | tr -d ':' | tr '[:upper:]' '[:lower:]'
+            return 0
+        fi
+    done
+
+    # Last resort: generate random ID
+    head -c 16 /dev/urandom | md5sum | cut -d' ' -f1
+}
+
+DEVICE_ID=$(get_device_id)
+log "Device ID: $DEVICE_ID"
+
+# Get hardware/device type
+HARDWARE_VERSION="unknown"
+if [ -f /etc/otapulse/device_type ]; then
+    HARDWARE_VERSION=$(cat /etc/otapulse/device_type | sed 's/device_type=//')
+fi
+log "Hardware version: $HARDWARE_VERSION"
+
+# Get firmware version
+FIRMWARE_VERSION="unknown"
+if [ -f /etc/build-info ]; then
+    FIRMWARE_VERSION=$(grep "VERSION=" /etc/build-info 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "unknown")
+fi
+log "Firmware version: $FIRMWARE_VERSION"
+
+# Create config directory on persistent storage
+mkdir -p "$CONFIG_DIR"
+
+# Try to register/authenticate with server
+# The server should support auto-registration for new devices
+log "Attempting device registration..."
+
+# Method 1: Try to use existing device auth (if device was pre-registered)
+# This calls the check endpoint which doesn't need auth
+RESPONSE=$(curl -sf --max-time 30 \
+    -H "X-Device-ID: $DEVICE_ID" \
+    "${SERVER_URL}/api/devices/v1/check" 2>/dev/null || echo '{"error": "request failed"}')
+
+if echo "$RESPONSE" | grep -q '"api_key"'; then
+    # Server returned an API key (auto-registration succeeded)
+    API_KEY=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_key',''))" 2>/dev/null || true)
+    if [ -n "$API_KEY" ]; then
+        log "Received API key from server"
+    fi
+fi
+
+# Method 2: Try admin-based registration (for test environments)
+# This requires admin credentials to be configured
+if [ -z "$API_KEY" ]; then
+    ADMIN_EMAIL="${OTAPULSE_ADMIN_EMAIL:-krishna.slanger@gmail.com}"
+    ADMIN_PASSWORD="${OTAPULSE_ADMIN_PASSWORD:-test1234}"
+
+    log "Attempting admin-based registration..."
+
+    # Get JWT token
+    JWT_RESPONSE=$(curl -sf --max-time 30 \
+        -X POST "${SERVER_URL}/api/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"email\": \"$ADMIN_EMAIL\", \"password\": \"$ADMIN_PASSWORD\"}" 2>/dev/null || echo '{}')
+
+    JWT_TOKEN=$(echo "$JWT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || true)
+
+    if [ -n "$JWT_TOKEN" ]; then
+        log "Got JWT token, registering device..."
+
+        # Register device
+        REG_RESPONSE=$(curl -sf --max-time 30 \
+            -X POST "${SERVER_URL}/api/devices" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"device_id\": \"$DEVICE_ID\",
+                \"name\": \"Device-${DEVICE_ID:0:8}\",
+                \"hardware_version\": \"$HARDWARE_VERSION\",
+                \"firmware_version\": \"$FIRMWARE_VERSION\"
+            }" 2>/dev/null || echo '{}')
+
+        DEVICE_UUID=$(echo "$REG_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+
+        if [ -n "$DEVICE_UUID" ] || echo "$REG_RESPONSE" | grep -q "already exists"; then
+            log "Device registered or already exists"
+
+            # Create API key
+            KEY_NAME="auto-provision-${DEVICE_ID:0:8}-$(date +%s)"
+            KEY_RESPONSE=$(curl -sf --max-time 30 \
+                -X POST "${SERVER_URL}/api/api-keys" \
+                -H "Authorization: Bearer $JWT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{
+                    \"name\": \"$KEY_NAME\",
+                    \"description\": \"Auto-provisioned key for $DEVICE_ID\",
+                    \"scopes\": [\"devices:write\", \"metrics:write\", \"ota:read\", \"coredumps:write\"]
+                }" 2>/dev/null || echo '{}')
+
+            API_KEY=$(echo "$KEY_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key',''))" 2>/dev/null || true)
+
+            if [ -n "$API_KEY" ]; then
+                log "Created API key successfully"
+            else
+                log "Failed to create API key: $KEY_RESPONSE"
+            fi
+        else
+            log "Device registration failed: $REG_RESPONSE"
+        fi
+    else
+        log "JWT login failed - check admin credentials"
+    fi
+fi
+
+# Save credentials if we got an API key
+if [ -n "$API_KEY" ]; then
+    log "Saving credentials to $CONFIG_FILE"
+
+    cat > "$CONFIG_FILE" << EOF
+{
+    "SoCAPIKey": "$API_KEY",
+    "SoCDeviceID": "$DEVICE_ID"
+}
+EOF
+    chmod 0600 "$CONFIG_FILE"
+
+    # Create marker file
+    mkdir -p "$(dirname $PROVISION_MARKER)"
+    echo "provisioned=$(date -Iseconds)" > "$PROVISION_MARKER"
+    echo "device_id=$DEVICE_ID" >> "$PROVISION_MARKER"
+
+    log "Auto-provisioning complete!"
+
+    # Restart OTA agent to pick up new credentials
+    if systemctl is-enabled soc-ota-agent >/dev/null 2>&1; then
+        log "Restarting soc-ota-agent..."
+        systemctl restart soc-ota-agent || true
+    fi
+else
+    log "Auto-provisioning failed - no API key obtained"
+    log "Manual provisioning may be required: soc-ota-provision --server $SERVER_URL --token <token>"
+fi
+
+exit 0

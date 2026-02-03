@@ -20,6 +20,9 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 SRC_URI = " \
     file://otapulse-partition-setup \
     file://otapulse-partition-setup.service \
+    file://otapulse-auto-provision \
+    file://otapulse-auto-provision.service \
+    file://switch-boot-slot.sh \
 "
 
 S = "${WORKDIR}"
@@ -30,11 +33,13 @@ RDEPENDS:${PN} = " \
     gptfdisk \
     e2fsprogs \
     util-linux \
+    curl \
+    python3-core \
 "
 
 inherit systemd
 
-SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service"
+SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service otapulse-auto-provision.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 do_install() {
@@ -42,16 +47,26 @@ do_install() {
     install -d ${D}${bindir}
     install -m 0755 ${WORKDIR}/otapulse-partition-setup ${D}${bindir}/otapulse-partition-setup
 
-    # Install systemd service
+    # Install auto-provisioning script
+    install -m 0755 ${WORKDIR}/otapulse-auto-provision ${D}${bindir}/otapulse-auto-provision
+
+    # Install boot slot switching script
+    install -m 0755 ${WORKDIR}/switch-boot-slot.sh ${D}${bindir}/switch-boot-slot.sh
+
+    # Install systemd services
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/otapulse-partition-setup.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${WORKDIR}/otapulse-auto-provision.service ${D}${systemd_system_unitdir}/
 
-    # Create marker directory
+    # Create marker directories
     install -d ${D}${localstatedir}/lib/otapulse
 }
 
 FILES:${PN} = " \
     ${bindir}/otapulse-partition-setup \
+    ${bindir}/otapulse-auto-provision \
+    ${bindir}/switch-boot-slot.sh \
     ${systemd_system_unitdir}/otapulse-partition-setup.service \
+    ${systemd_system_unitdir}/otapulse-auto-provision.service \
     ${localstatedir}/lib/otapulse \
 "
