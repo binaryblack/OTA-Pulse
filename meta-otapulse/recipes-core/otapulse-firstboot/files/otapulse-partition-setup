@@ -199,6 +199,43 @@ fi
 
 log "Starting OTAPulse partition setup..."
 
+# =============================================================================
+# Wait for storage device to be fully ready
+# This prevents issues with GPT not being readable at early boot
+# =============================================================================
+wait_for_device_ready() {
+    local device="$1"
+    local max_retries=10
+    local retry=0
+
+    log "Waiting for device $device to be ready..."
+
+    # Wait for udev to settle
+    if command -v udevadm &> /dev/null; then
+        udevadm settle --timeout=30 || true
+    fi
+
+    # Verify GPT is readable by checking last usable sector
+    while [ $retry -lt $max_retries ]; do
+        local last_sector=$(sgdisk -E "$device" 2>/dev/null || echo "0")
+        local device_sectors=$(blockdev --getsz "$device" 2>/dev/null || echo "0")
+
+        # Last usable sector should be close to device size (within 1%)
+        # If it's very small (like 16383), GPT isn't ready yet
+        if [ "$last_sector" -gt 1000000 ] && [ "$last_sector" -gt $((device_sectors * 90 / 100)) ]; then
+            log "Device ready: last usable sector=$last_sector, device sectors=$device_sectors"
+            return 0
+        fi
+
+        retry=$((retry + 1))
+        log "Device not ready yet (last_sector=$last_sector, device=$device_sectors), retry $retry/$max_retries..."
+        sleep 2
+    done
+
+    log "WARNING: Device may not be fully ready, proceeding anyway..."
+    return 1
+}
+
 # Find the root device
 ROOT_PART=$(findmnt -n -o SOURCE /)
 if [ -z "$ROOT_PART" ]; then
@@ -225,6 +262,9 @@ log "Root partition number: $ROOT_PART_NUM"
 if ! command -v sgdisk &> /dev/null; then
     error "sgdisk not found. Install gptfdisk package."
 fi
+
+# Wait for device to be fully ready before reading GPT
+wait_for_device_ready "$BASE_DEV"
 
 # Get current partition info
 log "Current partition layout:"

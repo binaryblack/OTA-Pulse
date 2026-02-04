@@ -1,9 +1,10 @@
 [Unit]
 Description=OTAPulse First-Boot Partition Setup
 Documentation=https://github.com/binaryblack/OTA-Pulse
-# Run early in boot, before OTA agent
+# Run after block devices and filesystems are ready
 DefaultDependencies=no
-After=local-fs.target
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
 Before=soc-ota-agent.service memfaultd.service
 ConditionPathExists=!/var/lib/otapulse/.partitions-created
 
@@ -14,6 +15,11 @@ ExecStart=/usr/bin/otapulse-partition-setup
 StandardOutput=journal+console
 StandardError=journal+console
 TimeoutStartSec=300
+# Retry on failure (device might not be ready)
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=120
+StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
