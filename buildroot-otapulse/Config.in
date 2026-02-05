@@ -1,0 +1,5 @@
+# OTA-Pulse BR2_EXTERNAL Configuration
+
+menu "OTA-Pulse"
+	source "$BR2_EXTERNAL_OTAPULSE_PATH/package/otapulse/Config.in"
+endmenu

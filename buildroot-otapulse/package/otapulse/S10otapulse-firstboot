@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# OTA-Pulse first-boot partition setup (runs once)
+#
+
+FIRSTBOOT_MARKER=/data/.otapulse-firstboot-done
+FIRSTBOOT_SCRIPT=/usr/sbin/otapulse-firstboot
+
+case "$1" in
+    start)
+        if [ -f "$FIRSTBOOT_MARKER" ]; then
+            echo "OTA-Pulse: First boot already completed"
+            exit 0
+        fi
+
+        if [ -x "$FIRSTBOOT_SCRIPT" ]; then
+            echo "OTA-Pulse: Running first-boot partition setup..."
+            "$FIRSTBOOT_SCRIPT"
+            if [ $? -eq 0 ]; then
+                mkdir -p /data
+                touch "$FIRSTBOOT_MARKER"
+                echo "OTA-Pulse: First boot setup completed"
+            else
+                echo "OTA-Pulse: First boot setup FAILED"
+                exit 1
+            fi
+        fi
+        ;;
+    stop)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
+
+exit 0

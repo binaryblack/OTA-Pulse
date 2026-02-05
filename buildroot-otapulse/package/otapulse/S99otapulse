@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# OTA-Pulse agent startup script
+#
+
+DAEMON=/usr/bin/otapulse
+PIDFILE=/var/run/otapulse.pid
+CONFFILE=/etc/otapulse/otapulse.conf
+
+[ -x "$DAEMON" ] || exit 0
+[ -f "$CONFFILE" ] || exit 0
+
+case "$1" in
+    start)
+        printf "Starting OTA-Pulse agent: "
+        start-stop-daemon -S -q -b -m -p "$PIDFILE" \
+            -x "$DAEMON" -- daemon
+        [ $? = 0 ] && echo "OK" || echo "FAIL"
+        ;;
+    stop)
+        printf "Stopping OTA-Pulse agent: "
+        start-stop-daemon -K -q -p "$PIDFILE"
+        [ $? = 0 ] && echo "OK" || echo "FAIL"
+        rm -f "$PIDFILE"
+        ;;
+    restart|reload)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+            echo "OTA-Pulse agent is running (PID $(cat $PIDFILE))"
+        else
+            echo "OTA-Pulse agent is not running"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

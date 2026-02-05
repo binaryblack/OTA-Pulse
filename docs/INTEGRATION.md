@@ -1,6 +1,28 @@
 # OTAPulse Integration Guide
 
-This guide walks you through integrating OTAPulse into your Yocto-based embedded Linux product.
+This guide walks you through integrating OTAPulse into your embedded Linux product.
+
+## Supported Build Systems
+
+OTA-Pulse supports multiple embedded Linux build systems:
+
+| Build System | Integration | Documentation |
+|-------------|-------------|---------------|
+| **Yocto/OpenEmbedded** | `meta-otapulse/` layer | This document |
+| **Buildroot** | `buildroot-otapulse/` BR2_EXTERNAL | [Buildroot Integration Guide](../buildroot-otapulse/docs/BUILDROOT_INTEGRATION.md) |
+| OpenWrt | Planned | [Roadmap](TODO_BUILD_SYSTEMS.md) |
+| Debian/Ubuntu (.deb) | Planned | [Roadmap](TODO_BUILD_SYSTEMS.md) |
+| Alpine Linux | Planned | [Roadmap](TODO_BUILD_SYSTEMS.md) |
+
+The core OTA agent (`soc-ota-agent/`) is build-system agnostic and can be integrated with any Linux distribution.
+
+> **Want another build system?** See the [Build System Roadmap](TODO_BUILD_SYSTEMS.md) for planned integrations or contribute your own!
+
+---
+
+# Yocto Integration
+
+This section covers Yocto/OpenEmbedded integration.
 
 ## Prerequisites
 

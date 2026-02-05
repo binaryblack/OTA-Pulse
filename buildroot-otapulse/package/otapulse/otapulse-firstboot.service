@@ -1,0 +1,16 @@
+[Unit]
+Description=OTA-Pulse First Boot Partition Setup
+DefaultDependencies=no
+Before=local-fs-pre.target
+After=systemd-udevd.service
+ConditionPathExists=!/data/.otapulse-firstboot-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/otapulse-firstboot
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=local-fs-pre.target

@@ -1,0 +1,265 @@
+config BR2_PACKAGE_OTAPULSE
+	bool "otapulse"
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_HOST_GO
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_CA_CERTIFICATES
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_LIBBLKID
+	select BR2_PACKAGE_E2FSPROGS
+	select BR2_PACKAGE_DOSFSTOOLS
+	help
+	  OTA-Pulse is a robust over-the-air (OTA) update solution for
+	  embedded Linux devices. It provides atomic A/B partition updates
+	  with automatic rollback capability.
+
+	  Features:
+	  - Atomic A/B rootfs updates
+	  - Cryptographic signature verification (mandatory)
+	  - Automatic rollback on failure
+	  - State script hooks for custom actions
+	  - D-Bus API for programmatic control
+
+	  https://github.com/AkhileshNS/OTA-Pulse
+
+if BR2_PACKAGE_OTAPULSE
+
+comment "--- Server Configuration (Required) ---"
+
+config BR2_PACKAGE_OTAPULSE_SERVER_URL
+	string "OTA Server URL"
+	help
+	  The URL of the OTA management server.
+	  Example: https://ota.example.com
+
+	  This is REQUIRED. The build will fail if not set.
+
+config BR2_PACKAGE_OTAPULSE_TENANT_TOKEN
+	string "Tenant Token"
+	default ""
+	help
+	  The tenant token for multi-tenant server deployments.
+	  Leave empty if not using multi-tenancy.
+
+comment "--- Security Configuration (Mandatory) ---"
+
+config BR2_PACKAGE_OTAPULSE_VERIFY_KEY
+	string "Artifact Verification Public Key Path"
+	help
+	  Path to the RSA or ECDSA public key file used to verify
+	  firmware artifact signatures.
+
+	  This is REQUIRED. Signature verification cannot be disabled.
+
+	  The key file will be copied to /etc/otapulse/keys/ on the target.
+
+	  Generate a key pair with:
+	    openssl genpkey -algorithm RSA -out private.pem -pkeyopt rsa_keygen_bits:4096
+	    openssl rsa -pubout -in private.pem -out public.pem
+
+	  Or for ECDSA:
+	    openssl ecparam -genkey -name secp384r1 -out private.pem
+	    openssl ec -in private.pem -pubout -out public.pem
+
+config BR2_PACKAGE_OTAPULSE_VERIFY_KEY_SECONDARY
+	string "Secondary Verification Key (Optional)"
+	default ""
+	help
+	  Path to a secondary public key for key rotation scenarios.
+	  During key rotation, both old and new keys can be trusted.
+	  Leave empty if not needed.
+
+comment "--- Device Configuration ---"
+
+config BR2_PACKAGE_OTAPULSE_DEVICE_TYPE
+	string "Device Type Identifier"
+	default "generic-arm"
+	help
+	  A unique identifier for this device type/platform.
+	  Used by the OTA server to target specific device groups.
+
+	  Examples: imx8mp-evk, rpi4, rockchip-rk3588
+
+comment "--- Polling Configuration ---"
+
+config BR2_PACKAGE_OTAPULSE_UPDATE_POLL_INTERVAL
+	int "Update Poll Interval (seconds)"
+	default 1800
+	help
+	  How often the device checks for new updates.
+	  Default: 1800 (30 minutes)
+
+	  Lower values increase server load but provide faster updates.
+	  Minimum recommended: 300 (5 minutes)
+
+config BR2_PACKAGE_OTAPULSE_INVENTORY_POLL_INTERVAL
+	int "Inventory Poll Interval (seconds)"
+	default 28800
+	help
+	  How often the device reports its inventory/telemetry.
+	  Default: 28800 (8 hours)
+
+config BR2_PACKAGE_OTAPULSE_RETRY_POLL_INTERVAL
+	int "Retry Poll Interval (seconds)"
+	default 300
+	help
+	  How long to wait before retrying after a failed operation.
+	  Default: 300 (5 minutes)
+
+comment "--- Partition Configuration ---"
+
+choice
+	prompt "Partition Mode"
+	default BR2_PACKAGE_OTAPULSE_PARTITION_DYNAMIC
+	help
+	  Select how A/B partitions are configured.
+
+config BR2_PACKAGE_OTAPULSE_PARTITION_DYNAMIC
+	bool "Dynamic (first-boot setup)"
+	help
+	  A/B partitions are created on first boot.
+	  Smaller initial image, requires first-boot script.
+	  Recommended for most use cases.
+
+config BR2_PACKAGE_OTAPULSE_PARTITION_STATIC
+	bool "Static (pre-allocated)"
+	help
+	  A/B partitions are pre-created in the image.
+	  Larger initial image, no first-boot setup needed.
+	  Required for systems without resize capability.
+
+endchoice
+
+config BR2_PACKAGE_OTAPULSE_ROOTFS_SIZE
+	string "Root Filesystem Size"
+	default "1G"
+	help
+	  Size of each rootfs partition (A and B).
+	  Use suffixes: M for megabytes, G for gigabytes.
+
+	  Examples: 512M, 1G, 2G
+
+	  Must be larger than the actual rootfs content.
+	  For large images (Qt, multimedia), use 2G or more.
+
+config BR2_PACKAGE_OTAPULSE_DATA_SIZE
+	string "Data Partition Size"
+	default "512M"
+	help
+	  Size of the persistent data partition.
+	  This partition survives OTA updates.
+
+	  Stores: credentials, SSH keys, application data.
+
+comment "--- Boot Environment ---"
+
+choice
+	prompt "Boot Slot Switching Method"
+	default BR2_PACKAGE_OTAPULSE_BOOT_UBOOT_ENV
+	help
+	  Select how the bootloader determines which partition to boot.
+
+config BR2_PACKAGE_OTAPULSE_BOOT_UBOOT_ENV
+	bool "U-Boot Environment"
+	help
+	  Use U-Boot environment variables (fw_setenv/fw_printenv).
+	  Most common method, works with most ARM SoCs.
+	  Requires u-boot-fw-utils package.
+
+config BR2_PACKAGE_OTAPULSE_BOOT_GRUB
+	bool "GRUB Environment"
+	depends on BR2_TARGET_GRUB2
+	help
+	  Use GRUB environment block for x86/x86_64 systems.
+	  Requires grub-editenv utility.
+
+config BR2_PACKAGE_OTAPULSE_BOOT_FILE
+	bool "File-based (fallback)"
+	help
+	  Use a file on the data partition to track boot slot.
+	  Only use if U-Boot env is not available.
+	  Warning: Less reliable after rollback scenarios.
+
+endchoice
+
+if BR2_PACKAGE_OTAPULSE_BOOT_UBOOT_ENV
+
+config BR2_PACKAGE_OTAPULSE_UBOOT_ENV_CONFIG
+	string "U-Boot Environment Config File"
+	default "/etc/fw_env.config"
+	help
+	  Path to the U-Boot environment configuration file.
+	  This file tells fw_setenv where the environment is stored.
+
+endif
+
+comment "--- Optional Features ---"
+
+config BR2_PACKAGE_OTAPULSE_DBUS
+	bool "D-Bus API support"
+	default y
+	select BR2_PACKAGE_DBUS
+	help
+	  Enable D-Bus API for programmatic control of the OTA agent.
+
+	  Allows other applications to:
+	  - Trigger updates programmatically
+	  - Query update status
+	  - Control update flow (pause, resume, commit)
+
+config BR2_PACKAGE_OTAPULSE_INVENTORY
+	bool "Inventory/Telemetry collection"
+	default y
+	help
+	  Enable device inventory and telemetry reporting.
+
+	  Collects: CPU info, memory, disk usage, network info, etc.
+	  Reported to the OTA server for fleet management.
+
+config BR2_PACKAGE_OTAPULSE_STATE_SCRIPTS
+	bool "Install example state scripts"
+	default y
+	help
+	  Install example state scripts that run during OTA lifecycle.
+
+	  Scripts run at: Download, Install, Reboot, Commit stages.
+	  Useful for stopping services, backing up data, etc.
+
+config BR2_PACKAGE_OTAPULSE_UPDATE_MODULES
+	bool "Install update modules"
+	default y
+	help
+	  Install update modules for different artifact types.
+
+	  Includes: single-file, directory, docker, deb, rpm modules.
+	  Allows updating more than just the rootfs.
+
+config BR2_PACKAGE_OTAPULSE_WATCHDOG
+	bool "Watchdog support"
+	default y
+	select BR2_PACKAGE_BUSYBOX_SHOW_OTHERS
+	help
+	  Enable hardware watchdog integration.
+
+	  Automatically reboots the device if the update process hangs.
+	  Provides additional safety during OTA operations.
+
+comment "--- Systemd/Init Configuration ---"
+
+config BR2_PACKAGE_OTAPULSE_SYSTEMD
+	bool "Install systemd service"
+	default y
+	depends on BR2_INIT_SYSTEMD
+	help
+	  Install the systemd service file for automatic startup.
+
+config BR2_PACKAGE_OTAPULSE_SYSVINIT
+	bool "Install SysV init script"
+	default y
+	depends on BR2_INIT_SYSV || BR2_INIT_BUSYBOX
+	help
+	  Install the SysV init script for automatic startup.
+
+endif # BR2_PACKAGE_OTAPULSE
