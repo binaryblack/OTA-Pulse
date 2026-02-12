@@ -57,6 +57,22 @@ make
 - Go 1.18+ (for host tools)
 - Standard build tools (gcc, make, etc.)
 
+### Init System Requirement
+
+OTA-Pulse **requires systemd** as the init system (`BR2_INIT_SYSTEMD=y`). The OTA agent
+relies on systemd for:
+
+- Service ordering (partition setup → provisioning → OTA agent)
+- Automatic restart on failure (`Restart=on-failure`)
+- Network-online target dependency for server connectivity
+- Journal logging (`journalctl -u otapulse`)
+
+If systemd is not enabled in your defconfig, the `otapulse` package will not appear in
+menuconfig, and you will see a comment: *"otapulse requires systemd (BR2_INIT_SYSTEMD)"*.
+
+All provided defconfigs (`otapulse_rpi4_defconfig`, `otapulse_qemu_aarch64_defconfig`,
+`otapulse_imx8_defconfig`) already include `BR2_INIT_SYSTEMD=y`.
+
 ### Required Buildroot Packages
 
 These are automatically selected when you enable OTA-Pulse:
@@ -326,6 +342,15 @@ Upload the `.mender` file to your OTA management server and create a deployment 
 ## Troubleshooting
 
 ### Build Errors
+
+**"OTA-Pulse requires systemd as the init system"**
+- Your defconfig does not have `BR2_INIT_SYSTEMD=y`
+- Enable it in menuconfig: `System configuration → Init system → systemd`
+- Or add `BR2_INIT_SYSTEMD=y` to your defconfig
+
+**"otapulse" not visible in menuconfig**
+- The package is hidden because systemd is not the selected init system
+- Look for the comment *"otapulse requires systemd (BR2_INIT_SYSTEMD)"* in the package list
 
 **"BR2_PACKAGE_OTAPULSE_VERIFY_KEY is required"**
 - You must provide a verification key path

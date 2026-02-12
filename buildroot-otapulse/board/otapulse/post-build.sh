@@ -13,6 +13,60 @@ TARGET_DIR="$1"
 
 echo "=== OTA-Pulse Post-Build Script ==="
 
+# ==============================================================================
+# Validate OTA-Pulse is installed in the target filesystem
+# ==============================================================================
+
+OTAPULSE_ERRORS=0
+
+# Check binary
+if [ ! -f "${TARGET_DIR}/usr/bin/otapulse" ]; then
+    echo "ERROR: otapulse binary not found in target filesystem!"
+    echo "       Expected: /usr/bin/otapulse"
+    echo "       Make sure BR2_PACKAGE_OTAPULSE=y is set in your defconfig."
+    OTAPULSE_ERRORS=$((OTAPULSE_ERRORS + 1))
+fi
+
+# Check systemd service
+if [ ! -f "${TARGET_DIR}/usr/lib/systemd/system/otapulse.service" ]; then
+    echo "ERROR: otapulse systemd service not installed!"
+    echo "       Expected: /usr/lib/systemd/system/otapulse.service"
+    echo "       Make sure BR2_PACKAGE_OTAPULSE_SYSTEMD=y is set."
+    OTAPULSE_ERRORS=$((OTAPULSE_ERRORS + 1))
+fi
+
+# Check configuration file
+if [ ! -f "${TARGET_DIR}/etc/otapulse/otapulse.conf" ]; then
+    echo "ERROR: otapulse configuration file not found!"
+    echo "       Expected: /etc/otapulse/otapulse.conf"
+    OTAPULSE_ERRORS=$((OTAPULSE_ERRORS + 1))
+fi
+
+# Check verification key
+if [ ! -f "${TARGET_DIR}/etc/otapulse/keys/artifact-verify-key.pem" ]; then
+    echo "ERROR: artifact verification key not installed!"
+    echo "       Expected: /etc/otapulse/keys/artifact-verify-key.pem"
+    echo "       Make sure BR2_PACKAGE_OTAPULSE_VERIFY_KEY points to a valid key file."
+    OTAPULSE_ERRORS=$((OTAPULSE_ERRORS + 1))
+fi
+
+# Check systemd itself is present
+if [ ! -d "${TARGET_DIR}/usr/lib/systemd" ]; then
+    echo "ERROR: systemd not found in target filesystem!"
+    echo "       OTA-Pulse requires BR2_INIT_SYSTEMD=y."
+    OTAPULSE_ERRORS=$((OTAPULSE_ERRORS + 1))
+fi
+
+if [ ${OTAPULSE_ERRORS} -gt 0 ]; then
+    echo ""
+    echo "FATAL: ${OTAPULSE_ERRORS} OTA-Pulse installation error(s) found."
+    echo "       The image will not have a functioning OTA agent."
+    echo "       Fix the errors above and rebuild."
+    exit 1
+fi
+
+echo "OTA-Pulse installation verified: binary, service, config, and key present."
+
 # Ensure required directories exist
 mkdir -p "${TARGET_DIR}/etc/otapulse/scripts"
 mkdir -p "${TARGET_DIR}/etc/otapulse/keys"

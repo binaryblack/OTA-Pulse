@@ -1,5 +1,9 @@
+comment "otapulse requires systemd (BR2_INIT_SYSTEMD)"
+	depends on !BR2_INIT_SYSTEMD
+
 config BR2_PACKAGE_OTAPULSE
 	bool "otapulse"
+	depends on BR2_INIT_SYSTEMD
 	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
 	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
 	depends on BR2_TOOLCHAIN_HAS_THREADS
@@ -15,6 +19,10 @@ config BR2_PACKAGE_OTAPULSE
 	  OTA-Pulse is a robust over-the-air (OTA) update solution for
 	  embedded Linux devices. It provides atomic A/B partition updates
 	  with automatic rollback capability.
+
+	  Requires systemd as the init system (BR2_INIT_SYSTEMD=y).
+	  The OTA agent relies on systemd for service ordering,
+	  partition setup sequencing, and automatic restart.
 
 	  Features:
 	  - Atomic A/B rootfs updates
@@ -248,20 +256,14 @@ config BR2_PACKAGE_OTAPULSE_WATCHDOG
 	  Automatically reboots the device if the update process hangs.
 	  Provides additional safety during OTA operations.
 
-comment "--- Systemd/Init Configuration ---"
+comment "--- Systemd Service Configuration ---"
 
 config BR2_PACKAGE_OTAPULSE_SYSTEMD
 	bool "Install systemd service"
 	default y
-	depends on BR2_INIT_SYSTEMD
 	help
-	  Install the systemd service file for automatic startup.
-
-config BR2_PACKAGE_OTAPULSE_SYSVINIT
-	bool "Install SysV init script"
-	default y
-	depends on BR2_INIT_SYSV || BR2_INIT_BUSYBOX
-	help
-	  Install the SysV init script for automatic startup.
+	  Install the systemd service files for automatic startup.
+	  This installs service units for the OTA agent, first-boot
+	  partition setup, and auto-provisioning.
 
 endif # BR2_PACKAGE_OTAPULSE

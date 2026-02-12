@@ -1,0 +1,37 @@
+comment "memfault requires systemd (BR2_INIT_SYSTEMD)"
+	depends on !BR2_INIT_SYSTEMD
+
+config BR2_PACKAGE_MEMFAULT
+	bool "memfault"
+	depends on BR2_INIT_SYSTEMD
+	select BR2_PACKAGE_CA_CERTIFICATES
+	select BR2_PACKAGE_CURL
+	select BR2_PACKAGE_JQ
+	help
+	  SoC Monitoring daemon and CLI tools for embedded Linux devices.
+	  Provides telemetry collection, crash capture, coredump handling,
+	  device provisioning, and system health monitoring.
+
+	  Installs:
+	  - memfaultd: monitoring daemon (metrics, heartbeat, coredumps)
+	  - memfault-watchdog: hardware watchdog monitor
+	  - soc-ctl: device control CLI (config, provision, status)
+	  - soc-deregister: device deregistration utility
+	  - show-version: firmware version display
+
+	  Requires systemd as the init system (BR2_INIT_SYSTEMD=y).
+
+if BR2_PACKAGE_MEMFAULT
+
+config BR2_PACKAGE_MEMFAULT_DASHBOARD
+	bool "Local web dashboard"
+	select BR2_PACKAGE_PYTHON3
+	help
+	  Install the local web dashboard (soc-dashboard) that provides
+	  real-time device status via a browser interface on port 8080.
+
+	  Requires Python 3. Adds ~5MB to the image.
+	  The dashboard service is disabled by default and must be
+	  enabled manually with: soc-ctl dashboard enable
+
+endif # BR2_PACKAGE_MEMFAULT

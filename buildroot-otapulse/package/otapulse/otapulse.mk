@@ -33,6 +33,11 @@ endif
 # Validate required configuration - fail early if not set
 define OTAPULSE_VALIDATE_CONFIG
 	@echo "Validating OTA-Pulse configuration..."
+	$(if $(BR2_INIT_SYSTEMD),,\
+		$(error OTA-Pulse requires systemd as the init system. \
+			Please set BR2_INIT_SYSTEMD=y in your defconfig. \
+			The OTA agent depends on systemd for service ordering, \
+			partition setup sequencing, and automatic restart.))
 	$(if $(call qstrip,$(BR2_PACKAGE_OTAPULSE_SERVER_URL)),,\
 		$(error BR2_PACKAGE_OTAPULSE_SERVER_URL is required but not set. \
 			Please configure the OTA server URL in menuconfig.))
@@ -287,18 +292,6 @@ OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_SYSTEMD_SERVICE
 endif
 
 # ==============================================================================
-# SysV Init Script Installation
-# ==============================================================================
-
-ifeq ($(BR2_PACKAGE_OTAPULSE_SYSVINIT),y)
-define OTAPULSE_INSTALL_SYSVINIT
-	$(INSTALL) -D -m 0755 $(OTAPULSE_PKGDIR)/S99otapulse \
-		$(TARGET_DIR)/etc/init.d/S99otapulse
-endef
-OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_SYSVINIT
-endif
-
-# ==============================================================================
 # U-Boot Environment Configuration
 # ==============================================================================
 
@@ -331,17 +324,11 @@ define OTAPULSE_INSTALL_FIRSTBOOT
 		$(TARGET_DIR)/usr/sbin/otapulse-firstboot
 
 	# Install systemd service for firstboot
-	$(if $(BR2_INIT_SYSTEMD),\
-		$(INSTALL) -D -m 0644 $(OTAPULSE_PKGDIR)/otapulse-firstboot.service \
-			$(TARGET_DIR)/usr/lib/systemd/system/otapulse-firstboot.service; \
-		mkdir -p $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants; \
-		ln -sf /usr/lib/systemd/system/otapulse-firstboot.service \
-			$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/otapulse-firstboot.service)
-
-	# Install init script for SysV
-	$(if $(BR2_INIT_SYSV)$(BR2_INIT_BUSYBOX),\
-		$(INSTALL) -D -m 0755 $(OTAPULSE_PKGDIR)/S10otapulse-firstboot \
-			$(TARGET_DIR)/etc/init.d/S10otapulse-firstboot)
+	$(INSTALL) -D -m 0644 $(OTAPULSE_PKGDIR)/otapulse-firstboot.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/otapulse-firstboot.service
+	mkdir -p $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants
+	ln -sf /usr/lib/systemd/system/otapulse-firstboot.service \
+		$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/otapulse-firstboot.service
 endef
 OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_FIRSTBOOT
 endif
