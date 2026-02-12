@@ -10,6 +10,7 @@ config BR2_PACKAGE_OTAPULSE
 	select BR2_PACKAGE_UTIL_LINUX_LIBBLKID
 	select BR2_PACKAGE_E2FSPROGS
 	select BR2_PACKAGE_DOSFSTOOLS
+	select BR2_PACKAGE_XZ
 	help
 	  OTA-Pulse is a robust over-the-air (OTA) update solution for
 	  embedded Linux devices. It provides atomic A/B partition updates
@@ -201,6 +202,7 @@ config BR2_PACKAGE_OTAPULSE_DBUS
 	bool "D-Bus API support"
 	default y
 	select BR2_PACKAGE_DBUS
+	select BR2_PACKAGE_LIBGLIB2
 	help
 	  Enable D-Bus API for programmatic control of the OTA agent.
 

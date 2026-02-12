@@ -12,10 +12,10 @@ OTAPULSE_LICENSE_FILES = LICENSE
 
 OTAPULSE_GOMOD = github.com/binaryblack/OTA-Pulse
 
-OTAPULSE_DEPENDENCIES = host-go openssl ca-certificates util-linux e2fsprogs dosfstools
+OTAPULSE_DEPENDENCIES = host-go host-pkgconf openssl ca-certificates util-linux e2fsprogs dosfstools xz
 
 ifeq ($(BR2_PACKAGE_OTAPULSE_DBUS),y)
-OTAPULSE_DEPENDENCIES += dbus
+OTAPULSE_DEPENDENCIES += dbus libglib2
 endif
 
 ifeq ($(BR2_PACKAGE_OTAPULSE_BOOT_UBOOT_ENV),y)
@@ -53,11 +53,34 @@ OTAPULSE_PRE_CONFIGURE_HOOKS += OTAPULSE_VALIDATE_CONFIG
 # Go Build Configuration
 # ==============================================================================
 
+# LibreSSL compatibility - define missing OpenSSL X509 error constants
+OTAPULSE_LIBRESSL_COMPAT = \
+	-DX509_V_ERR_DANE_NO_MATCH=65 \
+	-DX509_V_ERR_NO_VALID_SCTS=67 \
+	-DX509_V_ERR_PATH_LOOP=55 \
+	-DX509_V_ERR_PROXY_SUBJECT_NAME_VIOLATION=68 \
+	-DX509_V_ERR_SUITE_B_CANNOT_SIGN_P_384_WITH_P_256=59 \
+	-DX509_V_ERR_SUITE_B_INVALID_ALGORITHM=57 \
+	-DX509_V_ERR_SUITE_B_INVALID_CURVE=58 \
+	-DX509_V_ERR_SUITE_B_INVALID_SIGNATURE_ALGORITHM=60 \
+	-DX509_V_ERR_SUITE_B_INVALID_VERSION=56 \
+	-DX509_V_ERR_SUITE_B_LOS_NOT_ALLOWED=61 \
+	-DX509_V_ERR_EE_KEY_TOO_SMALL=66 \
+	-DX509_V_ERR_CA_KEY_TOO_SMALL=67 \
+	-DX509_V_ERR_CA_MD_TOO_WEAK=68 \
+	-DX509_V_ERR_OCSP_VERIFY_NEEDED=73 \
+	-DX509_V_ERR_OCSP_VERIFY_FAILED=74 \
+	-DX509_V_ERR_OCSP_CERT_UNKNOWN=75
+
 OTAPULSE_GO_ENV = \
 	GOOS=linux \
 	CGO_ENABLED=1 \
-	CGO_CFLAGS="-Wno-implicit-fallthrough -Wno-stringop-overflow $(TARGET_CFLAGS)" \
-	CGO_LDFLAGS="$(TARGET_LDFLAGS)" \
+	PKG_CONFIG="$(PKG_CONFIG_HOST_BINARY)" \
+	PKG_CONFIG_PATH="$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig" \
+	PKG_CONFIG_SYSROOT_DIR="$(STAGING_DIR)" \
+	PKG_CONFIG_LIBDIR="$(STAGING_DIR)/usr/lib/pkgconfig" \
+	CGO_CFLAGS="-Wno-implicit-fallthrough -Wno-stringop-overflow -Wno-deprecated-declarations $(OTAPULSE_LIBRESSL_COMPAT) $(TARGET_CFLAGS) -I$(STAGING_DIR)/usr/include" \
+	CGO_LDFLAGS="$(TARGET_LDFLAGS) -L$(STAGING_DIR)/usr/lib" \
 	CC="$(TARGET_CC)" \
 	CXX="$(TARGET_CXX)"
 
