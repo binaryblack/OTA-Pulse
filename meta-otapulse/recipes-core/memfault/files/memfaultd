@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Memfaultd - SoC Monitoring Daemon
 # This is a reference implementation shell script
 # For production, replace with compiled Rust binary
@@ -98,7 +98,7 @@ provision_device() {
     # Skip if already provisioned (have API key)
     if [ -f "${API_KEY_FILE}" ] && [ -n "$(cat "${API_KEY_FILE}")" ]; then
         API_KEY=$(cat "${API_KEY_FILE}")
-        log "Device already provisioned with API key: ${API_KEY:0:12}..."
+        log "Device already provisioned with API key: $(printf '%.12s' "$API_KEY")..."
         return 0
     fi
 
@@ -150,7 +150,7 @@ provision_device() {
             log "Device provisioned successfully!"
             log "  Device ID: ${SERVER_DEVICE_ID}"
             log "  Hardware ID: ${DEVICE_ID}"
-            log "  API Key: ${API_KEY:0:12}... (stored securely)"
+            log "  API Key: $(printf '%.12s' "$API_KEY")... (stored securely)"
 
             # Notify soc-ota-agent to reload credentials if running
             if command -v systemctl >/dev/null 2>&1; then
@@ -241,7 +241,7 @@ collect_custom_metrics() {
     if [ -f "${CUSTOM_METRICS_FILE}" ]; then
         while IFS='=' read -r name command || [ -n "$name" ]; do
             # Skip comments and empty lines
-            [[ "$name" =~ ^#.*$ ]] && continue
+            case "$name" in '#'*) continue ;; esac
             [ -z "$name" ] && continue
 
             # Parse metric definition: name=command [unit]
@@ -249,18 +249,20 @@ collect_custom_metrics() {
             local metric_cmd="${name#*=}"
             local metric_unit=""
 
-            # Check if unit is specified (after last space)
-            if [[ "$metric_cmd" =~ ^(.+)[[:space:]]+\[([^\]]+)\]$ ]]; then
-                metric_cmd="${BASH_REMATCH[1]}"
-                metric_unit="${BASH_REMATCH[2]}"
-            fi
+            # Check if unit is specified: "command [unit]"
+            case "$metric_cmd" in
+                *'['*']')
+                    metric_unit=$(echo "$metric_cmd" | sed 's/.*\[\([^]]*\)\]$/\1/')
+                    metric_cmd=$(echo "$metric_cmd" | sed 's/[[:space:]]*\[[^]]*\]$//')
+                    ;;
+            esac
 
             # Execute the command to get the metric value
             local metric_value
             metric_value=$(eval "${metric_cmd}" 2>/dev/null || echo "0")
 
             # Validate it's a number
-            if [[ "$metric_value" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
+            if echo "$metric_value" | grep -qE '^-?[0-9]*\.?[0-9]+$'; then
                 local unit_json=""
                 if [ -n "${metric_unit}" ]; then
                     unit_json=", \"unit\": \"${metric_unit}\""
@@ -495,7 +497,7 @@ main() {
     log "Starting memfaultd (device_id=${DEVICE_ID})"
     log "Server URL: ${SERVER_URL}"
     log "API Key source: $([ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ] && echo 'file' || echo 'config')"
-    log "API Key: ${API_KEY:0:12}... (length: ${#API_KEY})"
+    log "API Key: $(printf '%.12s' "$API_KEY")... (length: ${#API_KEY})"
     echo $$ > "${PID_FILE}"
 
     # Notify systemd we're ready EARLY so we don't block boot

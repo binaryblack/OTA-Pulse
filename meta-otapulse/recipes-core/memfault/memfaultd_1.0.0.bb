@@ -59,7 +59,7 @@ S = "${WORKDIR}/memfaultd-rs"
 DEPENDS = "openssl"
 
 # Runtime dependencies
-RDEPENDS:${PN} = "ca-certificates bash jq curl"
+RDEPENDS:${PN} = "ca-certificates jq curl"
 RDEPENDS:${PN} += "${@bb.utils.contains('DISTRO_FEATURES', 'systemd', 'systemd', '', d)}"
 
 # Runtime recommendations

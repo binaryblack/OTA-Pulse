@@ -1,4 +1,4 @@
-cd#!/bin/bash
+#!/bin/sh
 # Display current build version and information
 
 VERSION_FILE="/etc/build-version"

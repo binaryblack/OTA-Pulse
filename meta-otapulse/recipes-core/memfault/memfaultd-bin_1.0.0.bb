@@ -45,7 +45,7 @@ S = "${WORKDIR}"
 
 # Dependencies for shell scripts
 DEPENDS = "curl openssl systemd"
-RDEPENDS:${PN} = "curl ca-certificates systemd bash gzip coreutils util-linux jq"
+RDEPENDS:${PN} = "curl ca-certificates systemd gzip coreutils util-linux jq"
 
 # Runtime recommendations
 RRECOMMENDS:${PN} = "kernel-module-watchdog"

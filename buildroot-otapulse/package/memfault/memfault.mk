@@ -37,8 +37,9 @@ define MEMFAULT_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants
 	ln -sf /usr/lib/systemd/system/memfaultd.service \
 		$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/memfaultd.service
-	ln -sf /usr/lib/systemd/system/memfault-watchdog.service \
-		$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/memfault-watchdog.service
+	# NOTE: memfault-watchdog is NOT auto-enabled to prevent reboot loops
+	# if memfaultd fails to start (e.g. missing /bin/bash on busybox systems).
+	# Enable manually with: systemctl enable memfault-watchdog
 
 	# Install sysctl configuration for coredump handling
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/sysctl.d

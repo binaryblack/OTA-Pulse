@@ -5,7 +5,12 @@
 CONFIG_FILE="/etc/memfault/config.json"
 WATCHDOG_DEVICE="/dev/watchdog"
 REBOOT_REASON_FILE="/var/lib/memfault/last_reboot_reason"
+REBOOT_COUNT_FILE="/var/lib/memfault/watchdog_reboot_count"
 LOG_FILE="/var/log/memfault/watchdog.log"
+
+# Reboot loop protection: max reboots within a time window
+MAX_REBOOTS=3
+REBOOT_WINDOW=600  # seconds (10 minutes)
 
 # Parse config
 TIMEOUT=30
@@ -67,7 +72,36 @@ check_system_health() {
 
 trigger_reboot() {
     local reason="${1:-unknown}"
-    log "Triggering reboot due to: ${reason}"
+
+    # Reboot loop protection: check how many recent reboots we've triggered
+    local now
+    now=$(date +%s 2>/dev/null || echo "0")
+    local reboot_count=0
+    local cutoff=$((now - REBOOT_WINDOW))
+
+    if [ -f "${REBOOT_COUNT_FILE}" ]; then
+        # Count reboots within the time window, clean up old entries
+        local new_entries=""
+        while read -r ts; do
+            if [ "${ts}" -ge "${cutoff}" ] 2>/dev/null; then
+                reboot_count=$((reboot_count + 1))
+                new_entries="${new_entries}${ts}
+"
+            fi
+        done < "${REBOOT_COUNT_FILE}"
+        printf '%s' "${new_entries}" > "${REBOOT_COUNT_FILE}" 2>/dev/null
+    fi
+
+    if [ "${reboot_count}" -ge "${MAX_REBOOTS}" ]; then
+        log "REBOOT LOOP PROTECTION: ${reboot_count} reboots in last ${REBOOT_WINDOW}s, NOT rebooting"
+        log "Manual intervention required. Reason was: ${reason}"
+        return 1
+    fi
+
+    log "Triggering reboot due to: ${reason} (reboot ${reboot_count}/${MAX_REBOOTS} in window)"
+
+    # Record this reboot attempt
+    echo "${now}" >> "${REBOOT_COUNT_FILE}" 2>/dev/null
 
     # Store reboot reason
     echo "${reason}" > "${REBOOT_REASON_FILE}" 2>/dev/null
@@ -75,7 +109,7 @@ trigger_reboot() {
     # Sync filesystems
     sync
 
-    # Fallback to manual reboot
+    # Reboot
     sleep 2
     reboot -f
 }
