@@ -9,7 +9,7 @@ MEMFAULT_SITE = $(BR2_EXTERNAL_OTAPULSE_PATH)/../meta-otapulse/recipes-core/memf
 MEMFAULT_SITE_METHOD = local
 MEMFAULT_LICENSE = Apache-2.0
 
-MEMFAULT_DEPENDENCIES = ca-certificates curl jq
+MEMFAULT_DEPENDENCIES = ca-certificates libcurl jq
 
 # ==============================================================================
 # Installation

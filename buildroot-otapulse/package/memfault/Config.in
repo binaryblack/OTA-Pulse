@@ -5,7 +5,8 @@ config BR2_PACKAGE_MEMFAULT
 	bool "memfault"
 	depends on BR2_INIT_SYSTEMD
 	select BR2_PACKAGE_CA_CERTIFICATES
-	select BR2_PACKAGE_CURL
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBCURL_CURL
 	select BR2_PACKAGE_JQ
 	help
 	  SoC Monitoring daemon and CLI tools for embedded Linux devices.

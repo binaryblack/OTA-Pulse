@@ -38,7 +38,7 @@ log "Starting OTA-Pulse first boot partition setup..."
 # Detect the boot device
 detect_boot_device() {
     # Get the root device from /proc/cmdline
-    ROOT_DEV=$(cat /proc/cmdline | grep -o 'root=[^ ]*' | cut -d= -f2)
+    ROOT_DEV=$(cat /proc/cmdline | grep -o 'root=[^ ]*' | cut -d= -f2-)
 
     if [ -z "$ROOT_DEV" ]; then
         # Fallback: detect from mounted rootfs
