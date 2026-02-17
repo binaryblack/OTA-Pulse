@@ -15,14 +15,22 @@ GENIMAGE_TMP="${BUILD_DIR}/genimage.tmp"
 
 echo "=== OTA-Pulse Post-Image Script ==="
 
-# Allow override of genimage config
-if [ -n "${BR2_PACKAGE_OTAPULSE_GENIMAGE_CFG}" ]; then
-    GENIMAGE_CFG="${BR2_PACKAGE_OTAPULSE_GENIMAGE_CFG}"
+# Read Buildroot config variables from .config (BR2_PACKAGE_* are not exported
+# to the shell environment by Buildroot — parse BR2_CONFIG instead).
+br2_config_get() {
+    sed -n "s/^${1}=\"\(.*\)\"$/\1/p" "${BR2_CONFIG:-/dev/null}"
+}
+
+GENIMAGE_CFG_OVERRIDE="$(br2_config_get BR2_PACKAGE_OTAPULSE_GENIMAGE_CFG)"
+if [ -n "${GENIMAGE_CFG_OVERRIDE}" ]; then
+    GENIMAGE_CFG="${GENIMAGE_CFG_OVERRIDE}"
 fi
 
 # Export partition sizes for genimage
-export OTAPULSE_ROOTFS_SIZE="${BR2_PACKAGE_OTAPULSE_ROOTFS_SIZE:-1G}"
-export OTAPULSE_DATA_SIZE="${BR2_PACKAGE_OTAPULSE_DATA_SIZE:-512M}"
+export OTAPULSE_ROOTFS_SIZE="$(br2_config_get BR2_PACKAGE_OTAPULSE_ROOTFS_SIZE)"
+OTAPULSE_ROOTFS_SIZE="${OTAPULSE_ROOTFS_SIZE:-1G}"
+export OTAPULSE_DATA_SIZE="$(br2_config_get BR2_PACKAGE_OTAPULSE_DATA_SIZE)"
+OTAPULSE_DATA_SIZE="${OTAPULSE_DATA_SIZE:-512M}"
 
 # Run genimage to create SD card image
 rm -rf "${GENIMAGE_TMP}"
@@ -38,9 +46,10 @@ echo "=== SD Card Image Generated ==="
 
 # Generate signed Mender OTA artifact (mandatory - hard-fail on any missing dependency)
 MENDER_ARTIFACT="${HOST_DIR}/bin/mender-artifact"
-ARTIFACT_NAME="${BR2_PACKAGE_OTAPULSE_DEVICE_TYPE:-generic}-$(date +%Y%m%d%H%M%S)"
+DEVICE_TYPE="$(br2_config_get BR2_PACKAGE_OTAPULSE_DEVICE_TYPE)"
+ARTIFACT_NAME="${DEVICE_TYPE:-generic}-$(date +%Y%m%d%H%M%S)"
 ROOTFS_IMAGE="${BINARIES_DIR}/rootfs.ext4"
-SIGNING_KEY="${BR2_PACKAGE_OTAPULSE_SIGNING_KEY:-}"
+SIGNING_KEY="$(br2_config_get BR2_PACKAGE_OTAPULSE_SIGNING_KEY)"
 
 if [ ! -x "${MENDER_ARTIFACT}" ]; then
     echo "ERROR: mender-artifact not found at ${MENDER_ARTIFACT}"
@@ -65,7 +74,7 @@ fi
 
 echo "Generating signed Mender OTA artifact..."
 "${MENDER_ARTIFACT}" write rootfs-image \
-    --device-type "${BR2_PACKAGE_OTAPULSE_DEVICE_TYPE:-generic}" \
+    --device-type "${DEVICE_TYPE:-generic}" \
     --artifact-name "${ARTIFACT_NAME}" \
     --file "${ROOTFS_IMAGE}" \
     --key "${SIGNING_KEY}" \

@@ -12,7 +12,7 @@ OTAPULSE_LICENSE_FILES = LICENSE
 
 OTAPULSE_GOMOD = github.com/binaryblack/OTA-Pulse
 
-OTAPULSE_DEPENDENCIES = host-go host-pkgconf openssl ca-certificates util-linux e2fsprogs dosfstools xz
+OTAPULSE_DEPENDENCIES = host-go host-pkgconf host-mender-artifact openssl ca-certificates util-linux e2fsprogs dosfstools xz
 
 ifeq ($(BR2_PACKAGE_OTAPULSE_DBUS),y)
 OTAPULSE_DEPENDENCIES += dbus libglib2
