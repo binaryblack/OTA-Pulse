@@ -218,6 +218,7 @@ choice
 
 config BR2_PACKAGE_OTAPULSE_BOOT_UBOOT_ENV
 	bool "U-Boot Environment"
+	select BR2_PACKAGE_UBOOT_TOOLS
 	help
 	  Use U-Boot environment variables (fw_setenv/fw_printenv).
 	  Most common method, works with most ARM SoCs.
