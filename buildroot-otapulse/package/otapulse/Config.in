@@ -8,6 +8,7 @@ config BR2_PACKAGE_OTAPULSE
 	depends on BR2_PACKAGE_HOST_GO_TARGET_CGO_LINKING_SUPPORTS
 	depends on BR2_TOOLCHAIN_HAS_THREADS
 	select BR2_PACKAGE_HOST_GO
+	select BR2_PACKAGE_HOST_MENDER_ARTIFACT
 	select BR2_PACKAGE_OPENSSL
 	select BR2_PACKAGE_CA_CERTIFICATES
 	select BR2_PACKAGE_UTIL_LINUX
@@ -15,6 +16,7 @@ config BR2_PACKAGE_OTAPULSE
 	select BR2_PACKAGE_E2FSPROGS
 	select BR2_PACKAGE_DOSFSTOOLS
 	select BR2_PACKAGE_XZ
+	select BR2_PACKAGE_MEMFAULT
 	help
 	  OTA-Pulse is a robust over-the-air (OTA) update solution for
 	  embedded Linux devices. It provides atomic A/B partition updates
@@ -79,6 +81,25 @@ config BR2_PACKAGE_OTAPULSE_VERIFY_KEY_SECONDARY
 	  Path to a secondary public key for key rotation scenarios.
 	  During key rotation, both old and new keys can be trusted.
 	  Leave empty if not needed.
+
+config BR2_PACKAGE_OTAPULSE_SIGNING_KEY
+	string "Artifact Signing Private Key Path (build host)"
+	help
+	  Path to the RSA or ECDSA private key file used to sign firmware
+	  artifacts during the post-image build step.
+
+	  This key is used by the host-mender-artifact tool at build time
+	  and is NEVER embedded in the firmware image.
+
+	  The build will fail if this key is not set or the file does not exist.
+
+	  Generate a key pair with:
+	    openssl genpkey -algorithm RSA -out keys/otapulse-private.pem \
+	        -pkeyopt rsa_keygen_bits:4096
+	    openssl rsa -pubout -in keys/otapulse-private.pem \
+	        -out keys/otapulse-public.pem
+
+	  Keep the private key out of version control (add to .gitignore).
 
 comment "--- Device Configuration ---"
 

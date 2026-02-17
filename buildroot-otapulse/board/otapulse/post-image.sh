@@ -36,44 +36,43 @@ genimage \
 
 echo "=== SD Card Image Generated ==="
 
-# Generate Mender artifact if mender-artifact tool is available
-if command -v mender-artifact >/dev/null 2>&1; then
-    echo "Generating Mender-compatible OTA artifact..."
+# Generate signed Mender OTA artifact (mandatory - hard-fail on any missing dependency)
+MENDER_ARTIFACT="${HOST_DIR}/bin/mender-artifact"
+ARTIFACT_NAME="${BR2_PACKAGE_OTAPULSE_DEVICE_TYPE:-generic}-$(date +%Y%m%d%H%M%S)"
+ROOTFS_IMAGE="${BINARIES_DIR}/rootfs.ext4"
+SIGNING_KEY="${BR2_PACKAGE_OTAPULSE_SIGNING_KEY:-}"
 
-    ARTIFACT_NAME="${BR2_PACKAGE_OTAPULSE_DEVICE_TYPE:-generic}-$(date +%Y%m%d%H%M%S)"
-    ROOTFS_IMAGE="${BINARIES_DIR}/rootfs.ext4"
-
-    if [ -f "${ROOTFS_IMAGE}" ]; then
-        # Check for signing key
-        SIGNING_KEY="${BR2_PACKAGE_OTAPULSE_SIGNING_KEY:-}"
-
-        if [ -n "${SIGNING_KEY}" ] && [ -f "${SIGNING_KEY}" ]; then
-            echo "Creating signed artifact..."
-            mender-artifact write rootfs-image \
-                --device-type "${BR2_PACKAGE_OTAPULSE_DEVICE_TYPE:-generic}" \
-                --artifact-name "${ARTIFACT_NAME}" \
-                --file "${ROOTFS_IMAGE}" \
-                --key "${SIGNING_KEY}" \
-                --compression gzip \
-                --output-path "${BINARIES_DIR}/${ARTIFACT_NAME}.mender"
-        else
-            echo "WARNING: No signing key configured. Creating unsigned artifact for testing only."
-            mender-artifact write rootfs-image \
-                --device-type "${BR2_PACKAGE_OTAPULSE_DEVICE_TYPE:-generic}" \
-                --artifact-name "${ARTIFACT_NAME}" \
-                --file "${ROOTFS_IMAGE}" \
-                --compression gzip \
-                --output-path "${BINARIES_DIR}/${ARTIFACT_NAME}-unsigned.mender"
-        fi
-
-        echo "Mender artifact created: ${ARTIFACT_NAME}.mender"
-    else
-        echo "WARNING: rootfs.ext4 not found, skipping artifact generation"
-    fi
-else
-    echo "INFO: mender-artifact tool not found, skipping artifact generation"
-    echo "      Install with: go install github.com/mendersoftware/mender-artifact@latest"
+if [ ! -x "${MENDER_ARTIFACT}" ]; then
+    echo "ERROR: mender-artifact not found at ${MENDER_ARTIFACT}"
+    echo "  Enable BR2_PACKAGE_HOST_MENDER_ARTIFACT=y in your defconfig."
+    exit 1
 fi
+
+if [ ! -f "${ROOTFS_IMAGE}" ]; then
+    echo "ERROR: rootfs.ext4 not found at ${ROOTFS_IMAGE}"
+    echo "  Ensure BR2_TARGET_ROOTFS_EXT2=y and BR2_TARGET_ROOTFS_EXT2_4=y in your defconfig."
+    exit 1
+fi
+
+if [ -z "${SIGNING_KEY}" ] || [ ! -f "${SIGNING_KEY}" ]; then
+    echo "ERROR: Artifact signing key not found: '${SIGNING_KEY}'"
+    echo "  Set BR2_PACKAGE_OTAPULSE_SIGNING_KEY to your private key path."
+    echo "  Generate a key pair: openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 \\"
+    echo "    -out keys/otapulse-private.pem && openssl rsa -pubout \\"
+    echo "    -in keys/otapulse-private.pem -out keys/otapulse-public.pem"
+    exit 1
+fi
+
+echo "Generating signed Mender OTA artifact..."
+"${MENDER_ARTIFACT}" write rootfs-image \
+    --device-type "${BR2_PACKAGE_OTAPULSE_DEVICE_TYPE:-generic}" \
+    --artifact-name "${ARTIFACT_NAME}" \
+    --file "${ROOTFS_IMAGE}" \
+    --key "${SIGNING_KEY}" \
+    --compression gzip \
+    --output-path "${BINARIES_DIR}/${ARTIFACT_NAME}.mender"
+
+echo "Mender artifact created: ${ARTIFACT_NAME}.mender"
 
 echo "=== OTA-Pulse Post-Image Complete ==="
 echo ""
