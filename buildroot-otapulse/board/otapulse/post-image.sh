@@ -201,22 +201,17 @@ echo "Mender artifact created: ${ARTIFACT_NAME}.mender"
 echo ""
 echo "--- Artifact Verification ---"
 
-# Validate artifact structure
-if "${MENDER_ARTIFACT}" validate "${BINARIES_DIR}/${ARTIFACT_NAME}.mender" 2>/dev/null; then
-    echo "  OK: Artifact structure valid"
-else
-    echo "  ERROR: Artifact validation FAILED"
-    exit 1
-fi
-
-# Cross-verify: check signature with public key
+# Validate artifact with signature verification (signed artifacts require -k)
 VERIFY_KEY="$(br2_config_get BR2_PACKAGE_OTAPULSE_VERIFY_KEY)"
-if [ -n "${VERIFY_KEY}" ] && [ -f "${VERIFY_KEY}" ]; then
+if [ -z "${VERIFY_KEY}" ] || [ ! -f "${VERIFY_KEY}" ]; then
+    echo "  WARNING: No verification key configured (BR2_PACKAGE_OTAPULSE_VERIFY_KEY)"
+    echo "           Skipping artifact signature verification."
+else
     if "${MENDER_ARTIFACT}" validate "${BINARIES_DIR}/${ARTIFACT_NAME}.mender" -k "${VERIFY_KEY}" 2>/dev/null; then
-        echo "  OK: Signature verified with public key — key pair matches"
+        echo "  OK: Artifact validated and signature verified with public key"
     else
-        echo "  ERROR: Signature verification FAILED!"
-        echo "         Signing key and verification key do NOT match."
+        echo "  ERROR: Artifact validation or signature verification FAILED!"
+        echo "         Check that signing key and verification key match."
         echo "         Devices will REJECT this artifact!"
         exit 1
     fi

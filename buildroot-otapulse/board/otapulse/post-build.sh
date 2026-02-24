@@ -118,6 +118,20 @@ if [ -d "${TARGET_DIR}/etc/ssh" ]; then
     done
 fi
 
+# Install dev SSH authorized_keys if configured (for QEMU / dev builds)
+br2_config_get() {
+    sed -n "s/^${1}=\"\(.*\)\"$/\1/p" "${BR2_CONFIG:-/dev/null}"
+}
+
+DEV_SSH_KEY="$(br2_config_get BR2_PACKAGE_OTAPULSE_DEV_SSH_KEY)"
+if [ -n "${DEV_SSH_KEY}" ] && [ -f "${DEV_SSH_KEY}" ]; then
+    install -d -m 0700 "${TARGET_DIR}/root/.ssh"
+    install -m 0600 "${DEV_SSH_KEY}" "${TARGET_DIR}/root/.ssh/authorized_keys"
+    echo "Installed dev SSH key: ${DEV_SSH_KEY}"
+elif [ -n "${DEV_SSH_KEY}" ]; then
+    echo "WARNING: BR2_PACKAGE_OTAPULSE_DEV_SSH_KEY set but file not found: ${DEV_SSH_KEY}"
+fi
+
 # Create build-info file for firmware identification
 BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 BUILD_HOST=$(hostname 2>/dev/null || echo "unknown")

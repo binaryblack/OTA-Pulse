@@ -277,6 +277,20 @@ config BR2_PACKAGE_OTAPULSE_WATCHDOG
 	  Automatically reboots the device if the update process hangs.
 	  Provides additional safety during OTA operations.
 
+comment "--- Development / Testing ---"
+
+config BR2_PACKAGE_OTAPULSE_DEV_SSH_KEY
+	string "Dev SSH Authorized Keys File"
+	default ""
+	help
+	  Path to an SSH authorized_keys file to install into
+	  /root/.ssh/authorized_keys on the target.
+
+	  This is for development and QEMU testing only.
+	  Leave empty for production builds.
+
+	  Example: $(BR2_EXTERNAL_OTAPULSE_PATH)/keys/dev-authorized_keys
+
 comment "--- Systemd Service Configuration ---"
 
 config BR2_PACKAGE_OTAPULSE_SYSTEMD
