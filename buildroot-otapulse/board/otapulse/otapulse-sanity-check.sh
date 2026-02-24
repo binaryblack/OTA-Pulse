@@ -108,7 +108,7 @@ is_placeholder_url() {
     echo "$1" | grep -qiE \
         "ota\.example\.com|your-ota-server\.com|your-server\.com|\
 otapulse\.example\.com|monitoring\.example\.com|docker\.mender\.io|\
-192\.168\.0\.122|CHANGE_ME"
+CHANGE_ME"
 }
 
 is_placeholder_token() {

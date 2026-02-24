@@ -167,13 +167,18 @@ define OTAPULSE_INSTALL_TARGET_CMDS
 		echo '  "ArtifactVerifyKeys": ["/etc/otapulse/keys/artifact-verify-key.pem"]' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf)
 	echo '}' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 
-	# Install device type file
+	# Install device type file (in both locations the agent checks)
 	echo "$(call qstrip,$(BR2_PACKAGE_OTAPULSE_DEVICE_TYPE))" > $(TARGET_DIR)/etc/otapulse/device_type
+	mkdir -p $(TARGET_DIR)/var/lib/otapulse
+	echo "$(call qstrip,$(BR2_PACKAGE_OTAPULSE_DEVICE_TYPE))" > $(TARGET_DIR)/var/lib/otapulse/device_type
 
 	# Install identity scripts
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/share/otapulse/identity
 	$(INSTALL) -m 0755 $(@D)/support/otapulse-device-identity \
 		$(TARGET_DIR)/usr/share/otapulse/identity/
+	# Provide the canonical name expected by the agent binary
+	ln -sf otapulse-device-identity \
+		$(TARGET_DIR)/usr/share/otapulse/identity/mender-device-identity
 
 	# Install inventory scripts (if enabled)
 	$(if $(BR2_PACKAGE_OTAPULSE_INVENTORY),\

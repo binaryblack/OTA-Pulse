@@ -18,12 +18,12 @@ MARKER_FILE="/data/.otapulse-firstboot-done"
 LOG_TAG="otapulse-firstboot"
 
 log() {
-    logger -t "$LOG_TAG" "$1"
-    echo "[otapulse-firstboot] $1"
+    logger -t "$LOG_TAG" "$1" 2>/dev/null || true
+    echo "[otapulse-firstboot] $1" >&2
 }
 
 log_error() {
-    logger -t "$LOG_TAG" -p err "$1"
+    logger -t "$LOG_TAG" -p err "$1" 2>/dev/null || true
     echo "[otapulse-firstboot] ERROR: $1" >&2
 }
 
@@ -63,14 +63,23 @@ detect_boot_device() {
     fi
 
     # Get base device (strip partition number)
-    BASE_DEV=$(echo "$ROOT_DEV" | sed 's/[0-9]*$//' | sed 's/p$//')
-
-    # Handle NVMe and MMC devices
+    # Handle NVMe and MMC devices (e.g., /dev/mmcblk0p2 -> /dev/mmcblk0)
     if echo "$ROOT_DEV" | grep -q "nvme\|mmcblk"; then
         BASE_DEV=$(echo "$ROOT_DEV" | sed 's/p[0-9]*$//')
         PART_PREFIX="p"
     else
+        # Handles /dev/sdaN, /dev/vdaN, etc.
+        BASE_DEV=$(echo "$ROOT_DEV" | sed 's/[0-9]*$//')
         PART_PREFIX=""
+    fi
+
+    # If ROOT_DEV has no partition number (bare rootfs, e.g., root=/dev/vda),
+    # BASE_DEV == ROOT_DEV — the device IS the rootfs, no partition table
+    if [ "$BASE_DEV" = "$ROOT_DEV" ]; then
+        log "Root device $ROOT_DEV has no partition number (bare rootfs image)"
+        log "A/B OTA requires a full disk image with GPT partition table"
+        echo "$ROOT_DEV"
+        return 0
     fi
 
     log "Detected boot device: $BASE_DEV"
@@ -217,8 +226,17 @@ setup_data_mount() {
     # Create mount point
     mkdir -p /data
 
-    # Mount data partition
-    mount "$DATA_PART" /data
+    # Mount data partition (skip if already mounted via fstab)
+    if ! mountpoint -q /data 2>/dev/null; then
+        if [ -b "$DATA_PART" ]; then
+            mount "$DATA_PART" /data
+        else
+            log_error "Data partition device not found: $DATA_PART"
+            exit 1
+        fi
+    else
+        log "Data partition already mounted at /data"
+    fi
 
     # Create standard directories on data partition
     mkdir -p /data/ota
@@ -229,8 +247,8 @@ setup_data_mount() {
     touch /data/.otapulse-firstboot-done
 
     # Add fstab entry if not present
-    DATA_UUID=$(blkid -s UUID -o value "$DATA_PART")
-    if ! grep -q "$DATA_UUID" /etc/fstab 2>/dev/null; then
+    DATA_UUID=$(blkid -s UUID -o value "$DATA_PART" 2>/dev/null || true)
+    if [ -n "$DATA_UUID" ] && ! grep -q "$DATA_UUID" /etc/fstab 2>/dev/null; then
         echo "UUID=$DATA_UUID /data ext4 defaults,noatime 0 2" >> /etc/fstab
     fi
 
@@ -267,6 +285,31 @@ main() {
     log "=== OTA-Pulse First Boot Setup ==="
 
     DEVICE=$(detect_boot_device)
+
+    # Guard: verify device has a GPT partition table
+    # If this is a bare rootfs (no GPT), exit gracefully — don't crash to emergency mode
+    if ! sgdisk -v "$DEVICE" >/dev/null 2>&1; then
+        log_error "Device $DEVICE has no GPT partition table."
+        log_error "This image may be a bare rootfs without partition layout."
+        log_error "OTA A/B updates require a full disk image with GPT."
+        log_error "Skipping firstboot setup — OTA will not function."
+        exit 0
+    fi
+
+    # Early check: if all partitions already exist (pre-created by genimage/WIC),
+    # skip partitioning and just ensure data is mounted and boot env is initialized
+    if sgdisk -p "$DEVICE" 2>/dev/null | grep -q "rootfs_b" && \
+       sgdisk -p "$DEVICE" 2>/dev/null | grep -q "data"; then
+        log "All partitions already exist (rootfs_b and data found), skipping partition creation"
+
+        # Ensure data partition is mounted and boot env initialized
+        setup_data_mount "$DEVICE"
+        init_boot_env
+
+        log "=== First boot setup completed (pre-partitioned image) ==="
+        exit 0
+    fi
+
     get_partition_info "$DEVICE"
     calculate_partitions
     create_partitions "$DEVICE"

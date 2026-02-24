@@ -195,6 +195,7 @@ Use the appropriate genimage configuration:
 | Platform | Configuration |
 |----------|---------------|
 | Generic | `genimage-ab.cfg` |
+| QEMU AArch64 | `genimage-qemu-aarch64.cfg` |
 | Raspberry Pi | `genimage-rpi.cfg` |
 | NXP i.MX | `genimage-imx.cfg` |
 | Rockchip | `genimage-rockchip.cfg` |
@@ -251,6 +252,30 @@ bmaptool copy output/images/sdcard-ab-static.img /dev/sdX
    - Initializes boot environment
 3. Device is ready for OTA updates
 
+### Testing with QEMU
+
+The QEMU AArch64 defconfig produces a full GPT disk image (`sdcard-ab-qemu.img`)
+with all four partitions pre-created. Boot it with:
+
+```bash
+qemu-system-aarch64 \
+    -M virt \
+    -cpu cortex-a72 \
+    -m 1024 \
+    -kernel output/images/Image \
+    -drive file=output/images/sdcard-ab-qemu.img,format=raw,if=virtio \
+    -append "root=/dev/vda2 rootfstype=ext4 rw console=ttyAMA0" \
+    -nographic \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -device virtio-net-device,netdev=net0
+```
+
+Key points:
+- `root=/dev/vda2` — virtio disk is `vda`, partition 2 is `rootfs_a`
+- All four partitions are visible via `lsblk` (boot, rootfs_a, rootfs_b, data)
+- The firstboot script detects pre-existing partitions and skips creation
+- SSH is available at `localhost:2222`
+
 ### Verifying Installation
 
 ```bash
@@ -258,8 +283,16 @@ bmaptool copy output/images/sdcard-ab-static.img /dev/sdX
 otapulse show-artifact
 otapulse show-provides
 
+# Check partition layout
+lsblk
+
+# Check data partition and OTA state
+mount | grep /data
+cat /data/ota/mender_boot_part
+
 # Check service status
 systemctl status otapulse
+systemctl status otapulse-firstboot
 
 # Check configuration
 cat /etc/otapulse/otapulse.conf

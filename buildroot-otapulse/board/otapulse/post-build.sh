@@ -85,7 +85,7 @@ mkdir -p "${TARGET_DIR}/data"
 if ! grep -q "/data" "${TARGET_DIR}/etc/fstab" 2>/dev/null; then
     echo "" >> "${TARGET_DIR}/etc/fstab"
     echo "# OTA-Pulse persistent data partition" >> "${TARGET_DIR}/etc/fstab"
-    echo "LABEL=data    /data    ext4    defaults,noatime    0    2" >> "${TARGET_DIR}/etc/fstab"
+    echo "LABEL=data    /data    ext4    defaults,noatime,nofail,x-systemd.device-timeout=10    0    2" >> "${TARGET_DIR}/etc/fstab"
 fi
 
 # Create /etc/os-release if not exists (for inventory scripts)
