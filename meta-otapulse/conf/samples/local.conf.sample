@@ -1,80 +1,78 @@
 # Sample local.conf for OTAPulse integration
-# Copy relevant sections to your build/conf/local.conf
+# Copy to your build/conf/local.conf and fill in the REQUIRED values below.
 #
-# MINIMAL CONFIGURATION (just 1 line needed!):
-#   OTA_SERVER_URL = "https://your-ota-server.com"
-#
-# Then in your image recipe, add:
-#   inherit otapulse        # For standard images
-#   inherit otapulse-large  # For Qt/multimedia images (>1GB)
+# Inherit OTAPulse in your image recipe:
+#   inherit otapulse        (standard images)
+#   inherit otapulse-large  (Qt / multimedia images > 1GB)
 
-# =============================================================
-# REQUIRED: OTA Server Configuration
-# =============================================================
-OTA_SERVER_URL = "https://ota.example.com"
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  REQUIRED — Build will fail without these                       ║
+# ╚══════════════════════════════════════════════════════════════════╝
 
-# =============================================================
-# OPTIONAL: Below settings have sensible defaults
-# =============================================================
+# Your OTAPulse server URL — get this from your OTAPulse dashboard
+OTA_SERVER_URL = "CHANGE_ME"
 
-# Target machine configuration
-MACHINE ?= "qemuarm64"
+# Device provisioning token — get this from your OTAPulse dashboard
+OTAPULSE_PROVISIONING_TOKEN = "CHANGE_ME"
 
-# Distribution (use your BSP's distro, e.g., fsl-imx-xwayland for NXP)
-# DISTRO ?= "soc-monitoring"
+# Your board's MACHINE value — must match your BSP layer
+# Examples: "raspberrypi4-64", "imx8mp-lpddr4-evk", "qemuarm64"
+MACHINE = "CHANGE_ME"
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  PRODUCTION — Enable these before shipping                      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Require signed OTA updates on the device (prevents unsigned firmware)
+# SOC_OTA_SIGNATURE_VERIFICATION = "1"
+
+# Public key deployed to devices for verifying update signatures
+# SOC_OTA_VERIFICATION_KEYS = "/path/to/your/public.pem"
+
+# Private key used at build time to sign .mender artifacts
+# SOC_OTA_SIGNING_KEY = "/path/to/your/private.pem"
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  OPTIONAL — Sensible defaults, change if needed                 ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Partition layout: "dynamic" (default, A/B created on first boot) or "static" (pre-allocated)
+# OTAPULSE_PARTITION_MODE = "dynamic"
+
+# Sanity check behaviour: "error" (default, blocks build), "warn", or "off"
+# OTAPULSE_SANITY_LEVEL = "error"
+
+# Skip individual sanity checks — space-separated names:
+#   server  provisioning  mender-artifact  partitions  signing  device-type
+#   packages  systemd  image-size  networking
+# OTAPULSE_SANITY_SKIP = ""
+
+# How often the device polls for new OTA updates (seconds, default 1800 = 30 min)
+# OTAPULSE_UPDATE_POLL_INTERVAL = "1800"
+
+# How often the device reports inventory to the server (seconds, default 28800 = 8 hr)
+# OTAPULSE_INVENTORY_POLL_INTERVAL = "28800"
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  BUILD SETTINGS — Standard Yocto config                         ║
+# ╚══════════════════════════════════════════════════════════════════╝
 
 # Package format
 PACKAGE_CLASSES ?= "package_ipk"
 
-# Build optimization
+# Build parallelism (defaults to detected CPU count)
 BB_NUMBER_THREADS ?= "${@oe.utils.cpu_count()}"
 PARALLEL_MAKE ?= "-j ${@oe.utils.cpu_count()}"
 
-# Download and cache directories (adjust paths)
+# Download and cache directories
 DL_DIR ?= "${TOPDIR}/../downloads"
 SSTATE_DIR ?= "${TOPDIR}/../sstate-cache"
-TMPDIR = "${TOPDIR}/tmp"
 
 # License acceptance
 LICENSE_FLAGS_ACCEPTED += "commercial"
 
-# Extra image features for development
+# Extra image features for development (remove before production)
 EXTRA_IMAGE_FEATURES += "debug-tweaks ssh-server-openssh"
-
-# SDK configuration
-SDKMACHINE ?= "x86_64"
-
-# Disk space monitoring
-BB_DISKMON_DIRS ??= "\
-    STOPTASKS,${TMPDIR},1G,100K \
-    STOPTASKS,${DL_DIR},1G,100K \
-    STOPTASKS,${SSTATE_DIR},1G,100K \
-    STOPTASKS,/tmp,100M,100K \
-    HALT,${TMPDIR},100M,1K \
-    HALT,${DL_DIR},100M,1K \
-    HALT,${SSTATE_DIR},100M,1K \
-    HALT,/tmp,10M,1K"
-
-# QEMU configuration (for testing)
-QEMU_USE_KVM = "1"
-QB_MEM = "-m 1024"
-
-# Image types
-IMAGE_FSTYPES = "wic wic.gz ext4"
-
-# SoC Monitoring specific configuration
-# Uncomment and set your API endpoint
-# SOC_MONITORING_API_URL = "https://your-api-server.com"
-# SOC_MONITORING_API_KEY = "your-api-key"
-
-# OTA Server URL (REQUIRED - set to your OTAPulse server)
-OTA_SERVER_URL = "https://ota.example.com"
-
-# Firmware version (auto-incremented or set manually)
-DISTRO_VERSION = "1.0.0"
-
-# Enable/disable debug build (affects symbol generation)
-DEBUG_BUILD = "0"
 
 # =============================================================
 # OTA Signature Configuration

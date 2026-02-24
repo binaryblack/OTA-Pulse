@@ -19,6 +19,15 @@
 #   SOC_OTA_SIGNATURE_VERIFICATION - Enable signature verification (default: 0)
 #   SOC_OTA_SIGNING_KEY         - Private key path for signing artifacts
 #
+# Provisioning / Credentials:
+#   OTAPULSE_PROVISIONING_TOKEN - Auto-provision device on first boot (recommended)
+#   OTAPULSE_TENANT_TOKEN       - Tenant auth token (alternative to provisioning token)
+#   OTAPULSE_PROVISIONING_MODE  - Set to 'manual' to skip build-time credential checks
+#
+# Build-time Sanity Checks (via otapulse-sanity):
+#   OTAPULSE_SANITY_LEVEL       - 'error' (default, blocks build), 'warn', or 'off'
+#   OTAPULSE_SANITY_SKIP        - Space-separated list of check names to skip
+#
 # Partition Modes:
 #   OTAPULSE_PARTITION_MODE = "dynamic" (default)
 #     - Minimal image size (~3-4GB)
@@ -37,6 +46,12 @@
 
 # Default to dynamic partitioning (minimal image size)
 OTAPULSE_PARTITION_MODE ?= "dynamic"
+
+# Provisioning mode: 'token' requires a credential at build time; 'manual' skips that check
+OTAPULSE_PROVISIONING_MODE ?= "token"
+
+# Run configuration sanity checks before do_rootfs
+inherit otapulse-sanity
 
 # Inherit mender-artifact to generate .mender files
 inherit mender-artifact
@@ -76,16 +91,14 @@ MENDER_DEVICE_TYPE ?= "${MACHINE}"
 INHERIT:remove = "create-spdx"
 
 python __anonymous() {
-    # Warn if OTA_SERVER_URL is not configured
-    server_url = d.getVar('OTA_SERVER_URL')
-    if not server_url or 'example' in server_url.lower() or 'your-' in server_url.lower():
-        bb.warn("OTAPulse: OTA_SERVER_URL not configured! Set it in local.conf:")
-        bb.warn("  OTA_SERVER_URL = \"https://your-ota-server.com\"")
+    pn             = d.getVar('PN')                     or '(unknown)'
+    server_url     = d.getVar('OTA_SERVER_URL')         or '(not set)'
+    partition_mode = d.getVar('OTAPULSE_PARTITION_MODE') or 'dynamic'
+    sanity_level   = d.getVar('OTAPULSE_SANITY_LEVEL')  or 'error'
 
-    # Show partition mode info
-    partition_mode = d.getVar('OTAPULSE_PARTITION_MODE')
-    if partition_mode == 'dynamic':
-        bb.note("OTAPulse: Using DYNAMIC partitioning (minimal image, A/B created on first boot)")
-    else:
-        bb.note("OTAPulse: Using STATIC partitioning (pre-allocated A/B partitions)")
+    bb.note("OTAPulse enabled for: %s\n"
+            "  Server URL:     %s\n"
+            "  Partition Mode: %s\n"
+            "  Sanity Level:   %s"
+            % (pn, server_url, partition_mode, sanity_level))
 }
