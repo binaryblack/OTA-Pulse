@@ -44,6 +44,8 @@ genimage \
 
 echo "=== SD Card Image Generated ==="
 
+echo "--- Pre-Artifact Validation ---"
+
 # Generate signed Mender OTA artifact (mandatory - hard-fail on any missing dependency)
 MENDER_ARTIFACT="${HOST_DIR}/bin/mender-artifact"
 DEVICE_TYPE="$(br2_config_get BR2_PACKAGE_OTAPULSE_DEVICE_TYPE)"
@@ -72,6 +74,15 @@ if [ -z "${SIGNING_KEY}" ] || [ ! -f "${SIGNING_KEY}" ]; then
     exit 1
 fi
 
+# Validate signing key is actually a valid private key
+if [ -n "${SIGNING_KEY}" ] && [ -f "${SIGNING_KEY}" ]; then
+    if ! openssl rsa -in "${SIGNING_KEY}" -noout 2>/dev/null && \
+       ! openssl ec -in "${SIGNING_KEY}" -noout 2>/dev/null; then
+        echo "ERROR: ${SIGNING_KEY} is not a valid RSA or ECDSA private key"
+        exit 1
+    fi
+fi
+
 echo "Generating signed Mender OTA artifact..."
 "${MENDER_ARTIFACT}" write rootfs-image \
     --device-type "${DEVICE_TYPE:-generic}" \
@@ -82,6 +93,30 @@ echo "Generating signed Mender OTA artifact..."
     --output-path "${BINARIES_DIR}/${ARTIFACT_NAME}.mender"
 
 echo "Mender artifact created: ${ARTIFACT_NAME}.mender"
+
+echo ""
+echo "--- Artifact Verification ---"
+
+# Validate artifact structure
+if "${MENDER_ARTIFACT}" validate "${BINARIES_DIR}/${ARTIFACT_NAME}.mender" 2>/dev/null; then
+    echo "  OK: Artifact structure valid"
+else
+    echo "  ERROR: Artifact validation FAILED"
+    exit 1
+fi
+
+# Cross-verify: check signature with public key
+VERIFY_KEY="$(br2_config_get BR2_PACKAGE_OTAPULSE_VERIFY_KEY)"
+if [ -n "${VERIFY_KEY}" ] && [ -f "${VERIFY_KEY}" ]; then
+    if "${MENDER_ARTIFACT}" validate "${BINARIES_DIR}/${ARTIFACT_NAME}.mender" -k "${VERIFY_KEY}" 2>/dev/null; then
+        echo "  OK: Signature verified with public key — key pair matches"
+    else
+        echo "  ERROR: Signature verification FAILED!"
+        echo "         Signing key and verification key do NOT match."
+        echo "         Devices will REJECT this artifact!"
+        exit 1
+    fi
+fi
 
 echo "=== OTA-Pulse Post-Image Complete ==="
 echo ""

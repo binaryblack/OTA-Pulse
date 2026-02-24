@@ -14,6 +14,14 @@ TARGET_DIR="$1"
 echo "=== OTA-Pulse Post-Build Script ==="
 
 # ==============================================================================
+# Phase 1: Run comprehensive sanity checks
+# ==============================================================================
+SANITY_SCRIPT="${BOARD_DIR}/otapulse-sanity-check.sh"
+if [ -f "$SANITY_SCRIPT" ] && [ -x "$SANITY_SCRIPT" ]; then
+    "$SANITY_SCRIPT" "$TARGET_DIR"
+fi
+
+# ==============================================================================
 # Validate OTA-Pulse is installed in the target filesystem
 # ==============================================================================
 

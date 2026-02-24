@@ -161,6 +161,11 @@ if [[ -z "$MACHINE" ]]; then
     MACHINE=$(detect_machine)
 fi
 
+# Buildroot fallback: read device type from BR2_PACKAGE_OTAPULSE_DEVICE_TYPE
+if [[ -z "$MACHINE" ]] && [[ -f "${BUILD_DIR}/.config" ]]; then
+    MACHINE=$(sed -n 's/^BR2_PACKAGE_OTAPULSE_DEVICE_TYPE="\(.*\)"$/\1/p' "${BUILD_DIR}/.config")
+fi
+
 if [[ -z "$MACHINE" ]]; then
     printf "${RED}ERROR:${RESET} Cannot determine MACHINE.\n"
     printf "  Pass it as the third argument, or ensure MACHINE is set in:\n"
@@ -168,16 +173,35 @@ if [[ -z "$MACHINE" ]]; then
     exit 1
 fi
 
-DEPLOY_DIR="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
+# Auto-detect build system and deploy directory
+BUILD_SYSTEM=""
+DEPLOY_DIR=""
+if [[ -d "${BUILD_DIR}/tmp/deploy/images/${MACHINE}" ]]; then
+    # Yocto build
+    DEPLOY_DIR="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
+    BUILD_SYSTEM="yocto"
+elif [[ -d "${BUILD_DIR}/images" ]]; then
+    # Buildroot build
+    DEPLOY_DIR="${BUILD_DIR}/images"
+    BUILD_SYSTEM="buildroot"
+elif [[ -d "${BUILD_DIR}/tmp/deploy/images" ]] && [[ -z "$MACHINE" ]]; then
+    # Yocto but MACHINE not provided — try to find it
+    MACHINE=$(ls "${BUILD_DIR}/tmp/deploy/images/" 2>/dev/null | head -1)
+    if [[ -n "$MACHINE" ]]; then
+        DEPLOY_DIR="${BUILD_DIR}/tmp/deploy/images/${MACHINE}"
+        BUILD_SYSTEM="yocto"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
 printf "\n${BOLD}OTAPulse Build Verification${RESET}\n"
 printf '═%.0s' {1..60}; printf '\n'
-info "Build dir:  ${BUILD_DIR}"
-info "Deploy dir: ${DEPLOY_DIR}"
-info "Machine:    ${MACHINE}"
+info "Build dir:    ${BUILD_DIR}"
+info "Build system: ${BUILD_SYSTEM:-unknown}"
+info "Deploy dir:   ${DEPLOY_DIR}"
+info "Machine:      ${MACHINE}"
 [[ -n "$IMAGE_NAME" ]] && info "Image name: ${IMAGE_NAME}"
 
 if [[ ! -d "$DEPLOY_DIR" ]]; then
