@@ -276,6 +276,14 @@ Key points:
 - The firstboot script detects pre-existing partitions and skips creation
 - SSH is available at `localhost:2222`
 
+**Known limitation:** QEMU direct-kernel boot (`-kernel Image`) loads the kernel
+from the host filesystem, not from the disk image. After an OTA update writes a new
+rootfs to partition B and sets `mender_boot_part=3`, a `reboot` inside the VM will
+restart QEMU with the same `-append "root=/dev/vda2"` — it cannot switch the root
+partition automatically. To test the full A/B cycle in QEMU, stop the VM and
+re-launch with `root=/dev/vda3` to boot from the updated slot. A U-Boot-based QEMU
+setup would handle this automatically but is not included in this defconfig.
+
 ### Verifying Installation
 
 ```bash

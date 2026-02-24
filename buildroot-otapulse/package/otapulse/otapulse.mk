@@ -12,7 +12,7 @@ OTAPULSE_LICENSE_FILES = LICENSE
 
 OTAPULSE_GOMOD = github.com/binaryblack/OTA-Pulse
 
-OTAPULSE_DEPENDENCIES = host-go host-pkgconf host-mender-artifact openssl ca-certificates util-linux e2fsprogs dosfstools xz
+OTAPULSE_DEPENDENCIES = host-go host-pkgconf host-mender-artifact openssl ca-certificates util-linux e2fsprogs dosfstools gptfdisk xz
 
 ifeq ($(BR2_PACKAGE_OTAPULSE_DBUS),y)
 OTAPULSE_DEPENDENCIES += dbus libglib2
@@ -137,6 +137,10 @@ define OTAPULSE_INSTALL_TARGET_CMDS
 	ln -sf otapulse $(TARGET_DIR)/usr/bin/mender
 	ln -sf otapulse $(TARGET_DIR)/usr/bin/soc-ota-agent
 
+	# Install boot slot switching script (used by the OTA agent during InstallUpdate)
+	$(INSTALL) -D -m 0755 $(OTAPULSE_PKGDIR)/switch-boot-slot.sh \
+		$(TARGET_DIR)/usr/sbin/switch-boot-slot.sh
+
 	# Create configuration directories
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/otapulse
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/otapulse/scripts
@@ -162,6 +166,10 @@ define OTAPULSE_INSTALL_TARGET_CMDS
 	echo '  "UpdatePollIntervalSeconds": $(call qstrip,$(BR2_PACKAGE_OTAPULSE_UPDATE_POLL_INTERVAL)),' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	echo '  "InventoryPollIntervalSeconds": $(call qstrip,$(BR2_PACKAGE_OTAPULSE_INVENTORY_POLL_INTERVAL)),' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	echo '  "RetryPollIntervalSeconds": $(call qstrip,$(BR2_PACKAGE_OTAPULSE_RETRY_POLL_INTERVAL)),' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
+	echo '  "RootfsPartA": "/dev/disk/by-partlabel/rootfs_a",' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
+	echo '  "RootfsPartB": "/dev/disk/by-partlabel/rootfs_b",' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
+	$(if $(BR2_PACKAGE_OTAPULSE_BOOT_FILE),\
+		echo '  "UseFileBasedBootEnv": true$(comma)' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf)
 	$(if $(call qstrip,$(BR2_PACKAGE_OTAPULSE_VERIFY_KEY_SECONDARY)),\
 		echo '  "ArtifactVerifyKeys": ["/etc/otapulse/keys/artifact-verify-key.pem"$(comma) "/etc/otapulse/keys/artifact-verify-key-secondary.pem"]' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf,\
 		echo '  "ArtifactVerifyKeys": ["/etc/otapulse/keys/artifact-verify-key.pem"]' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf)

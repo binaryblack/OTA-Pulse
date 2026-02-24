@@ -301,27 +301,23 @@ func (d *dualRootfsDeviceImpl) switchBootSlot(partitionNumber string) error {
 
 	log.Infof("switch-boot-slot.sh found at %s", switchBootSlotScript)
 
-	// Determine slot from partition number
-	// Partition 3 = A, Partition 4 = B (based on typical layout)
+	// Determine slot by comparing the requested partition number against the
+	// configured rootfsPartA and rootfsPartB device paths.
+	partANum := extractPartitionNumber(d.rootfsPartA)
+	partBNum := extractPartitionNumber(d.rootfsPartB)
+	log.Infof("Partition mapping: partA=%s (from %s), partB=%s (from %s), requested=%s",
+		partANum, d.rootfsPartA, partBNum, d.rootfsPartB, partitionNumber)
+
 	var slot string
 	switch partitionNumber {
-	case "3":
-		slot = "A"
-	case "4":
-		slot = "B"
+	case partANum:
+		slot = "a"
+	case partBNum:
+		slot = "b"
 	default:
-		// Try to determine from partition config
-		activePartNum := extractPartitionNumber(d.active)
-		inactivePartNum := extractPartitionNumber(d.inactive)
-		log.Infof("Partition mapping: active=%s, inactive=%s, requested=%s", activePartNum, inactivePartNum, partitionNumber)
-		if partitionNumber == activePartNum {
-			slot = "A" // Switching back to current slot
-		} else if partitionNumber == inactivePartNum {
-			slot = "B" // Switching to other slot
-		} else {
-			log.Warnf("Unknown partition number %s, defaulting to B", partitionNumber)
-			slot = "B"
-		}
+		log.Warnf("Partition number %s does not match partA=%s or partB=%s, defaulting to b",
+			partitionNumber, partANum, partBNum)
+		slot = "b"
 	}
 
 	log.Infof("Executing: %s %s", switchBootSlotScript, slot)
