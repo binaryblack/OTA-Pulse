@@ -246,10 +246,14 @@ setup_data_mount() {
     # Create marker file
     touch /data/.otapulse-firstboot-done
 
-    # Add fstab entry if not present
-    DATA_UUID=$(blkid -s UUID -o value "$DATA_PART" 2>/dev/null || true)
-    if [ -n "$DATA_UUID" ] && ! grep -q "$DATA_UUID" /etc/fstab 2>/dev/null; then
-        echo "UUID=$DATA_UUID /data ext4 defaults,noatime 0 2" >> /etc/fstab
+    # Add fstab entry only if no /data entry already exists.
+    # post-build.sh writes a LABEL=data entry; checking for UUID would always
+    # miss it, causing a duplicate (non-nofail) entry to be appended on every boot.
+    if ! grep -q " /data " /etc/fstab 2>/dev/null; then
+        DATA_UUID=$(blkid -s UUID -o value "$DATA_PART" 2>/dev/null || true)
+        if [ -n "$DATA_UUID" ]; then
+            echo "UUID=$DATA_UUID /data ext4 defaults,noatime,nofail,x-systemd.device-timeout=60 0 2" >> /etc/fstab
+        fi
     fi
 
     log "Data partition mounted at /data"
@@ -265,9 +269,37 @@ init_boot_env() {
 
     log "Current root partition: $ROOT_DEV (partition $PART_NUM)"
 
-    # Initialize boot environment file
+    # Initialize boot environment files
     mkdir -p /data/ota
-    echo "$PART_NUM" > /data/ota/mender_boot_part
+
+    # mender_boot_part: only write if no OTA update is pending.
+    # When upgrade_available=1, the agent has already set mender_boot_part to the
+    # new (inactive) slot — overwriting it here would cause VerifyReboot() to fail
+    # and trigger a rollback, destroying the in-progress update.
+    if [ "$(cat /data/ota/upgrade_available 2>/dev/null)" != "1" ]; then
+        echo "$PART_NUM" > /data/ota/mender_boot_part
+    fi
+
+    # upgrade_available, boot_count, current_slot: write only if the file does
+    # not yet exist.  Once the OTA agent sets upgrade_available=1 before a reboot,
+    # we must NOT overwrite it — doing so would destroy the in-progress update state.
+    if [ ! -f /data/ota/upgrade_available ]; then
+        echo "0" > /data/ota/upgrade_available
+    fi
+
+    if [ ! -f /data/ota/boot_count ]; then
+        echo "0" > /data/ota/boot_count
+    fi
+
+    if [ ! -f /data/ota/current_slot ]; then
+        case "$PART_NUM" in
+            2) echo "a" > /data/ota/current_slot ;;
+            3) echo "b" > /data/ota/current_slot ;;
+            *) echo "a" > /data/ota/current_slot ;;
+        esac
+    fi
+
+    log "Boot env: mender_boot_part=$PART_NUM  upgrade_available=$(cat /data/ota/upgrade_available)  current_slot=$(cat /data/ota/current_slot)"
 
     # If U-Boot environment is available, set it there too
     if command -v fw_setenv >/dev/null 2>&1; then
@@ -287,8 +319,10 @@ main() {
     DEVICE=$(detect_boot_device)
 
     # Guard: verify device has a GPT partition table
+    # Use 'sgdisk -p' (print) not 'sgdisk -v' (verify) — verify is too strict
+    # and can fail on genimage-produced images due to backup GPT positioning.
     # If this is a bare rootfs (no GPT), exit gracefully — don't crash to emergency mode
-    if ! sgdisk -v "$DEVICE" >/dev/null 2>&1; then
+    if ! sgdisk -p "$DEVICE" >/dev/null 2>&1; then
         log_error "Device $DEVICE has no GPT partition table."
         log_error "This image may be a bare rootfs without partition layout."
         log_error "OTA A/B updates require a full disk image with GPT."

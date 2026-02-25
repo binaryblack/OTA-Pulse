@@ -1,0 +1,15 @@
+[Unit]
+Description=Restore persistent machine-id from /data
+DefaultDependencies=no
+After=local-fs.target otapulse-partition-setup.service
+Before=otapulse-auto-provision.service soc-ota-agent.service systemd-machine-id-commit.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/otapulse-machine-id
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target

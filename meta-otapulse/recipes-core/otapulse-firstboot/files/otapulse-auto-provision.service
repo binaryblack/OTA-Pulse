@@ -1,8 +1,8 @@
 [Unit]
 Description=OTAPulse Auto-Provisioning
 Documentation=https://github.com/binaryblack/OTA-Pulse
-# Run after network is available and partitions are set up
-After=network-online.target otapulse-partition-setup.service
+# Run after network is available, partitions are set up, and machine-id is restored
+After=network-online.target otapulse-partition-setup.service otapulse-machine-id.service
 Wants=network-online.target
 # Don't run if already provisioned
 ConditionPathExists=!/data/otapulse/.auto-provisioned

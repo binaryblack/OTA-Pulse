@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# otapulse-machine-id — persist a unique machine-id across OTA rootfs updates
+#
+# Problem: systemd reads /etc/machine-id before fstab mounts are processed,
+#          so a symlink to /data/etc/machine-id never works.
+# Solution: ship an empty /etc/machine-id in the image, boot with a transient
+#           ID, then restore the persistent one from /data once it is mounted.
+#
+# Boot flow:
+#   1. systemd PID 1 finds empty /etc/machine-id → uses transient ID
+#   2. /data is mounted (via fstab or otapulse-firstboot)
+#   3. This service runs:
+#      - First boot:  generate a new ID, save to /data and /etc
+#      - Later boots: copy the saved ID from /data to /etc
+#   4. systemd-machine-id-commit.service (if present) is a no-op because
+#      /etc/machine-id is no longer empty.
+#
+
+set -e
+
+PERSIST="/data/etc/machine-id"
+LOG_TAG="otapulse-machine-id"
+
+log() {
+    logger -t "$LOG_TAG" "$1" 2>/dev/null || true
+    echo "[$LOG_TAG] $1"
+}
+
+mkdir -p /data/etc
+
+if [ -s "$PERSIST" ]; then
+    # Persistent ID exists — restore it
+    cp "$PERSIST" /etc/machine-id
+    log "Restored machine-id from $PERSIST"
+else
+    # First boot (or /data was wiped) — generate a unique ID
+    if command -v systemd-machine-id-setup >/dev/null 2>&1; then
+        systemd-machine-id-setup 2>/dev/null || true
+    fi
+
+    # systemd-machine-id-setup may have populated /etc/machine-id;
+    # if not (e.g. read-only rootfs), fall back to /proc/sys/kernel/random/uuid
+    if [ ! -s /etc/machine-id ]; then
+        tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
+    fi
+
+    cp /etc/machine-id "$PERSIST"
+    log "Generated new machine-id and persisted to $PERSIST"
+fi

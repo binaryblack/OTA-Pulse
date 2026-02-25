@@ -166,8 +166,8 @@ define OTAPULSE_INSTALL_TARGET_CMDS
 	echo '  "UpdatePollIntervalSeconds": $(call qstrip,$(BR2_PACKAGE_OTAPULSE_UPDATE_POLL_INTERVAL)),' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	echo '  "InventoryPollIntervalSeconds": $(call qstrip,$(BR2_PACKAGE_OTAPULSE_INVENTORY_POLL_INTERVAL)),' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	echo '  "RetryPollIntervalSeconds": $(call qstrip,$(BR2_PACKAGE_OTAPULSE_RETRY_POLL_INTERVAL)),' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
-	echo '  "RootfsPartA": "/dev/disk/by-partlabel/rootfs_a",' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
-	echo '  "RootfsPartB": "/dev/disk/by-partlabel/rootfs_b",' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
+	echo '  "RootfsPartA": "$(call qstrip,$(BR2_PACKAGE_OTAPULSE_ROOTFS_PART_A))",' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
+	echo '  "RootfsPartB": "$(call qstrip,$(BR2_PACKAGE_OTAPULSE_ROOTFS_PART_B))",' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	$(if $(BR2_PACKAGE_OTAPULSE_BOOT_FILE),\
 		echo '  "UseFileBasedBootEnv": true$(comma)' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf)
 	$(if $(call qstrip,$(BR2_PACKAGE_OTAPULSE_VERIFY_KEY_SECONDARY)),\
@@ -176,9 +176,12 @@ define OTAPULSE_INSTALL_TARGET_CMDS
 	echo '}' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 
 	# Install device type file (in both locations the agent checks)
-	echo "$(call qstrip,$(BR2_PACKAGE_OTAPULSE_DEVICE_TYPE))" > $(TARGET_DIR)/etc/otapulse/device_type
+	# Format must be "device_type=<value>" (key=value) — the agent's GetManifestData()
+	# uses strings.SplitN(line, "=", 2) and requires len==2; a plain value causes
+	# "Broken device manifest file" errors.
+	echo "device_type=$(call qstrip,$(BR2_PACKAGE_OTAPULSE_DEVICE_TYPE))" > $(TARGET_DIR)/etc/otapulse/device_type
 	mkdir -p $(TARGET_DIR)/var/lib/otapulse
-	echo "$(call qstrip,$(BR2_PACKAGE_OTAPULSE_DEVICE_TYPE))" > $(TARGET_DIR)/var/lib/otapulse/device_type
+	echo "device_type=$(call qstrip,$(BR2_PACKAGE_OTAPULSE_DEVICE_TYPE))" > $(TARGET_DIR)/var/lib/otapulse/device_type
 
 	# Install identity scripts
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/share/otapulse/identity
@@ -240,6 +243,15 @@ endef
 ifeq ($(BR2_PACKAGE_OTAPULSE_STATE_SCRIPTS),y)
 define OTAPULSE_INSTALL_STATE_SCRIPTS
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/otapulse/scripts
+
+	# State script version file (REQUIRED by the Mender agent).
+	# The agent reads this file and refuses to run scripts if the version
+	# is not in its supported list [2 3].  Without the file, the version
+	# is treated as 0 and every deployment fails with:
+	#   "statescript: The version read from the version file in the
+	#    statescript directory does not match the versions supported by
+	#    the client (supported: [2 3]; actual: 0)"
+	echo "3" > $(TARGET_DIR)/etc/otapulse/scripts/version
 
 	# Download state scripts
 	echo '#!/bin/sh' > $(TARGET_DIR)/etc/otapulse/scripts/Download_Enter_00
@@ -326,6 +338,22 @@ define OTAPULSE_INSTALL_UBOOT_ENV_CONFIG
 endef
 OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_UBOOT_ENV_CONFIG
 endif
+
+# ==============================================================================
+# Persistent Machine-ID Service
+# ==============================================================================
+
+define OTAPULSE_INSTALL_MACHINE_ID
+	$(INSTALL) -D -m 0755 $(OTAPULSE_PKGDIR)/otapulse-machine-id.sh \
+		$(TARGET_DIR)/usr/sbin/otapulse-machine-id
+
+	$(INSTALL) -D -m 0644 $(OTAPULSE_PKGDIR)/otapulse-machine-id.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/otapulse-machine-id.service
+	mkdir -p $(TARGET_DIR)/etc/systemd/system/sysinit.target.wants
+	ln -sf /usr/lib/systemd/system/otapulse-machine-id.service \
+		$(TARGET_DIR)/etc/systemd/system/sysinit.target.wants/otapulse-machine-id.service
+endef
+OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_MACHINE_ID
 
 # ==============================================================================
 # Firstboot Script for Dynamic Partitioning

@@ -22,6 +22,8 @@ SRC_URI = " \
     file://otapulse-partition-setup.service \
     file://otapulse-auto-provision \
     file://otapulse-auto-provision.service \
+    file://otapulse-machine-id \
+    file://otapulse-machine-id.service \
     file://switch-boot-slot.sh \
 "
 
@@ -39,7 +41,7 @@ RDEPENDS:${PN} = " \
 
 inherit systemd
 
-SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service otapulse-auto-provision.service"
+SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service otapulse-auto-provision.service otapulse-machine-id.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 do_install() {
@@ -53,10 +55,14 @@ do_install() {
     # Install boot slot switching script
     install -m 0755 ${WORKDIR}/switch-boot-slot.sh ${D}${bindir}/switch-boot-slot.sh
 
+    # Install persistent machine-id script
+    install -m 0755 ${WORKDIR}/otapulse-machine-id ${D}${bindir}/otapulse-machine-id
+
     # Install systemd services
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/otapulse-partition-setup.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/otapulse-auto-provision.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${WORKDIR}/otapulse-machine-id.service ${D}${systemd_system_unitdir}/
 
     # Create marker directories
     install -d ${D}${localstatedir}/lib/otapulse
@@ -65,8 +71,10 @@ do_install() {
 FILES:${PN} = " \
     ${bindir}/otapulse-partition-setup \
     ${bindir}/otapulse-auto-provision \
+    ${bindir}/otapulse-machine-id \
     ${bindir}/switch-boot-slot.sh \
     ${systemd_system_unitdir}/otapulse-partition-setup.service \
     ${systemd_system_unitdir}/otapulse-auto-provision.service \
+    ${systemd_system_unitdir}/otapulse-machine-id.service \
     ${localstatedir}/lib/otapulse \
 "

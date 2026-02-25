@@ -99,12 +99,13 @@ PRETTY_NAME="OTA-Pulse Buildroot Linux"
 EOF
 fi
 
-# Setup machine-id persistence (symlink to /data)
-if [ ! -L "${TARGET_DIR}/etc/machine-id" ]; then
-    rm -f "${TARGET_DIR}/etc/machine-id"
-    mkdir -p "${TARGET_DIR}/data/etc"
-    ln -sf /data/etc/machine-id "${TARGET_DIR}/etc/machine-id"
-fi
+# Ship an empty machine-id so systemd treats every first boot as
+# "uninitialized" and uses a transient ID until the real one is set.
+# The otapulse-machine-id.service (runs after /data is mounted) will
+# generate a unique per-device ID on the very first boot, persist it
+# to /data/etc/machine-id, and restore it on every subsequent boot
+# — including after A/B OTA rootfs updates.
+: > "${TARGET_DIR}/etc/machine-id"
 
 # Setup SSH host keys persistence
 if [ -d "${TARGET_DIR}/etc/ssh" ]; then

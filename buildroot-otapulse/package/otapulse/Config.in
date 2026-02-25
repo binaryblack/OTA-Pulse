@@ -162,6 +162,31 @@ config BR2_PACKAGE_OTAPULSE_PARTITION_STATIC
 
 endchoice
 
+config BR2_PACKAGE_OTAPULSE_ROOTFS_PART_A
+	string "RootfsPartA device path"
+	default "/dev/disk/by-partlabel/rootfs_a"
+	help
+	  Block device path for the rootfs A partition.
+	  The OTA agent uses this to determine which partition is active
+	  and which is inactive for A/B updates.
+
+	  Use /dev/disk/by-partlabel/rootfs_a for systems with udev and
+	  GPT partition labels (production hardware).
+	  Use /dev/vda2 for QEMU VirtIO testing.
+	  Use /dev/mmcblk0p2 for eMMC-based boards.
+
+config BR2_PACKAGE_OTAPULSE_ROOTFS_PART_B
+	string "RootfsPartB device path"
+	default "/dev/disk/by-partlabel/rootfs_b"
+	help
+	  Block device path for the rootfs B partition.
+	  The OTA agent writes new firmware here during an update.
+
+	  Use /dev/disk/by-partlabel/rootfs_b for systems with udev and
+	  GPT partition labels (production hardware).
+	  Use /dev/vda3 for QEMU VirtIO testing.
+	  Use /dev/mmcblk0p3 for eMMC-based boards.
+
 config BR2_PACKAGE_OTAPULSE_ROOTFS_SIZE
 	string "Root Filesystem Size"
 	default "1G"

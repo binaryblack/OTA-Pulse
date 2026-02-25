@@ -12,6 +12,8 @@ Group=root
 ExecStart=/usr/bin/otapulse --no-syslog daemon
 Restart=on-failure
 RestartSec=30
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
