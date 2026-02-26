@@ -69,6 +69,7 @@ IMAGE_INSTALL += " \
 # Provides A/B partition OTA with signature verification
 IMAGE_INSTALL += " \
     soc-ota-agent \
+    otapulse-firstboot \
     u-boot-fw-utils \
     u-boot-env-config \
     gptfdisk \
@@ -106,7 +107,7 @@ IMAGE_OVERHEAD_FACTOR = "1.3"
 IMAGE_FSTYPES ?= "wic wic.gz wic.bmap ext4"
 
 # WIC image configuration - A/B partition layout for OTA
-WKS_FILE ?= "soc-monitoring.wks"
+WKS_FILE ?= "soc-monitoring.wks.in"
 
 # Disable UFS image creation - not needed for eMMC storage
 # This removes the time-consuming do_image_wic_ufs task from rockchip-image.bbclass

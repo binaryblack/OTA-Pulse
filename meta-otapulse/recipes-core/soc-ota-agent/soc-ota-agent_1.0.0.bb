@@ -63,6 +63,11 @@ SOC_OTA_VERIFY_KEY_FILES ?= "production-rsa-public.pem"
 # OTA server URL - MUST be set in your platform-specific layer or local.conf
 OTA_SERVER_URL ?= "http://192.168.0.122:8000"
 
+# Tenant token / API key for device authentication
+# Set this in local.conf to an API key (e.g., "smk_...") for the device to authenticate
+# with the OTA server. Leave empty if using runtime provisioning.
+OTAPULSE_TENANT_TOKEN ?= ""
+
 S = "${EXTERNALSRC}"
 
 # Build configuration
@@ -151,9 +156,13 @@ do_install() {
         VERIFY_KEYS_LINE=""
     fi
 
+    # Tenant token for device authentication
+    TENANT_TOKEN="${OTAPULSE_TENANT_TOKEN}"
+
     # Process the template and install as otapulse.conf
     sed -e "s|@SERVER_URL@|${SERVER_URL}|g" \
         -e "s|@SKIP_TLS_VERIFY@|${SKIP_VERIFY}|g" \
+        -e "s|@TENANT_TOKEN@|${TENANT_TOKEN}|g" \
         -e "s|@ARTIFACT_VERIFY_KEYS_LINE@|${VERIFY_KEYS_LINE}|g" \
         ${FILESDIR}/otapulse.conf.in > ${D}${sysconfdir}/otapulse/otapulse.conf
 
@@ -181,6 +190,8 @@ do_install() {
     # Install identity script (to new OTAPulse path with new naming)
     install -d ${D}${datadir}/otapulse/identity
     install -m 0755 ${S}/support/otapulse-device-identity ${D}${datadir}/otapulse/identity/otapulse-device-identity
+    # Backward compatibility: agent binary may look for mender-device-identity
+    ln -sf otapulse-device-identity ${D}${datadir}/otapulse/identity/mender-device-identity
 
     # Install inventory scripts (to new OTAPulse path with new naming - Phase 3.2)
     install -d ${D}${datadir}/otapulse/inventory
@@ -244,6 +255,11 @@ INHIBIT_PACKAGE_DEBUG_SPLIT = "1"
 # This prevents "Unable to find SPDX provider" errors during image builds
 do_create_spdx[noexec] = "1"
 do_create_runtime_spdx[noexec] = "1"
+
+# Track config variables in do_install hash so sstate is invalidated when they change.
+# Without this, BitBake cannot detect shell variable changes in do_install and will
+# reuse a stale cached package even when OTA_SERVER_URL or credentials change.
+do_install[vardeps] += "OTA_SERVER_URL OTAPULSE_TENANT_TOKEN SOC_OTA_SIGNATURE_VERIFICATION"
 
 # Ensure SPDX tasks don't fail even when SPDX generation is enabled globally
 # This is needed for compatibility with builds that have INHERIT += "create-spdx"

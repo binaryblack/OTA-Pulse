@@ -251,6 +251,14 @@ if [[ "$ROOT_PART" =~ ^/dev/mmcblk[0-9]+p[0-9]+$ ]]; then
 elif [[ "$ROOT_PART" =~ ^/dev/sd[a-z][0-9]+$ ]]; then
     BASE_DEV=$(echo "$ROOT_PART" | sed 's/[0-9]*$//')
     ROOT_PART_NUM=$(echo "$ROOT_PART" | sed 's/.*[a-z]//')
+elif [[ "$ROOT_PART" =~ ^/dev/vd[a-z][0-9]+$ ]]; then
+    # Virtio block devices (QEMU, KVM, cloud instances)
+    BASE_DEV=$(echo "$ROOT_PART" | sed 's/[0-9]*$//')
+    ROOT_PART_NUM=$(echo "$ROOT_PART" | sed 's/.*[a-z]//')
+elif [[ "$ROOT_PART" =~ ^/dev/nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+    # NVMe devices (e.g., /dev/nvme0n1p2 -> /dev/nvme0n1)
+    BASE_DEV=$(echo "$ROOT_PART" | sed 's/p[0-9]*$//')
+    ROOT_PART_NUM=$(echo "$ROOT_PART" | sed 's/.*p//')
 else
     error "Unsupported device format: $ROOT_PART"
 fi
@@ -263,12 +271,15 @@ if ! command -v sgdisk &> /dev/null; then
     error "sgdisk not found. Install gptfdisk package."
 fi
 
-# Wait for device to be fully ready before reading GPT
-wait_for_device_ready "$BASE_DEV"
+# Wait for device to be fully ready before reading GPT.
+# Use || true so a "not ready" result (e.g. no free sectors on a fully-allocated
+# static WIC image) does not abort the script via set -e.  udevadm settle has
+# already run inside wait_for_device_ready, so by-partlabel symlinks are present.
+wait_for_device_ready "$BASE_DEV" || true
 
-# Get current partition info
+# Print current partition info (diagnostic only — failure is non-fatal)
 log "Current partition layout:"
-sgdisk -p "$BASE_DEV"
+sgdisk -p "$BASE_DEV" || true
 
 # EARLY CHECK: If all required partitions exist with correct labels and are formatted,
 # we don't need to do anything. This handles WIC images that pre-create partitions.
@@ -281,14 +292,10 @@ check_all_partitions_ready() {
         all_ready=0
     fi
 
-    # Check rootfs_b
-    if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then
-        local fstype=$(lsblk -no FSTYPE /dev/disk/by-partlabel/rootfs_b 2>/dev/null || true)
-        if [ -z "$fstype" ]; then
-            log "rootfs_b exists but not formatted"
-            all_ready=0
-        fi
-    else
+    # Check rootfs_b (GPT partition label must exist; no fstype required —
+    # OTA agent writes the filesystem during install, so it is intentionally
+    # unformatted in static WIC images at first boot)
+    if [ ! -e "/dev/disk/by-partlabel/rootfs_b" ]; then
         log "rootfs_b partition not found"
         all_ready=0
     fi

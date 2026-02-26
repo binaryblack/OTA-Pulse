@@ -65,8 +65,10 @@ IMAGE_INSTALL:append = " soc-ota-agent"
 # Add gptfdisk for partition management on target
 IMAGE_INSTALL:append = " gptfdisk"
 
-# Add first-boot partition setup for dynamic mode
-IMAGE_INSTALL:append = " ${@bb.utils.contains('OTAPULSE_PARTITION_MODE', 'dynamic', 'otapulse-firstboot', '', d)}"
+# Add first-boot partition setup (handles both dynamic and static modes)
+# Dynamic mode: creates A/B partitions on first boot
+# Static mode: detects pre-existing partitions, mounts /data, initializes /data/ota/ state files
+IMAGE_INSTALL:append = " otapulse-firstboot"
 
 # A/B Boot Script Configuration
 # Set OTAPULSE_BOOT_SCRIPT = "1" in local.conf or machine config to enable

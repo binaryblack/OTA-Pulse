@@ -18,6 +18,8 @@
 
     "SkipVerify": @SKIP_TLS_VERIFY@,
 
+    "TenantToken": "@TENANT_TOKEN@",
+
     "UseSoCMonitoring": true,
 
     "UpdateLogPath": "/var/lib/otapulse/update.log"@ARTIFACT_VERIFY_KEYS_LINE@

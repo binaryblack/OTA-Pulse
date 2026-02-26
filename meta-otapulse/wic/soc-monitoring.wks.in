@@ -20,16 +20,19 @@
 #   Large:   100M + 2×6G + 2G + ~400M overhead = ~14.5GB minimum
 
 # Boot partition (FAT32, contains kernel and DTB)
-part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size ${SOC_WKS_BOOT_SIZE}
+part /boot --source bootimg-partition --ondisk ${SOC_WKS_DISK} --fstype=vfat --label boot --active --align 4096 --size ${SOC_WKS_BOOT_SIZE}
 
 # Root filesystem A (primary)
-part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs-a --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
+# --label sets ext4 volume label, --part-name sets GPT partition name
+# Both must use underscores to match otapulse.conf RootfsPartA/B paths
+# (/dev/disk/by-partlabel/rootfs_a)
+part / --source rootfs --ondisk ${SOC_WKS_DISK} --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
 
 # Root filesystem B (backup for A/B updates)
-part --ondisk mmcblk0 --fstype=ext4 --label rootfs-b --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
+part --ondisk ${SOC_WKS_DISK} --fstype=ext4 --label rootfs_b --part-name rootfs_b --align 4096 --size ${SOC_WKS_ROOTFS_SIZE}
 
 # Data partition (persistent across updates)
-part /data --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size ${SOC_WKS_DATA_SIZE}
+part /data --ondisk ${SOC_WKS_DISK} --fstype=ext4 --label data --align 4096 --size ${SOC_WKS_DATA_SIZE}
 
 # Bootloader
 bootloader --ptable gpt
