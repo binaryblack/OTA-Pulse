@@ -23,6 +23,7 @@ RDEPENDS:${PN} = " \
     openssl \
     ca-certificates \
     bash \
+    otapulse-firstboot \
 "
 
 # Boot switching infrastructure - recommended for A/B OTA support
