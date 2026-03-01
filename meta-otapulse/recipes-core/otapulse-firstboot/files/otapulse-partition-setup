@@ -429,15 +429,13 @@ if [ "$PARTITIONS_EXIST" -eq 0 ]; then
     log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
     log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
 
-    # Create partitions
-    log "Creating rootfs_b partition..."
-    sgdisk -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
+    # Create partitions (use -g to convert MBR to GPT if needed)
+    log "Creating rootfs_b and data partitions..."
+    sgdisk -g \
+           -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
            -c "$ROOTFS_B_PART_NUM:rootfs_b" \
            -t "$ROOTFS_B_PART_NUM:8300" \
-           "$BASE_DEV"
-
-    log "Creating data partition..."
-    sgdisk -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
+           -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
            -c "$DATA_PART_NUM:data" \
            -t "$DATA_PART_NUM:8300" \
            "$BASE_DEV"
