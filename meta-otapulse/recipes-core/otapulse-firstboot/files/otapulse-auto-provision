@@ -111,7 +111,7 @@ log "Attempting device registration..."
 
 # Method 1: Try to use existing device auth (if device was pre-registered)
 # This calls the check endpoint which doesn't need auth
-RESPONSE=$(curl -sf --max-time 30 \
+RESPONSE=$(curl -s --max-time 30 \
     -H "X-Device-ID: $DEVICE_ID" \
     "${SERVER_URL}/api/devices/v1/check" 2>/dev/null || echo '{"error": "request failed"}')
 
@@ -142,9 +142,24 @@ if [ -z "$API_KEY" ]; then
     if [ -n "$JWT_TOKEN" ]; then
         log "Got JWT token, registering device..."
 
-        # Register device
-        REG_RESPONSE=$(curl -sf --max-time 30 \
-            -X POST "${SERVER_URL}/api/devices" \
+        # Extract organization_id from JWT payload (required by server API)
+        ORG_ID=$(echo "$JWT_TOKEN" | cut -d. -f2 | python3 -c "
+import sys, base64, json
+payload = sys.stdin.read().strip()
+payload += '=' * (4 - len(payload) % 4)
+d = json.loads(base64.urlsafe_b64decode(payload))
+print(d.get('org_id', ''))" 2>/dev/null || true)
+
+        if [ -z "$ORG_ID" ]; then
+            log "Failed to extract organization_id from JWT"
+        else
+            log "Organization ID: $ORG_ID"
+        fi
+
+        # Register device (organization_id required as query parameter)
+        # Use -s (not -sf) to capture response body even on HTTP errors
+        REG_RESPONSE=$(curl -s --max-time 30 \
+            -X POST "${SERVER_URL}/api/devices?organization_id=${ORG_ID}" \
             -H "Authorization: Bearer $JWT_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{
@@ -159,10 +174,10 @@ if [ -z "$API_KEY" ]; then
         if [ -n "$DEVICE_UUID" ] || echo "$REG_RESPONSE" | grep -q "already exists"; then
             log "Device registered or already exists"
 
-            # Create API key
+            # Create API key (organization_id required as query parameter)
             KEY_NAME="auto-provision-${DEVICE_ID:0:8}-$(date +%s)"
-            KEY_RESPONSE=$(curl -sf --max-time 30 \
-                -X POST "${SERVER_URL}/api/api-keys" \
+            KEY_RESPONSE=$(curl -s --max-time 30 \
+                -X POST "${SERVER_URL}/api/api-keys?organization_id=${ORG_ID}" \
                 -H "Authorization: Bearer $JWT_TOKEN" \
                 -H "Content-Type: application/json" \
                 -d "{
@@ -200,7 +215,7 @@ EOF
 
     # Create marker file
     mkdir -p "$(dirname $PROVISION_MARKER)"
-    echo "provisioned=$(date -Iseconds)" > "$PROVISION_MARKER"
+    echo "provisioned=$(date '+%Y-%m-%dT%H:%M:%S')" > "$PROVISION_MARKER"
     echo "device_id=$DEVICE_ID" >> "$PROVISION_MARKER"
 
     log "Auto-provisioning complete!"
