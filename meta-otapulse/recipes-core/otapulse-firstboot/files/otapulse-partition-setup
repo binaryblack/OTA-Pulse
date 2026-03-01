@@ -217,7 +217,7 @@ wait_for_device_ready() {
 
     # Verify GPT is readable by checking last usable sector
     while [ $retry -lt $max_retries ]; do
-        local last_sector=$(sgdisk -E "$device" 2>/dev/null || echo "0")
+        local last_sector=$(sgdisk -E "$device" 2>/dev/null | tail -1 || echo "0")
         local device_sectors=$(blockdev --getsz "$device" 2>/dev/null || echo "0")
 
         # Last usable sector should be close to device size (within 1%)
@@ -374,7 +374,7 @@ if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then
 fi
 
 # Get rootfs_a size (in sectors)
-ROOTFS_A_SIZE=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" | grep "Partition size" | awk '{print $3}')
+ROOTFS_A_SIZE=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition size" | awk '{print $3}')
 # Get sector size - sgdisk shows "512/512" (logical/physical), we need just the logical size
 SECTOR_SIZE=$(blockdev --getss "$BASE_DEV")
 
@@ -385,14 +385,14 @@ ROOTFS_A_SIZE_MB=$((ROOTFS_A_SIZE * SECTOR_SIZE / 1024 / 1024))
 log "rootfs_a size: ${ROOTFS_A_SIZE_MB}MB"
 
 # Get total device size and find free space
-DEVICE_SIZE_SECTORS=$(sgdisk -p "$BASE_DEV" | grep "Disk.*sectors" | awk '{print $3}')
-LAST_SECTOR=$(sgdisk -E "$BASE_DEV")
+DEVICE_SIZE_SECTORS=$(sgdisk -p "$BASE_DEV" 2>/dev/null | grep "Disk.*sectors" | awk '{print $3}')
+LAST_SECTOR=$(sgdisk -E "$BASE_DEV" 2>/dev/null | tail -1)
 
 log "Device total sectors: $DEVICE_SIZE_SECTORS"
 log "Last usable sector: $LAST_SECTOR"
 
 # Find the end of the last partition
-LAST_PART_END=$(sgdisk -p "$BASE_DEV" | tail -n +9 | awk '{print $3}' | sort -n | tail -1)
+LAST_PART_END=$(sgdisk -p "$BASE_DEV" 2>/dev/null | grep '^ *[0-9]' | awk '{print $3}' | sort -n | tail -1)
 FREE_START=$((LAST_PART_END + 1))
 FREE_SECTORS=$((LAST_SECTOR - FREE_START))
 FREE_SIZE_MB=$((FREE_SECTORS * SECTOR_SIZE / 1024 / 1024))
@@ -491,7 +491,7 @@ fi
 
 # Update rootfs_a partition label if needed
 ROOTFS_A_DEV="$ROOT_PART"
-CURRENT_LABEL=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" | grep "Partition name" | cut -d"'" -f2)
+CURRENT_LABEL=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
 if [ "$CURRENT_LABEL" != "rootfs_a" ]; then
     log "Setting rootfs_a partition label..."
     sgdisk -c "$ROOT_PART_NUM:rootfs_a" "$BASE_DEV"
@@ -499,7 +499,7 @@ fi
 
 # Set boot partition label
 BOOT_PART_NUM=1
-BOOT_LABEL=$(sgdisk -i "$BOOT_PART_NUM" "$BASE_DEV" | grep "Partition name" | cut -d"'" -f2)
+BOOT_LABEL=$(sgdisk -i "$BOOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
 if [ "$BOOT_LABEL" != "boot" ]; then
     log "Setting boot partition label..."
     sgdisk -c "$BOOT_PART_NUM:boot" "$BASE_DEV"
