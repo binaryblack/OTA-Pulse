@@ -46,7 +46,8 @@ pet_watchdog() {
 
 check_memfaultd() {
     # Check if memfaultd process is running
-    pgrep -x memfaultd >/dev/null 2>&1
+    # Use pidof (BusyBox built-in) instead of pgrep (not available on BusyBox)
+    pidof memfaultd >/dev/null 2>&1
     return $?
 }
 

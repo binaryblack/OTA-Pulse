@@ -266,23 +266,11 @@ fi
 log "Base device: $BASE_DEV"
 log "Root partition number: $ROOT_PART_NUM"
 
-# Check if sgdisk is available
-if ! command -v sgdisk &> /dev/null; then
-    error "sgdisk not found. Install gptfdisk package."
-fi
-
-# Wait for device to be fully ready before reading GPT.
-# Use || true so a "not ready" result (e.g. no free sectors on a fully-allocated
-# static WIC image) does not abort the script via set -e.  udevadm settle has
-# already run inside wait_for_device_ready, so by-partlabel symlinks are present.
-wait_for_device_ready "$BASE_DEV" || true
-
-# Print current partition info (diagnostic only — failure is non-fatal)
-log "Current partition layout:"
-sgdisk -p "$BASE_DEV" || true
-
 # EARLY CHECK: If all required partitions exist with correct labels and are formatted,
-# we don't need to do anything. This handles WIC images that pre-create partitions.
+# we don't need to do anything. This handles WIC images that pre-create partitions
+# and also the OTA-to-partition-B case (marker file only on partition A's rootfs).
+# This check uses /dev/disk/by-partlabel symlinks (set up by udev, no sgdisk needed)
+# and MUST run BEFORE wait_for_device_ready to avoid sgdisk hangs on some eMMC.
 check_all_partitions_ready() {
     local all_ready=1
 
@@ -361,6 +349,23 @@ if check_all_partitions_ready; then
     log "Partition setup complete (pre-existing partitions detected)"
     exit 0
 fi
+
+# --- Past this point, partitions need to be created. sgdisk is required. ---
+
+# Check if sgdisk is available
+if ! command -v sgdisk &> /dev/null; then
+    error "sgdisk not found. Install gptfdisk package."
+fi
+
+# Wait for device to be fully ready before reading GPT.
+# Use || true so a "not ready" result (e.g. no free sectors on a fully-allocated
+# static WIC image) does not abort the script via set -e.  udevadm settle has
+# already run inside wait_for_device_ready, so by-partlabel symlinks are present.
+wait_for_device_ready "$BASE_DEV" || true
+
+# Print current partition info (diagnostic only — failure is non-fatal)
+log "Current partition layout:"
+sgdisk -p "$BASE_DEV" || true
 
 # Check if rootfs_b already exists and is formatted (partial setup)
 if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then

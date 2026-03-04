@@ -62,7 +62,8 @@ EOF
     cat > ${D}${sysconfdir}/systemd/system/sshd.service << 'EOF'
 [Unit]
 Description=OpenSSH Daemon
-After=network.target sshdgenkeys.service
+# Wait for partition-setup so SSH host key symlinks into /data are valid.
+After=network.target sshdgenkeys.service otapulse-partition-setup.service
 
 [Service]
 EnvironmentFile=-/etc/default/ssh

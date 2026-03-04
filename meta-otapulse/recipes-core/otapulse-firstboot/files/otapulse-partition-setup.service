@@ -1,12 +1,15 @@
 [Unit]
 Description=OTAPulse First-Boot Partition Setup
 Documentation=https://github.com/binaryblack/OTA-Pulse
-# Run after block devices and filesystems are ready
+# Run after block devices and filesystems are ready.
+# NOTE: No ConditionPathExists — the script itself checks the marker file and
+# exits early if partitions are already configured. The service MUST run on
+# every boot so that ensure_persistent_ssh_keys() and ensure_persistent_machine_id()
+# execute, which maintain symlinks into /data for SSH host keys and machine-id.
 DefaultDependencies=no
 After=local-fs.target systemd-udev-settle.service
 Wants=systemd-udev-settle.service
-Before=soc-ota-agent.service memfaultd.service
-ConditionPathExists=!/var/lib/otapulse/.partitions-created
+Before=soc-ota-agent.service memfaultd.service sshd.service
 
 [Service]
 Type=oneshot
