@@ -41,11 +41,18 @@ ensure_persistent_machine_id() {
 
     # Check if /data is mounted (may not be on very first boot before partitioning)
     if ! mountpoint -q /data 2>/dev/null; then
-        # Try to mount data partition if it exists
+        # Try to mount data partition — check both "data" and "userdata" labels
+        # (Rockchip BSPs use "userdata", most others use "data")
+        local data_dev=""
         if [ -e "/dev/disk/by-partlabel/data" ]; then
+            data_dev="/dev/disk/by-partlabel/data"
+        elif [ -e "/dev/disk/by-partlabel/userdata" ]; then
+            data_dev="/dev/disk/by-partlabel/userdata"
+        fi
+        if [ -n "$data_dev" ]; then
             mkdir -p /data
-            mount /dev/disk/by-partlabel/data /data || return 1
-            log "Mounted /data partition for machine-id persistence"
+            mount "$data_dev" /data || return 1
+            log "Mounted $data_dev at /data for machine-id persistence"
         else
             # /data partition doesn't exist yet, skip for now
             return 1
@@ -288,15 +295,22 @@ check_all_partitions_ready() {
         all_ready=0
     fi
 
-    # Check data partition
+    # Check data partition — accept both "data" and "userdata" labels
+    # (Rockchip BSPs use "userdata", most others use "data")
+    local data_label=""
     if [ -e "/dev/disk/by-partlabel/data" ]; then
-        local fstype=$(lsblk -no FSTYPE /dev/disk/by-partlabel/data 2>/dev/null || true)
+        data_label="data"
+    elif [ -e "/dev/disk/by-partlabel/userdata" ]; then
+        data_label="userdata"
+    fi
+    if [ -n "$data_label" ]; then
+        local fstype=$(lsblk -no FSTYPE "/dev/disk/by-partlabel/$data_label" 2>/dev/null || true)
         if [ -z "$fstype" ]; then
-            log "data partition exists but not formatted"
+            log "$data_label partition exists but not formatted"
             all_ready=0
         fi
     else
-        log "data partition not found"
+        log "data partition not found (checked 'data' and 'userdata' labels)"
         all_ready=0
     fi
 
@@ -307,14 +321,18 @@ if check_all_partitions_ready; then
     log "All partitions (rootfs_a, rootfs_b, data) already exist and are formatted"
     log "Partition setup not needed - likely a WIC image with pre-created partitions"
 
-    # Mount data partition if not already mounted
-    if [ -e "/dev/disk/by-partlabel/data" ]; then
-        if [ ! -d "/data" ]; then
-            mkdir -p /data
+    # Mount data partition if not already mounted (check both "data" and "userdata" labels)
+    if ! mountpoint -q /data 2>/dev/null; then
+        local mount_dev=""
+        if [ -e "/dev/disk/by-partlabel/data" ]; then
+            mount_dev="/dev/disk/by-partlabel/data"
+        elif [ -e "/dev/disk/by-partlabel/userdata" ]; then
+            mount_dev="/dev/disk/by-partlabel/userdata"
         fi
-        if ! mountpoint -q /data; then
-            mount /dev/disk/by-partlabel/data /data 2>/dev/null || true
-            log "Mounted data partition at /data"
+        if [ -n "$mount_dev" ]; then
+            mkdir -p /data
+            mount "$mount_dev" /data 2>/dev/null || true
+            log "Mounted $mount_dev at /data"
         fi
     fi
 
@@ -425,7 +443,7 @@ DATA_END=$LAST_SECTOR
 
 # Check if partitions already exist (from previous interrupted run)
 PARTITIONS_EXIST=0
-if [ -e "/dev/disk/by-partlabel/rootfs_b" ] && [ -e "/dev/disk/by-partlabel/data" ]; then
+if [ -e "/dev/disk/by-partlabel/rootfs_b" ] && { [ -e "/dev/disk/by-partlabel/data" ] || [ -e "/dev/disk/by-partlabel/userdata" ]; }; then
     log "Partitions already exist, skipping creation"
     PARTITIONS_EXIST=1
 fi

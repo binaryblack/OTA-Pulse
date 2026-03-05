@@ -202,7 +202,61 @@ try_uenv() {
     return 0
 }
 
-# Method 5: Store boot slot preference (for bootloader that reads it)
+# Method 5: Update mender_boot_part on FAT boot partition
+# boot.scr on i.MX8, some Rockchip, etc. reads this file via U-Boot
+# 'load mmc' which can only access the FAT filesystem, not /data/ota/.
+try_fat_boot_part() {
+    local fat_dev=""
+    local target_part
+
+    if [ "$SLOT" = "A" ]; then
+        target_part=$(get_partition_number "$ROOTFS_A")
+    else
+        target_part=$(get_partition_number "$ROOTFS_B")
+    fi
+
+    # Find FAT boot partition by label
+    for dev in /dev/mmcblk*p1 /dev/sd?1; do
+        [ -b "$dev" ] || continue
+        local fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+        local label=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+        if [ "$fstype" = "vfat" ] && [ "$label" = "boot" ]; then
+            fat_dev="$dev"
+            break
+        fi
+    done
+
+    if [ -z "$fat_dev" ]; then
+        log "No FAT boot partition found"
+        return 1
+    fi
+
+    local mnt="/tmp/.bootfat_$$"
+    mkdir -p "$mnt"
+
+    if ! mount "$fat_dev" "$mnt" 2>/dev/null; then
+        log "Failed to mount $fat_dev"
+        rmdir "$mnt" 2>/dev/null || true
+        return 1
+    fi
+
+    if [ ! -f "$mnt/boot.scr" ]; then
+        log "No boot.scr on FAT partition"
+        umount "$mnt" 2>/dev/null
+        rmdir "$mnt" 2>/dev/null || true
+        return 1
+    fi
+
+    printf '%s' "$target_part" > "$mnt/mender_boot_part"
+    sync
+    umount "$mnt" 2>/dev/null
+    rmdir "$mnt" 2>/dev/null || true
+
+    log "Updated FAT boot partition ($fat_dev) mender_boot_part=$target_part"
+    return 0
+}
+
+# Method 6: Store boot slot preference (for bootloader that reads it)
 store_boot_slot() {
     mkdir -p "$(dirname "$BOOT_SLOT_FILE")"
     echo "$SLOT" > "$BOOT_SLOT_FILE"
@@ -236,6 +290,8 @@ main() {
     # Try methods in order of preference
     # PARTUUID swapping is most reliable for Rockchip platforms
     if try_partuuid_swap; then
+        success=true
+    elif try_fat_boot_part; then
         success=true
     elif try_fw_setenv; then
         success=true

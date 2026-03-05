@@ -86,8 +86,47 @@ switch_to_slot() {
     # Mark upgrade available so bootloader knows to switch
     echo "1" > "$UPGRADE_AVAILABLE_FILE"
 
+    # If boot.scr reads mender_boot_part from a FAT boot partition,
+    # we must also update the file there (boot.scr can only read from FAT).
+    update_fat_boot_part "$target_part"
+
     echo "Switched to slot $target_slot (partition $target_part)"
     echo "Reboot to boot from the new slot"
+}
+
+# Update mender_boot_part on the FAT boot partition (if present).
+# boot.scr on i.MX8, some Rockchip, etc. reads this file via U-Boot
+# 'load mmc' which can only access the FAT filesystem, not /data/ota/.
+update_fat_boot_part() {
+    local target_part="$1"
+    local fat_dev=""
+
+    # Find the FAT boot partition by label
+    for dev in /dev/mmcblk*p1 /dev/sd?1; do
+        [ -b "$dev" ] || continue
+        local fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+        local label=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+        if [ "$fstype" = "vfat" ] && [ "$label" = "boot" ]; then
+            fat_dev="$dev"
+            break
+        fi
+    done
+
+    [ -n "$fat_dev" ] || return 0
+
+    local mnt="/tmp/.bootfat_$$"
+    mkdir -p "$mnt"
+
+    if mount "$fat_dev" "$mnt" 2>/dev/null; then
+        # Only update if boot.scr exists (confirms this FAT is the boot source)
+        if [ -f "$mnt/boot.scr" ]; then
+            printf '%s' "$target_part" > "$mnt/mender_boot_part"
+            sync
+            echo "Updated FAT boot partition ($fat_dev) mender_boot_part=$target_part"
+        fi
+        umount "$mnt" 2>/dev/null
+    fi
+    rmdir "$mnt" 2>/dev/null || true
 }
 
 show_status() {

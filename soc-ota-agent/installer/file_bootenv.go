@@ -16,6 +16,7 @@ package installer
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -233,12 +234,12 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
 		log.Debug("FileBasedBootEnv: Boot partition not mounted, attempting to mount")
 		// Common boot partition devices across platforms
 		bootDevices := []string{
-			"/dev/disk/by-partlabel/boot",   // GPT label (OTAPulse standard)
-			"/dev/disk/by-label/boot",       // Filesystem label
-			"/dev/disk/by-label/BOOT",       // Filesystem label (uppercase)
-			"/dev/mmcblk1p1",                // eMMC (i.MX8, etc.)
-			"/dev/mmcblk0p1",                // SD card
-			"/dev/sda1",                     // USB/SATA
+			"/dev/disk/by-partlabel/boot", // GPT label (OTAPulse standard)
+			"/dev/disk/by-label/boot",     // Filesystem label
+			"/dev/disk/by-label/BOOT",     // Filesystem label (uppercase)
+			"/dev/mmcblk1p1",              // eMMC (i.MX8, etc.)
+			"/dev/mmcblk0p1",              // SD card
+			"/dev/sda1",                   // USB/SATA
 		}
 		for _, dev := range bootDevices {
 			if _, err := os.Stat(dev); err == nil {
@@ -271,6 +272,71 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
 	// Sync filesystem
 	syscall.Sync()
 	log.Infof("FileBasedBootEnv: Synced boot slot %s to %s", partNum, bootFile)
+
+	// On direct-boot platforms (e.g. RPi4 without U-Boot), the VideoCore firmware
+	// reads root= from cmdline.txt on the FAT boot partition. Without U-Boot to
+	// switch partitions via fw_setenv, we must update cmdline.txt directly so the
+	// device boots from the correct partition after OTA reboot.
+	//
+	// Only do this when U-Boot env tools are absent — on U-Boot platforms the
+	// bootloader manages root= itself and cmdline.txt changes are unnecessary.
+	_, errPrintenv := exec.LookPath("fw_printenv")
+	_, errSetenv := exec.LookPath("fw_setenv")
+	isDirectBoot := errPrintenv != nil && errSetenv != nil
+	if isDirectBoot {
+		bootDir := filepath.Dir(bootFile)
+		newRootDev := f.getDeviceForPartNum(partNum)
+		if newRootDev != "" {
+			f.updateBootCmdline(bootDir, newRootDev)
+		} else {
+			log.Debugf("FileBasedBootEnv: Could not determine root device for partition %s, skipping cmdline.txt update", partNum)
+		}
+	}
+}
+
+// getDeviceForPartNum returns the full block device path for the given partition number.
+func (f *FileBasedBootEnv) getDeviceForPartNum(partNum string) string {
+	if extractPartitionNumber(f.rootfsPartA) == partNum {
+		return f.rootfsPartA
+	}
+	if extractPartitionNumber(f.rootfsPartB) == partNum {
+		return f.rootfsPartB
+	}
+	return ""
+}
+
+// updateBootCmdline updates the root= parameter in /boot/cmdline.txt to point to
+// newRootDev. This is required on direct-boot platforms (e.g. RPi4 without U-Boot)
+// where the VideoCore firmware reads cmdline.txt directly.
+func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
+	cmdlinePath := filepath.Join(bootDir, "cmdline.txt")
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		log.Debugf("FileBasedBootEnv: No cmdline.txt at %s: %v", cmdlinePath, err)
+		return
+	}
+
+	// Split into tokens and update root= in-place, preserving all other parameters
+	parts := strings.Fields(strings.TrimSpace(string(data)))
+	changed := false
+	for i, p := range parts {
+		if strings.HasPrefix(p, "root=") {
+			parts[i] = "root=" + newRootDev
+			changed = true
+		}
+	}
+	if !changed {
+		log.Debugf("FileBasedBootEnv: No root= in cmdline.txt at %s, skipping", cmdlinePath)
+		return
+	}
+
+	updated := strings.Join(parts, " ") + "\n"
+	if err := os.WriteFile(cmdlinePath, []byte(updated), 0644); err != nil {
+		log.Warnf("FileBasedBootEnv: Failed to update cmdline.txt: %v", err)
+		return
+	}
+	syscall.Sync()
+	log.Infof("FileBasedBootEnv: Updated %s: root → %s", cmdlinePath, newRootDev)
 }
 
 // slotToPartitionNumber converts slot letter (a/b) to partition number.

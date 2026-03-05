@@ -1,0 +1,57 @@
+#!/bin/sh
+# OTAPulse State Script: ArtifactReboot_Enter
+# Syncs mender_boot_part from /data/ota/ to the FAT boot partition.
+#
+# The Mender agent writes boot env to /data/ota/mender_boot_part (file-based
+# fallback when fw_setenv is unavailable). However, boot.scr on platforms like
+# i.MX8MP reads mender_boot_part from the FAT boot partition via U-Boot's
+# 'load mmc' command. This script bridges the gap by copying the value to FAT
+# just before the agent triggers a reboot.
+
+set -e
+
+BOOT_PART_FILE="/data/ota/mender_boot_part"
+
+# Only act if there's a boot part file to sync
+if [ ! -f "$BOOT_PART_FILE" ]; then
+    echo "ArtifactReboot_Enter: No $BOOT_PART_FILE, nothing to sync"
+    exit 0
+fi
+
+TARGET_PART=$(cat "$BOOT_PART_FILE")
+
+# Find the FAT boot partition by label
+FAT_DEV=""
+for dev in /dev/mmcblk*p1 /dev/sd?1; do
+    [ -b "$dev" ] || continue
+    FSTYPE=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+    LABEL=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+    if [ "$FSTYPE" = "vfat" ] && [ "$LABEL" = "boot" ]; then
+        FAT_DEV="$dev"
+        break
+    fi
+done
+
+if [ -z "$FAT_DEV" ]; then
+    echo "ArtifactReboot_Enter: No FAT boot partition found, skipping"
+    exit 0
+fi
+
+MNT="/tmp/.bootfat_reboot_$$"
+mkdir -p "$MNT"
+
+if mount "$FAT_DEV" "$MNT" 2>/dev/null; then
+    if [ -f "$MNT/boot.scr" ]; then
+        printf '%s' "$TARGET_PART" > "$MNT/mender_boot_part"
+        sync
+        echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART"
+    else
+        echo "ArtifactReboot_Enter: No boot.scr on $FAT_DEV, skipping"
+    fi
+    umount "$MNT" 2>/dev/null
+else
+    echo "ArtifactReboot_Enter: Failed to mount $FAT_DEV"
+fi
+
+rmdir "$MNT" 2>/dev/null || true
+exit 0
