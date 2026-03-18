@@ -32,9 +32,10 @@ For private CAs, include your CA certificate in the device image.
 
 For enhanced security, pin the server certificate:
 
-```bash
-# In your Yocto configuration
-OTAPULSE_SERVER_CERTIFICATE = "/etc/otapulse/server-ca.pem"
+```json
+{
+  "ServerCertificate": "/etc/otapulse/server-ca.pem"
+}
 ```
 
 ## Artifact Signing
@@ -62,9 +63,18 @@ openssl ec -in artifact-signing-private.pem -pubout \
 Sign your firmware artifacts during the build process:
 
 ```bash
-mender-artifact sign artifact.mender \
+mender-artifact write rootfs-image \
+  -t your-device-type \
+  -n "release-1.0.1" \
+  -f your-rootfs.ext4 \
   --key artifact-signing-private.pem \
-  --output artifact-signed.mender
+  -o artifact-signed.mender
+```
+
+Or enable automatic signing during Yocto build:
+```bash
+# In local.conf
+SOC_OTA_SIGNING_KEY = "/path/to/artifact-signing-private.pem"
 ```
 
 ### Verification Key Deployment
@@ -73,7 +83,7 @@ Include the public key in your device image:
 
 ```bash
 # In local.conf
-OTAPULSE_ARTIFACT_VERIFY_KEY = "/path/to/artifact-signing-public.pem"
+SOC_OTA_VERIFICATION_KEYS = "/path/to/artifact-signing-public.pem"
 ```
 
 Or via the signing-keys recipe:
@@ -92,6 +102,22 @@ Configure the agent to require signed artifacts:
 {
   "ArtifactVerifyKey": "/etc/otapulse/artifact-verify-key.pem"
 }
+```
+
+For key rotation, use the list form:
+```json
+{
+  "ArtifactVerifyKeys": [
+    "/etc/soc-monitoring/signing-keys/active/production-rsa-public.pem",
+    "/etc/soc-monitoring/signing-keys/active/production-ecdsa-public.pem"
+  ]
+}
+```
+
+Enable build-time verification enforcement:
+```bash
+# In local.conf
+SOC_OTA_SIGNATURE_VERIFICATION = "1"
 ```
 
 ## Device Authentication
@@ -177,7 +203,7 @@ Consider dm-crypt/LUKS for encryption.
 
 - [ ] Generate unique signing keys for production
 - [ ] Store private signing key in HSM or secure vault
-- [ ] Configure artifact signature verification
+- [ ] Configure artifact signature verification (`SOC_OTA_SIGNATURE_VERIFICATION = "1"`)
 - [ ] Use TLS with certificate verification
 - [ ] Implement secure device identity
 - [ ] Enable secure boot chain (if supported)

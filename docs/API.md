@@ -16,11 +16,9 @@ Display information about the currently installed artifact:
 soc-ota-agent show-artifact
 ```
 
-Output:
+Output (prints the current artifact name):
 ```
-artifact_name=release-1.0.0
-device_type=radxa-cm5
-artifact_group=production
+release-1.0.0
 ```
 
 #### Check for Updates
@@ -50,7 +48,8 @@ soc-ota-agent install /path/to/artifact.mender
 ```
 
 Options:
-- `-f, --force`: Force installation even if already installed
+- `--reboot-exit-code`: Return exit code 4 if manual reboot is required
+- `--passphrase-file`: Passphrase file for decrypting an encrypted private key
 
 #### Commit Update
 
@@ -93,6 +92,47 @@ Perform initial device setup:
 soc-ota-agent bootstrap
 ```
 
+### Additional Commands
+
+#### Send Inventory
+
+Force an inventory update:
+
+```bash
+soc-ota-agent send-inventory
+```
+
+#### Setup
+
+Interactive configuration setup:
+
+```bash
+soc-ota-agent setup --device-type my-device --server-url https://ota.example.com
+```
+
+#### Snapshot
+
+Create a snapshot of the running rootfs:
+
+```bash
+soc-ota-agent snapshot dump > rootfs.img
+```
+
+### Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `--config`, `-c` | Path to configuration file |
+| `--fallback-config` | Fallback configuration file |
+| `--data` | Data store directory |
+| `--log-file` | Path to log file |
+| `--log-level` | Log level (debug, info, warning, error) |
+| `--trusted-certs` | Path to trusted certificates |
+| `--forcebootstrap` | Force bootstrap |
+| `--no-syslog` | Disable syslog logging |
+| `--skipverify` | Skip TLS verification |
+| `--passphrase-file` | Private key passphrase file |
+
 ### Utility Commands
 
 #### Version
@@ -126,79 +166,54 @@ The OTA agent exposes a D-Bus interface for programmatic control.
 
 ### Methods
 
-#### GetVersion
+#### SetUpdateControlMap
 
-Get the current artifact version:
+Set an update control map to pause/gate updates:
 
 ```
-GetVersion() -> (s artifact_name)
+SetUpdateControlMap(s update_control_map) -> (i refresh_timeout)
 ```
 
 Example:
 ```bash
 busctl call io.otapulse.UpdateManager \
   /io/otapulse/UpdateManager \
-  io.otapulse.Update1 GetVersion
+  io.otapulse.Update1 SetUpdateControlMap s '{"priority": 1}'
 ```
 
-#### CheckUpdate
+### Authentication D-Bus Interface
 
-Check for available updates:
+| Property | Value |
+|----------|-------|
+| Bus Name | `io.otapulse.AuthenticationManager` |
+| Object Path | `/io/otapulse/AuthenticationManager` |
+| Interface | `io.otapulse.Authentication1` |
 
-```
-CheckUpdate() -> (b update_available, s artifact_name)
-```
+#### GetJwtToken
 
-#### FetchUpdate
-
-Download an available update:
-
-```
-FetchUpdate() -> (b success)
-```
-
-#### InstallUpdate
-
-Install the downloaded update:
+Get the current JWT token and server URL:
 
 ```
-InstallUpdate() -> (b success)
+GetJwtToken() -> (s token, s server_url)
 ```
 
-#### Commit
+#### FetchJwtToken
 
-Commit the current update:
-
-```
-Commit() -> (b success)
-```
-
-#### Rollback
-
-Rollback to previous version:
+Force a JWT token refresh:
 
 ```
-Rollback() -> (b success)
+FetchJwtToken() -> (b success)
 ```
 
 ### Signals
 
-#### UpdateStateChanged
+#### JwtTokenStateChange
 
-Emitted when update state changes:
+Emitted when the JWT token changes (on the Authentication1 interface):
 
 ```
-UpdateStateChanged(s state, s artifact_name)
+JwtTokenStateChange(s token, s server_url)
 ```
-
-States:
-- `idle` - No update in progress
-- `downloading` - Downloading artifact
-- `downloaded` - Download complete
-- `installing` - Installing update
-- `installed` - Installation complete, pending reboot
-- `committed` - Update committed
-- `failed` - Update failed
 
 ### D-Bus Example (Python)
 
@@ -206,45 +221,28 @@ States:
 import dbus
 
 bus = dbus.SystemBus()
-proxy = bus.get_object(
+
+# Authentication interface
+auth_proxy = bus.get_object(
+    'io.otapulse.AuthenticationManager',
+    '/io/otapulse/AuthenticationManager'
+)
+auth = dbus.Interface(auth_proxy, 'io.otapulse.Authentication1')
+
+# Get JWT token
+token, server_url = auth.GetJwtToken()
+print(f"Server: {server_url}")
+
+# Update control interface
+update_proxy = bus.get_object(
     'io.otapulse.UpdateManager',
     '/io/otapulse/UpdateManager'
 )
-interface = dbus.Interface(proxy, 'io.otapulse.Update1')
+update = dbus.Interface(update_proxy, 'io.otapulse.Update1')
 
-# Get current version
-version = interface.GetVersion()
-print(f"Current artifact: {version}")
-
-# Check for updates
-available, artifact = interface.CheckUpdate()
-if available:
-    print(f"Update available: {artifact}")
-```
-
-### D-Bus Example (C)
-
-```c
-#include <gio/gio.h>
-
-GDBusProxy *proxy = g_dbus_proxy_new_for_bus_sync(
-    G_BUS_TYPE_SYSTEM,
-    G_DBUS_PROXY_FLAGS_NONE,
-    NULL,
-    "io.otapulse.UpdateManager",
-    "/io/otapulse/UpdateManager",
-    "io.otapulse.Update1",
-    NULL, NULL
-);
-
-GVariant *result = g_dbus_proxy_call_sync(
-    proxy, "GetVersion", NULL,
-    G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL
-);
-
-const gchar *version;
-g_variant_get(result, "(s)", &version);
-g_print("Current artifact: %s\n", version);
+# Set update control map
+timeout = update.SetUpdateControlMap('{"priority": 1}')
+print(f"Refresh timeout: {timeout}")
 ```
 
 ## State Machine
@@ -287,23 +285,27 @@ The OTA agent uses a state machine for update management:
 |------|-------------|
 | 0 | Success |
 | 1 | General error |
-| 2 | No update available |
-| 3 | Update already installed |
-| 4 | Signature verification failed |
-| 5 | Installation failed |
-| 6 | Commit failed |
-| 7 | Rollback failed |
+| 2 | Nothing to commit |
+| 4 | Manual reboot required |
 
 ## Logging
 
 The agent logs to:
 - Stdout (when running interactively)
-- Syslog (when running as daemon)
-- `/var/log/otapulse/update.log`
+- Syslog (when running as daemon, disable with `--no-syslog`)
+- Custom file via `--log-file` flag
+- Deployment log at path configured by `UpdateLogPath` in config
 
-Log levels: `debug`, `info`, `warn`, `error`
+Log levels: `debug`, `info`, `warning`, `error`, `panic`, `fatal`
 
-Set via environment:
+Set via CLI flag:
 ```bash
-OTAPULSE_LOG_LEVEL=debug soc-ota-agent daemon
+soc-ota-agent --log-level debug daemon
+```
+
+Or in config file (`/etc/otapulse/otapulse.conf`):
+```json
+{
+  "DaemonLogLevel": "debug"
+}
 ```

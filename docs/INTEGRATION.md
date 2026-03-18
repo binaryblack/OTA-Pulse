@@ -53,15 +53,15 @@ bitbake-layers add-layer ../sources/meta-otapulse
 Add the following to your `conf/local.conf`:
 
 ```bash
-# Enable OTAPulse
-DISTRO_FEATURES:append = " otapulse"
+# Enable OTAPulse (inherit in image recipe, or add here)
+INHERIT += "otapulse"
 
 # OTAPulse Server Configuration
-OTAPULSE_SERVER_URL = "https://your-server.com"
-OTAPULSE_TENANT_TOKEN = "your-tenant-token"
+OTA_SERVER_URL = "https://your-server.com"
+OTAPULSE_PROVISIONING_TOKEN = "your-provisioning-token"
 
 # Device Type (used for artifact compatibility)
-OTAPULSE_DEVICE_TYPE = "${MACHINE}"
+MENDER_DEVICE_TYPE = "${MACHINE}"
 
 # Optional: Customize poll intervals (in seconds)
 OTAPULSE_UPDATE_POLL_INTERVAL = "1800"
@@ -74,7 +74,7 @@ Ensure your machine configuration supports A/B partitioning. The layer provides 
 
 ```bash
 # Reference the provided WIC file or create your own
-WKS_FILE = "soc-monitoring.wks"
+WKS_FILE = "soc-monitoring.wks.in"
 ```
 
 ## Step 3: Configure U-Boot
@@ -113,7 +113,7 @@ Or add OTAPulse to your existing image by including the package group:
 
 ```bash
 # In your image recipe
-IMAGE_INSTALL:append = " soc-ota-agent memfaultd"
+IMAGE_INSTALL:append = " soc-ota-agent memfaultd-bin"
 ```
 
 ## Step 6: Device Provisioning

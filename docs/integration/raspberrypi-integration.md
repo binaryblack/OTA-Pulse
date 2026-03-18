@@ -63,7 +63,7 @@ Create `meta-your-layer/recipes-bsp/rpi-config/files/otapulse-boot-select.sh`:
 # OTA-Pulse Boot Slot Selector for Raspberry Pi
 # Runs before kernel boot to select correct cmdline
 
-BOOT_MOUNT="/boot/firmware"
+BOOT_MOUNT="/boot"
 SLOT_FILE="/data/ota/mender_boot_part"
 CONFIG_FILE="${BOOT_MOUNT}/config.txt"
 
@@ -95,12 +95,12 @@ Create `meta-your-layer/wic/otapulse-dynamic-ab-rpi.wks`:
 # No raw bootloader partition needed - RPi boots from FAT partition
 
 # Boot partition (FAT32) - firmware, kernel, DTBs, config.txt
-part /boot/firmware --source bootimg-partition --ondisk mmcblk \
-    --fstype=vfat --label boot --part-name boot --active --align 4096 --size 256
+part /boot --source bootimg-partition --ondisk mmcblk \
+    --fstype=vfat --label boot --part-name boot --active --align 4096 --size 100
 
 # Root filesystem A
 part / --source rootfs --ondisk mmcblk --fstype=ext4 \
-    --label rootfs_a --part-name rootfs_a --align 4096
+    --label rootfs_a --part-name rootfs_a --align 8192
 
 # GPT partition table
 bootloader --ptable gpt
@@ -122,7 +122,7 @@ console=serial0,115200 console=tty1 root=/dev/mmcblk0p3 rootfstype=ext4 rootwait
 
 ### Step 4: Modify OTA Agent for RPi
 
-The OTA agent needs to update cmdline selection instead of boot.scr. This is handled automatically by `file_bootenv.go` which detects RPi and updates config.txt.
+The OTA agent needs to update cmdline selection instead of boot.scr. On direct-boot platforms (where U-Boot env tools `fw_printenv`/`fw_setenv` are absent), `file_bootenv.go` automatically updates `cmdline.txt` on the FAT boot partition so that the VideoCore firmware boots the correct root partition after an OTA update.
 
 ### Step 5: Configure local.conf
 
@@ -165,7 +165,7 @@ OTAPULSE_BOOT_SCRIPT = "1"
 
 ### Step 2: Create RPi Boot Script
 
-Create `meta-your-layer/recipes-bsp/otapulse-boot-script/files/boot-raspberrypi.cmd`:
+Create `meta-your-layer/recipes-bsp/otapulse-boot-script/files/boot-raspberrypi4-64.cmd`:
 
 ```bash
 # OTA-Pulse A/B Boot Script for Raspberry Pi (U-Boot)
@@ -226,7 +226,7 @@ booti ${kernel_addr_r} - ${fdt_addr_r}
 ┌─────────────┬─────────────────────────────────────────────────────────┐
 │ Partition   │ Content                                                  │
 ├─────────────┼─────────────────────────────────────────────────────────┤
-│ Partition 1 │ /boot/firmware (FAT32, 256MB)                           │
+│ Partition 1 │ /boot (FAT32, 100MB)                                    │
 │             │ - bootcode.bin, start4.elf (GPU firmware)               │
 │             │ - config.txt, cmdline.txt                               │
 │             │ - kernel (Image or zImage)                              │
@@ -279,7 +279,7 @@ lsblk
 
 **Cause:** Wrong console device
 
-**Solution:** RPi 4/5 uses `ttyS0` (mini UART) or `ttyAMA0` (PL011). In config.txt:
+**Solution:** RPi 4 uses `ttyS0` (mini UART) or `ttyAMA0` (PL011); RPi 5 uses `ttyAMA0` by default. In config.txt:
 ```
 enable_uart=1
 dtoverlay=disable-bt  # Use ttyAMA0 for serial

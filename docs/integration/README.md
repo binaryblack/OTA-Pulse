@@ -31,7 +31,7 @@ Welcome to the OTA-Pulse integration documentation. This directory contains step
 
 ### Prerequisites (All Platforms)
 
-- **Yocto Project**: Scarthgap (4.0) or later recommended
+- **Yocto Project**: Scarthgap (5.0) or later recommended (Kirkstone 4.0 LTS also supported)
 - **Storage**: Minimum 8GB (16GB+ recommended for comfortable A/B updates)
 - **U-Boot**: With FAT filesystem support (most boards)
 - **Your BSP layer**: Platform-specific meta layer
@@ -44,6 +44,7 @@ Welcome to the OTA-Pulse integration documentation. This directory contains step
 | `otapulse-firstboot` | First-boot partition setup |
 | `otapulse-boot-script` | U-Boot boot script for A/B switching |
 | `memfaultd` | (Optional) Monitoring and diagnostics |
+| `soc-ctl` | Device control CLI (status, provisioning, config) |
 
 ## Architecture Overview
 
@@ -93,6 +94,7 @@ Add these to your `local.conf`:
 ```bitbake
 # Required
 OTA_SERVER_URL = "https://your-ota-server.com"
+OTAPULSE_PROVISIONING_TOKEN = "your-provisioning-token"
 
 # Partition Mode
 OTAPULSE_PARTITION_MODE = "dynamic"  # or "static"
@@ -111,12 +113,12 @@ WKS_FILE = "otapulse-dynamic-ab-<platform>.wks"
 ## OTA Update Flow
 
 ```
-1. Build artifact    →  soc-ota-agent write-artifact ...
+1. Build artifact    →  mender-artifact write rootfs-image ...
 2. Upload to server  →  Web UI or API
 3. Deploy            →  Select devices, deploy
 4. Device downloads  →  Automatic (soc-ota-agent daemon)
 5. Install to slot B →  Writes to inactive partition
-6. Update boot slot  →  mender_boot_part = 3
+6. Update boot slot  →  mender_boot_part file updated
 7. Reboot            →  Boots into new rootfs
 8. Health check      →  Agent verifies, commits or rollback
 ```
@@ -152,4 +154,4 @@ We welcome contributions! If you:
 - Find issues → Report on GitHub
 - Improve documentation → Submit a PR
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](../../soc-ota-agent/CONTRIBUTING.md) for guidelines.

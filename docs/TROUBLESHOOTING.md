@@ -148,7 +148,7 @@ fw_printenv
 2. State script errors:
    ```bash
    ls -la /etc/otapulse/scripts/
-   cat /var/log/otapulse/state-scripts.log
+   journalctl -u soc-ota-agent | grep -i "state script"
    ```
 
 3. Artifact compatibility:
@@ -284,12 +284,12 @@ bitbake soc-ota-agent -c devshell
 ### Enable Debug Logging
 
 ```bash
-# Temporary
-OTAPULSE_LOG_LEVEL=debug soc-ota-agent daemon
+# Temporary (via CLI flag)
+soc-ota-agent --log-level debug daemon
 
-# Permanent (in config)
+# Permanent (in /etc/otapulse/otapulse.conf)
 {
-  "LogLevel": "debug"
+  "DaemonLogLevel": "debug"
 }
 ```
 

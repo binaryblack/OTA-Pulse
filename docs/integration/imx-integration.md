@@ -41,6 +41,7 @@ Add to your `conf/local.conf`:
 
 # Your OTA server URL
 OTA_SERVER_URL = "https://your-ota-server.com"
+OTAPULSE_PROVISIONING_TOKEN = "your-provisioning-token"
 
 # Enable A/B boot script (required for partition switching)
 OTAPULSE_BOOT_SCRIPT = "1"
@@ -120,10 +121,7 @@ The i.MX boot script (`boot-imx8mp.cmd`) performs:
 Default console for i.MX8:
 - `ttymxc1,115200` (UART2 on most boards)
 
-Override in local.conf if different:
-```bitbake
-OTAPULSE_CONSOLE = "ttymxc0,115200"
-```
+To override, create a custom boot script via `OTAPULSE_BOOT_CMD` with your console setting.
 
 ## First Boot Process
 
@@ -160,11 +158,11 @@ soc-ctl status
 
 ```bash
 # On your build machine, create update artifact
-soc-ota-agent write-artifact \
-    --file my-image-<MACHINE>.ext4 \
-    --artifact-name "v1.2.0" \
-    --device-type "<MACHINE>" \
-    --output my-update-v1.2.0.mender
+mender-artifact write rootfs-image \
+    -f my-image-<MACHINE>.ext4 \
+    -n "v1.2.0" \
+    -t "<MACHINE>" \
+    -o my-update-v1.2.0.mender
 
 # Upload to OTA server and deploy
 # Device will automatically download, install, and reboot
@@ -239,9 +237,9 @@ For production with pre-allocated partitions:
 
 ```bitbake
 OTAPULSE_PARTITION_MODE = "static"
-WKS_FILE = "otapulse-static-ab-imx.wks"
-OTAPULSE_ROOTFS_SIZE = "4096"  # MB
-OTAPULSE_DATA_SIZE = "2048"    # MB
+WKS_FILE = "soc-monitoring-large.wks"
+SOC_WKS_ROOTFS_SIZE = "4096M"
+SOC_WKS_DATA_SIZE = "2048M"
 ```
 
 ### Signature Verification

@@ -203,17 +203,21 @@ The core OTA agent is designed for easy porting:
 ```
 soc-ota-agent/
 ├── Makefile              # Standard GNU Make - works anywhere
-├── *.go                  # Pure Go code
+├── *.go                  # Go code (CGO_ENABLED=1 required)
 └── support/
     ├── otapulse-*.service    # Systemd service (reusable)
-    └── scripts/              # Shell scripts (portable)
+    ├── otapulse-device-identity  # Identity script
+    ├── otapulse-inventory-*  # Inventory scripts
+    ├── dbus/                 # D-Bus policy files
+    ├── modules/              # Update modules (deb, docker, rpm, etc.)
+    └── modules-artifact-gen/ # Artifact generator scripts
 ```
 
-**Cross-compilation:**
+**Cross-compilation (requires C cross-compiler since CGO is enabled):**
 ```bash
-# Build for any target
-GOOS=linux GOARCH=arm64 make build
-GOOS=linux GOARCH=arm GOARM=7 make build
+# Build for any target (set CC to your cross-compiler)
+CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 make build
+CC=arm-linux-gnueabihf-gcc GOOS=linux GOARCH=arm GOARM=7 make build
 GOOS=linux GOARCH=amd64 make build
 ```
 

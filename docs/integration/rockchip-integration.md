@@ -158,8 +158,7 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
 SRC_URI += "file://boot-rockchip.cmd"
 
-# Select Rockchip boot script for Rockchip machines
-OTAPULSE_BOOT_CMD = "${@'boot-rockchip.cmd' if 'rk3' in d.getVar('MACHINE').lower() else ''}"
+# The boot script is selected via OTAPULSE_BOOT_CMD in local.conf
 ```
 
 ### Step 5: Configure local.conf
@@ -171,6 +170,7 @@ OTAPULSE_BOOT_CMD = "${@'boot-rockchip.cmd' if 'rk3' in d.getVar('MACHINE').lowe
 
 # Your OTA server URL
 OTA_SERVER_URL = "https://your-ota-server.com"
+OTAPULSE_PROVISIONING_TOKEN = "your-provisioning-token"
 
 # Enable A/B boot script
 OTAPULSE_BOOT_SCRIPT = "1"
@@ -181,11 +181,8 @@ OTAPULSE_PARTITION_MODE = "dynamic"
 # Rockchip WKS file
 WKS_FILE = "otapulse-dynamic-ab-rockchip.wks"
 
-# Console for your specific board
-OTAPULSE_CONSOLE = "ttyS2,1500000"
-
-# Device tree for your board
-OTAPULSE_FDT_FILE = "rockchip/rk3588-rock-5b.dtb"
+# Boot script selection (set to your custom script name)
+OTAPULSE_BOOT_CMD = "boot-rockchip.cmd"
 ```
 
 ### Step 6: Add Packages to Image
@@ -194,6 +191,7 @@ OTAPULSE_FDT_FILE = "rockchip/rk3588-rock-5b.dtb"
 IMAGE_INSTALL:append = " \
     soc-ota-agent \
     otapulse-firstboot \
+    otapulse-rockchip-bootenv \
 "
 ```
 
@@ -267,24 +265,22 @@ Standard Rockchip memory layout:
 
 ```bitbake
 MACHINE = "rock-5b"
-OTAPULSE_FDT_FILE = "rockchip/rk3588-rock-5b.dtb"
-OTAPULSE_CONSOLE = "ttyS2,1500000"
+# Console and FDT are set in the boot script (boot-rockchip.cmd)
+# Edit setenv fdt_file and setenv console in your boot script for your board
 ```
 
 ### Orange Pi 5 (RK3588S)
 
 ```bitbake
 MACHINE = "orangepi-5"
-OTAPULSE_FDT_FILE = "rockchip/rk3588s-orangepi-5.dtb"
-OTAPULSE_CONSOLE = "ttyS2,1500000"
+# Edit boot-rockchip.cmd: setenv fdt_file rockchip/rk3588s-orangepi-5.dtb
 ```
 
 ### Rock 3A (RK3568)
 
 ```bitbake
 MACHINE = "rock-3a"
-OTAPULSE_FDT_FILE = "rockchip/rk3568-rock-3a.dtb"
-OTAPULSE_CONSOLE = "ttyS2,1500000"
+# Edit boot-rockchip.cmd: setenv fdt_file rockchip/rk3568-rock-3a.dtb
 ```
 
 ## Troubleshooting

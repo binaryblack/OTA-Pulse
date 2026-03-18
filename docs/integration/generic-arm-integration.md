@@ -52,9 +52,9 @@ Create `meta-your-layer/wic/otapulse-dynamic-ab-myplatform.wks`:
 # Examples:
 #
 # STM32MP1:
-#   part fsbl1 --source rawcopy --sourceparams="file=tf-a-stm32mp157.stm32" \
+#   part fsbl1 --source rawcopy --sourceparams="file=tf-a-stm32mp.stm32" \
 #       --ondisk mmcblk --no-table --align 17
-#   part fsbl2 --source rawcopy --sourceparams="file=tf-a-stm32mp157.stm32" \
+#   part fsbl2 --source rawcopy --sourceparams="file=tf-a-stm32mp.stm32" \
 #       --ondisk mmcblk --no-table --align 273
 #   part fip --source rawcopy --sourceparams="file=fip.bin" \
 #       --ondisk mmcblk --no-table --align 529
@@ -92,7 +92,7 @@ part / --source rootfs --ondisk mmcblk --fstype=ext4 \
 # GPT partition table
 bootloader --ptable gpt
 
-# Note: rootfs_b and data partitions are created on first boot
+# Note: rootfs_b and data partitions are created by otapulse-firstboot on first boot
 ```
 
 ### Step 4: Create Boot Script (or Use Generic)
@@ -182,6 +182,7 @@ MACHINE = "my-custom-board"
 
 # OTA server
 OTA_SERVER_URL = "https://your-ota-server.com"
+OTAPULSE_PROVISIONING_TOKEN = "your-provisioning-token"
 
 # Enable boot script
 OTAPULSE_BOOT_SCRIPT = "1"
@@ -318,7 +319,7 @@ Examples:
 **Check:** Boot script syntax errors
 ```bash
 # Compile and test locally
-mkimage -A arm64 -O linux -T script -d boot.cmd boot.scr
+mkimage -A arm64 -O linux -T script -C none -n "OTAPulse Boot Script" -d boot.cmd boot.scr
 ```
 
 ### "Bad Linux ARM64 Image magic"

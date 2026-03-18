@@ -26,7 +26,15 @@ Configuration file: `/etc/otapulse/otapulse.conf`
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `ArtifactVerifyKey` | string | - | Path to artifact verification key |
+| `ArtifactVerifyKey` | string | - | Path to artifact verification key (single) |
+| `ArtifactVerifyKeys` | []string | - | List of verification key paths (for key rotation) |
+| `DaemonLogLevel` | string | - | Log level (debug, info, warning, error) |
+| `SkipVerify` | bool | false | Skip TLS certificate validation |
+| `RetryPollCount` | int | 0 | Max retry count |
+| `StateScriptTimeoutSeconds` | int | 0 | State script timeout |
+| `ModuleTimeoutSeconds` | int | 0 | Update module timeout |
+| `UseFileBasedBootEnv` | bool | false | Use file-based boot env instead of U-Boot |
+| `Servers` | []object | - | Server list for failover (mutually exclusive with ServerURL) |
 | `RootfsPartA` | string | auto | Primary rootfs partition |
 | `RootfsPartB` | string | auto | Secondary rootfs partition |
 
@@ -52,9 +60,9 @@ Configure in `conf/local.conf`:
 
 | Variable | Description |
 |----------|-------------|
-| `OTAPULSE_SERVER_URL` | Server URL |
-| `OTAPULSE_TENANT_TOKEN` | Tenant authentication token |
-| `OTAPULSE_DEVICE_TYPE` | Device type identifier |
+| `OTA_SERVER_URL` | Server URL |
+| `OTAPULSE_PROVISIONING_TOKEN` | Device provisioning token |
+| `MENDER_DEVICE_TYPE` | Device type identifier |
 
 ### Optional Variables
 
@@ -63,17 +71,21 @@ Configure in `conf/local.conf`:
 | `OTAPULSE_UPDATE_POLL_INTERVAL` | 1800 | Update poll interval (seconds) |
 | `OTAPULSE_INVENTORY_POLL_INTERVAL` | 28800 | Inventory poll interval |
 | `OTAPULSE_RETRY_POLL_INTERVAL` | 300 | Retry poll interval |
-| `OTAPULSE_ARTIFACT_VERIFY_KEY` | - | Embedded verification key |
+| `SOC_OTA_VERIFICATION_KEYS` | - | Public key(s) for signature verification |
+| `SOC_OTA_SIGNATURE_VERIFICATION` | 0 | Enable signature verification (1/0) |
+| `SOC_OTA_SIGNING_KEY` | - | Private key for build-time signing |
+| `OTAPULSE_PARTITION_MODE` | dynamic | Partition mode (dynamic/static) |
+| `OTAPULSE_SANITY_LEVEL` | error | Sanity check level (error/warn/off) |
 
 ### Example local.conf
 
 ```bash
 # OTAPulse Configuration
-DISTRO_FEATURES:append = " otapulse"
+INHERIT += "otapulse"
 
-OTAPULSE_SERVER_URL = "https://ota.mycompany.com"
-OTAPULSE_TENANT_TOKEN = "your-token-here"
-OTAPULSE_DEVICE_TYPE = "${MACHINE}"
+OTA_SERVER_URL = "https://ota.mycompany.com"
+OTAPULSE_PROVISIONING_TOKEN = "your-token-here"
+MENDER_DEVICE_TYPE = "${MACHINE}"
 OTAPULSE_UPDATE_POLL_INTERVAL = "3600"
 ```
 
@@ -81,8 +93,7 @@ OTAPULSE_UPDATE_POLL_INTERVAL = "3600"
 
 Default identity attributes are collected from:
 
-- `/etc/machine-id` - Machine ID
-- Network interface MAC addresses
+- Network interface MAC address (lowest-ifindex Ethernet interface)
 - Custom identity scripts
 
 ### Custom Identity Script
@@ -174,8 +185,9 @@ The agent respects these environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `OTAPULSE_LOG_LEVEL` | Log verbosity (debug, info, warn, error) |
-| `OTAPULSE_CONFIG_FILE` | Alternative config file path |
+| `OTAPULSE_CONF_DIR` | Configuration directory (default: /etc/otapulse) |
+| `OTAPULSE_DATA_DIR` | Data directory (default: /usr/share/otapulse) |
+| `OTAPULSE_DATASTORE_DIR` | Runtime datastore (default: /var/lib/otapulse) |
 | `HTTPS_PROXY` | HTTPS proxy URL |
 | `NO_PROXY` | Proxy bypass list |
 
@@ -186,7 +198,7 @@ The agent respects these environment variables:
 | `/etc/otapulse/otapulse.conf` | Main configuration |
 | `/etc/otapulse/scripts/` | State scripts |
 | `/var/lib/otapulse/` | Runtime data, state |
-| `/var/log/otapulse/` | Log files |
+| systemd journal | Log output (via `journalctl -u soc-ota-agent`) |
 | `/usr/share/otapulse/identity/` | Identity scripts |
 | `/usr/share/otapulse/inventory/` | Inventory scripts |
 | `/data/otapulse/` | Persistent data partition |
