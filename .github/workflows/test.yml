@@ -1,0 +1,46 @@
+name: Test
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: soc-ota-agent/go.sum
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liblmdb-dev libssl-dev
+
+      - name: Run tests
+        working-directory: soc-ota-agent
+        run: make test
+
+      - name: Run vet
+        working-directory: soc-ota-agent
+        run: make govet
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Check scripts
+        run: |
+          shellcheck -S warning scripts/otapulse-verify.sh
+          shellcheck -S warning scripts/otapulse-configure.sh
+          shellcheck -S warning scripts/otapulse-precheck.sh

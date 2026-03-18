@@ -1,0 +1,58 @@
+# OTAPulse Build Environment
+# Provides Go toolchain, cross-compilers, and all dependencies needed
+# to build the OTA agent for any supported architecture.
+#
+# Usage:
+#   docker build -t otapulse-build -f docker/Dockerfile.build .
+#   docker run --rm -v $(pwd):/workspace -w /workspace/soc-ota-agent otapulse-build make build
+
+FROM golang:1.22-bookworm
+
+LABEL maintainer="SoC Monitoring <support@socmonitoring.com>"
+LABEL description="OTAPulse reproducible build environment"
+
+# Add multiarch support for cross-compilation
+RUN dpkg --add-architecture arm64 && dpkg --add-architecture armhf
+
+# Install cross-compilers and build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-aarch64-linux-gnu \
+    gcc-arm-linux-gnueabihf \
+    make \
+    pkg-config \
+    git \
+    liblmdb-dev \
+    libssl-dev \
+    debhelper \
+    fakeroot \
+    dpkg-dev \
+    shellcheck \
+    openssl \
+    ca-certificates \
+    wget \
+    curl \
+    jq \
+    && apt-get install -y --no-install-recommends \
+    liblmdb-dev:arm64 libssl-dev:arm64 \
+    liblmdb-dev:armhf libssl-dev:armhf \
+    || true \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install mender-artifact
+RUN ARCH=$(dpkg --print-architecture) && \
+    wget -q "https://downloads.mender.io/mender-artifact/master/linux/mender-artifact" \
+        -O /usr/local/bin/mender-artifact 2>/dev/null && \
+    chmod +x /usr/local/bin/mender-artifact || \
+    echo "Warning: mender-artifact download failed (will need manual install)"
+
+# Set up Go environment
+ENV GOPATH=/go
+ENV PATH="${GOPATH}/bin:${PATH}"
+
+# Pre-download common Go tools
+RUN go install github.com/jstemmer/go-junit-report@latest 2>/dev/null || true
+
+WORKDIR /workspace
+
+# Default: build for host architecture
+CMD ["make", "-C", "soc-ota-agent", "build"]

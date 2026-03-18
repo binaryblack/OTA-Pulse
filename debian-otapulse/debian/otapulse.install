@@ -1,0 +1,8 @@
+usr/bin/otapulse
+usr/bin/mender
+usr/share/otapulse/identity/*
+usr/share/otapulse/inventory/*
+usr/share/otapulse/modules/v3/*
+usr/share/dbus-1/system.d/*
+lib/systemd/system/otapulse-client.service
+lib/systemd/system/otapulse-boot-reconcile.service

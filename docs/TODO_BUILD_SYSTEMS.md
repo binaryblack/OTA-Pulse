@@ -8,72 +8,21 @@ This document tracks planned and potential build system integrations for OTA-Pul
 |--------------|--------|-----------|-------|
 | Yocto/OpenEmbedded | ✅ Complete | `meta-otapulse/` | Production ready |
 | Buildroot | ✅ Complete | `buildroot-otapulse/` | Production ready |
+| Debian/Ubuntu (.deb) | ✅ Complete | `debian-otapulse/` | Multi-arch: amd64, arm64, armhf |
+| OpenWrt | ✅ Complete | `openwrt-otapulse/` | Procd + UCI integration |
+| Generic tarball | ✅ Complete | `generic-installer/` | Any Linux, auto-detects init system |
 
 ---
 
 ## Planned Integrations
 
-### 1. OpenWrt Package
-**Priority:** High
-**Target Market:** Routers, IoT gateways, networking devices
-**Effort:** Medium (2-3 days)
-
-**Why:**
-- Massive community (thousands of supported devices)
-- Standard for networking/router products
-- Strong demand for secure OTA in network infrastructure
-
-**Required Files:**
-```
-openwrt-otapulse/
-├── Makefile                    # OpenWrt package Makefile
-├── files/
-│   ├── otapulse.init           # Procd init script
-│   ├── otapulse.config         # UCI configuration
-│   └── otapulse.defaults       # Default settings
-└── patches/                    # Any needed patches
-```
-
-**Key Considerations:**
-- OpenWrt uses procd init system (not systemd)
-- UCI configuration system integration
-- LuCI web interface for configuration (optional)
-- musl libc compatibility (test Go binary)
-- Smaller flash storage constraints
+### ~~1. OpenWrt Package~~ ✅ COMPLETED
+See `openwrt-otapulse/` — Procd init + UCI config integration.
 
 ---
 
-### 2. Debian/Ubuntu Packages (.deb)
-**Priority:** High
-**Target Market:** Industrial PCs, SBCs, any Debian-based system
-**Effort:** Low (1-2 days)
-
-**Why:**
-- Easy onboarding for customers already using Debian/Ubuntu
-- Works on Raspberry Pi OS, Armbian, etc.
-- No custom build system needed - just `apt install`
-
-**Required Files:**
-```
-debian-otapulse/
-├── debian/
-│   ├── control                 # Package metadata
-│   ├── rules                   # Build rules
-│   ├── changelog               # Version history
-│   ├── copyright               # License info
-│   ├── otapulse.service        # Systemd service
-│   ├── otapulse.postinst       # Post-install script
-│   ├── otapulse.prerm          # Pre-remove script
-│   └── conffiles               # Config file list
-└── README.md
-```
-
-**Key Considerations:**
-- Multi-architecture support (amd64, arm64, armhf)
-- APT repository hosting (GitHub releases or dedicated)
-- Automatic updates via apt
-- Configuration via /etc/otapulse/
-- Integration with existing partition schemes
+### ~~2. Debian/Ubuntu Packages (.deb)~~ ✅ COMPLETED
+See `debian-otapulse/` — Multi-arch (amd64, arm64, armhf).
 
 ---
 
@@ -116,8 +65,7 @@ alpine-otapulse/
 ```
 ptxdist-otapulse/
 ├── rules/
-│   └── otapulse.make           # PTXdist rules file
-├── rules/
+│   ├── otapulse.make           # PTXdist rules file
 │   └── otapulse.in             # Kconfig menu
 └── projectroot/
     └── etc/otapulse/           # Default configs
@@ -125,31 +73,8 @@ ptxdist-otapulse/
 
 ---
 
-### 5. Generic Tarball Installer
-**Priority:** Medium
-**Target Market:** Any Linux system
-**Effort:** Low (1 day)
-
-**Why:**
-- Works on ANY Linux distribution
-- Useful for custom/proprietary build systems
-- Good for evaluation and testing
-
-**Required Files:**
-```
-generic-installer/
-├── install.sh                  # Interactive installer
-├── uninstall.sh                # Clean removal
-├── otapulse-<version>-<arch>.tar.gz
-└── README.md
-```
-
-**Features:**
-- Detect init system (systemd, sysvinit, openrc)
-- Install binary and scripts
-- Generate initial configuration
-- Create systemd/init service
-- Validate dependencies
+### ~~5. Generic Tarball Installer~~ ✅ COMPLETED
+See `generic-installer/` — Auto-detects init system (systemd/OpenRC/sysvinit).
 
 ---
 
@@ -184,15 +109,15 @@ rpm-otapulse/
 
 ## Integration Effort Summary
 
-| Integration | Effort | Files | Priority |
-|-------------|--------|-------|----------|
-| OpenWrt | 2-3 days | ~5 | High |
-| Debian (.deb) | 1-2 days | ~8 | High |
-| Alpine (apk) | 1-2 days | ~4 | Medium |
-| Generic tarball | 1 day | ~3 | Medium |
-| PTXdist | 2-3 days | ~4 | Low |
-| NixOS | 2-3 days | ~3 | Low |
-| Fedora (.rpm) | 1-2 days | ~2 | Low |
+| Integration | Status | Effort | Priority |
+|-------------|--------|--------|----------|
+| OpenWrt | ✅ Done | 2-3 days | High |
+| Debian (.deb) | ✅ Done | 1-2 days | High |
+| Generic tarball | ✅ Done | 1 day | Medium |
+| Alpine (apk) | Planned | 1-2 days | Medium |
+| PTXdist | Planned | 2-3 days | Low |
+| NixOS | Planned | 2-3 days | Low |
+| Fedora (.rpm) | Planned | 1-2 days | Low |
 
 ---
 

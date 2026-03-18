@@ -1,0 +1,31 @@
+[Unit]
+Description=OTAPulse Boot State Reconciliation
+Documentation=https://github.com/binaryblack/OTA-Pulse/blob/master/BUGS.md
+# Run early in boot, before the OTA agent starts
+DefaultDependencies=no
+After=local-fs.target
+Before=otapulse-client.service mender-client.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Compare actual boot partition (from /proc/self/mounts) with recorded state
+# in /data/ota/mender_boot_part. If they differ, update the state files.
+# Handles /dev/root by resolving the symlink via readlink.
+ExecStart=/bin/sh -c '\
+  DEV=$$(awk '"'"'$$2 == "/" {print $$1}'"'"' /proc/self/mounts); \
+  if [ "$$DEV" = "/dev/root" ] && [ -L /dev/root ]; then \
+    DEV=$$(readlink -f /dev/root); \
+  fi; \
+  ACTUAL=$$(echo "$$DEV" | grep -oE "[0-9]+$$"); \
+  RECORDED=$$(cat /data/ota/mender_boot_part 2>/dev/null | tr -d "[:space:]"); \
+  if [ -n "$$ACTUAL" ] && [ -n "$$RECORDED" ] && [ "$$ACTUAL" != "$$RECORDED" ]; then \
+    echo "OTAPulse: Boot state mismatch (actual=$$ACTUAL, recorded=$$RECORDED). Correcting." | logger -t otapulse-reconcile; \
+    echo "$$ACTUAL" > /data/ota/mender_boot_part; \
+    echo "0" > /data/ota/upgrade_available; \
+    echo "0" > /data/ota/boot_count; \
+    sync; \
+  fi'
+
+[Install]
+WantedBy=multi-user.target

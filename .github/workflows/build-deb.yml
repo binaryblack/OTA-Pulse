@@ -1,0 +1,55 @@
+name: Build .deb Package
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'soc-ota-agent/**'
+      - 'debian-otapulse/**'
+  pull_request:
+    paths:
+      - 'soc-ota-agent/**'
+      - 'debian-otapulse/**'
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64]
+        # Cross-arch builds require additional setup
+        # Add arm64 and armhf when cross-compilation is configured
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: soc-ota-agent/go.sum
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debhelper \
+            liblmdb-dev \
+            libssl-dev \
+            pkg-config \
+            fakeroot
+
+      - name: Build .deb package
+        working-directory: debian-otapulse
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: otapulse-deb-${{ matrix.arch }}
+          path: otapulse_*.deb
+
+      - name: Test installation
+        run: |
+          sudo dpkg -i otapulse_*.deb || sudo apt-get install -f -y
+          otapulse --version

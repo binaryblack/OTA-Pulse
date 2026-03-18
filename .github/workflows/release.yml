@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            cc: gcc
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+            suffix: linux-arm64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            cc: arm-linux-gnueabihf-gcc
+            suffix: linux-armhf
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: soc-ota-agent/go.sum
+
+      - name: Install cross-compilers and libraries
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            liblmdb-dev libssl-dev \
+            liblmdb-dev:arm64 libssl-dev:arm64 \
+            liblmdb-dev:armhf libssl-dev:armhf \
+            || true
+
+      - name: Build
+        working-directory: soc-ota-agent
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CC: ${{ matrix.cc }}
+          CGO_ENABLED: "1"
+        run: make build
+
+      - name: Create tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="otapulse-${VERSION}-${{ matrix.suffix }}.tar.gz"
+          tar czf "$ARCHIVE" \
+            -C soc-ota-agent otapulse \
+            -C ../scripts otapulse-configure.sh otapulse-precheck.sh \
+            -C ../generic-installer install.sh uninstall.sh
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./dist/
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum otapulse-*.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/otapulse-*.tar.gz
+            dist/SHA256SUMS.txt

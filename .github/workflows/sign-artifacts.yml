@@ -1,0 +1,55 @@
+name: Sign Artifacts
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 'Name of the artifact to sign'
+        required: true
+        type: string
+    secrets:
+      SIGNING_KEY:
+        description: 'Private signing key (PEM format)'
+        required: true
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ./artifacts/
+
+      - name: Install mender-artifact
+        run: |
+          wget -q https://downloads.mender.io/mender-artifact/master/linux/mender-artifact \
+            -O /tmp/mender-artifact || {
+            echo "Failed to download mender-artifact"
+            exit 1
+          }
+          sudo install -m 755 /tmp/mender-artifact /usr/local/bin/mender-artifact
+          rm -f /tmp/mender-artifact
+
+      - name: Sign .mender artifacts
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          trap 'rm -f /tmp/signing-key.pem' EXIT
+          echo "$SIGNING_KEY" > /tmp/signing-key.pem
+          chmod 600 /tmp/signing-key.pem
+
+          for artifact in artifacts/*.mender; do
+            [ -f "$artifact" ] || continue
+            echo "Signing: $(basename "$artifact")"
+            mender-artifact sign "$artifact" -k /tmp/signing-key.pem
+          done
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-signed
+          path: ./artifacts/

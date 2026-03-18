@@ -1,0 +1,36 @@
+Source: otapulse
+Section: admin
+Priority: optional
+Maintainer: SoC Monitoring <support@socmonitoring.com>
+Build-Depends: debhelper (>= 12),
+               golang-go (>= 2:1.20~),
+               libssl-dev,
+               liblmdb-dev,
+               pkg-config
+Standards-Version: 4.6.2
+Homepage: https://github.com/binaryblack/OTA-Pulse
+
+Package: otapulse
+Architecture: any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         openssl,
+         ca-certificates,
+         liblmdb0
+Recommends: e2fsprogs,
+            dosfstools,
+            util-linux
+Suggests: otapulse-doc
+Description: Secure Over-The-Air update agent for embedded Linux
+ OTAPulse provides reliable, atomic A/B partition updates with automatic
+ rollback capabilities for embedded Linux devices. Features include:
+ .
+  - Atomic A/B dual-partition updates
+  - RSA/ECDSA firmware signature verification
+  - Automatic rollback on failed updates
+  - Resumable downloads
+  - Hardware watchdog integration
+  - Fleet telemetry and crash reporting
+ .
+ This package contains the OTA agent binary, identity/inventory scripts,
+ update modules, and systemd service files.

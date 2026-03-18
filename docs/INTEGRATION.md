@@ -10,8 +10,9 @@ OTA-Pulse supports multiple embedded Linux build systems:
 |-------------|-------------|---------------|
 | **Yocto/OpenEmbedded** | `meta-otapulse/` layer | This document |
 | **Buildroot** | `buildroot-otapulse/` BR2_EXTERNAL | [Buildroot Integration Guide](../buildroot-otapulse/docs/BUILDROOT_INTEGRATION.md) |
-| OpenWrt | Planned | [Roadmap](TODO_BUILD_SYSTEMS.md) |
-| Debian/Ubuntu (.deb) | Planned | [Roadmap](TODO_BUILD_SYSTEMS.md) |
+| **Debian/Ubuntu (.deb)** | `debian-otapulse/` package | [Debian Package Guide](../debian-otapulse/README.md) |
+| **OpenWrt** | `openwrt-otapulse/` package | [OpenWrt Package Guide](../openwrt-otapulse/README.md) |
+| **Generic Linux** | `generic-installer/` | [Generic Installer Guide](../generic-installer/README.md) |
 | Alpine Linux | Planned | [Roadmap](TODO_BUILD_SYSTEMS.md) |
 
 The core OTA agent (`soc-ota-agent/`) is build-system agnostic and can be integrated with any Linux distribution.
@@ -137,7 +138,7 @@ After flashing and booting your device:
 
 ```bash
 # Check OTA agent status
-systemctl status soc-ota-agent
+systemctl status otapulse-client
 
 # View current artifact info
 soc-ota-agent show-artifact
@@ -213,7 +214,7 @@ exit 0
 Check configuration:
 ```bash
 cat /etc/otapulse/otapulse.conf
-journalctl -u soc-ota-agent
+journalctl -u otapulse-client
 ```
 
 ### Connection Issues
@@ -232,6 +233,11 @@ cat /var/lib/otapulse/deployment.log
 
 ## Next Steps
 
+- [Quickstart Guide](QUICKSTART.md) - Zero-to-first-OTA in 30 minutes
+- [Adding to Existing Project](INTEGRATING_EXISTING_PROJECT.md) - Add OTA to your project
 - [Configuration Reference](CONFIGURATION.md) - All configuration options
 - [Security Guide](SECURITY.md) - Enabling signature verification
+- [Key Rotation](KEY_ROTATION.md) - Rotating signing keys safely
+- [State Scripts](STATE_SCRIPTS_GUIDE.md) - Custom update lifecycle hooks
 - [API Reference](API.md) - OTA agent commands and D-Bus API
+- [Docker Build Environment](DOCKER_BUILD_ENV.md) - Reproducible builds

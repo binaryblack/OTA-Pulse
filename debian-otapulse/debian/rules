@@ -1,0 +1,33 @@
+#!/usr/bin/make -f
+
+# OTAPulse Debian package build rules
+# Uses the existing soc-ota-agent/Makefile for building and installing.
+
+export DH_VERBOSE = 1
+export CGO_ENABLED = 1
+
+AGENT_DIR = $(CURDIR)/../soc-ota-agent
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) -C $(AGENT_DIR) build GO_BUILD_FLAGS="-trimpath"
+
+override_dh_auto_install:
+	$(MAKE) -C $(AGENT_DIR) install DESTDIR=$(CURDIR)/debian/otapulse
+
+override_dh_auto_test:
+	# Tests require specific environment; skip during package build
+	true
+
+override_dh_auto_clean:
+	$(MAKE) -C $(AGENT_DIR) clean || true
+
+override_dh_dwz:
+	# Skip dwz for Go binaries
+	true
+
+override_dh_strip:
+	# Don't strip Go binaries (breaks them)
+	true

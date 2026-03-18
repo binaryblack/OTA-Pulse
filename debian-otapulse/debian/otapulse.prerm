@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        # Stop the service before removing
+        if [ -d /run/systemd/system ]; then
+            systemctl stop otapulse-client.service 2>/dev/null || true
+            systemctl disable otapulse-client.service 2>/dev/null || true
+            systemctl stop otapulse-boot-reconcile.service 2>/dev/null || true
+            systemctl disable otapulse-boot-reconcile.service 2>/dev/null || true
+        fi
+        ;;
+
+    failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

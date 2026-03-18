@@ -1,0 +1,31 @@
+#!/bin/sh
+# OTAPulse uci-defaults — runs once on first boot after installation
+#
+# Sets up initial state and reminds the user to configure.
+
+# Create required directories
+mkdir -p /etc/otapulse
+mkdir -p /data/ota
+mkdir -p /var/lib/otapulse
+
+# Auto-detect device type from board info if not set
+DEVICE_TYPE="$(uci -q get otapulse.device.type)"
+if [ -z "$DEVICE_TYPE" ]; then
+    # Try to get from OpenWrt board info
+    if [ -f /tmp/sysinfo/board_name ]; then
+        DEVICE_TYPE="$(cat /tmp/sysinfo/board_name | tr ',' '-')"
+    elif [ -f /etc/board.json ]; then
+        DEVICE_TYPE="$(jsonfilter -i /etc/board.json -e '@.model.id' 2>/dev/null | tr ',' '-')"
+    fi
+
+    if [ -n "$DEVICE_TYPE" ]; then
+        uci set otapulse.device.type="$DEVICE_TYPE"
+        uci commit otapulse
+        logger -t otapulse "Auto-detected device type: $DEVICE_TYPE"
+    fi
+fi
+
+# Log installation notice
+logger -t otapulse "OTAPulse installed. Configure via: uci set otapulse.server.url='https://your-server.com'"
+
+exit 0

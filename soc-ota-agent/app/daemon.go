@@ -22,6 +22,7 @@ import (
 	"github.com/binaryblack/OTA-Pulse/conf"
 	"github.com/binaryblack/OTA-Pulse/datastore"
 	"github.com/binaryblack/OTA-Pulse/dbus"
+	"github.com/binaryblack/OTA-Pulse/installer"
 	"github.com/binaryblack/OTA-Pulse/store"
 	"github.com/binaryblack/OTA-Pulse/system"
 )
@@ -35,6 +36,7 @@ type MenderDaemon struct {
 	Sctx                 StateContext
 	Store                store.Store
 	ForceToState         chan State
+	Config               *conf.MenderConfig
 	stop                 bool
 }
 
@@ -66,6 +68,7 @@ func NewDaemon(
 		},
 		Store:        store,
 		ForceToState: make(chan State, 1),
+		Config:       config,
 	}
 	return &daemon, nil
 }
@@ -87,7 +90,42 @@ func (d *MenderDaemon) shouldStop() bool {
 	return d.stop
 }
 
+// reconcileBootState checks for and corrects boot state mismatches at startup.
+// This is a defense against BUG-001 where rollback leaves stale state files.
+func (d *MenderDaemon) reconcileBootState() {
+	if d.Config == nil {
+		log.Debug("Boot state reconciliation skipped: no config")
+		return
+	}
+
+	deviceConfig := d.Config.GetDeviceConfig()
+	if deviceConfig.RootfsPartA == "" || deviceConfig.RootfsPartB == "" {
+		log.Debug("Boot state reconciliation skipped: no dual rootfs config")
+		return
+	}
+
+	bootEnv := installer.NewFileBasedBootEnv(
+		system.OsCalls{},
+		deviceConfig.RootfsPartA,
+		deviceConfig.RootfsPartB,
+	)
+
+	corrected, err := bootEnv.ReconcileBootState()
+	if err != nil {
+		log.Errorf("Boot state reconciliation failed: %v", err)
+		return
+	}
+	if corrected {
+		log.Warn("Boot state was inconsistent and has been corrected. This may indicate a recent rollback.")
+	}
+}
+
 func (d *MenderDaemon) Run() error {
+	// Reconcile boot state at startup (BUG-001 fix)
+	// Detects and corrects mismatches between actual boot partition and
+	// recorded state, which can occur after a rollback.
+	d.reconcileBootState()
+
 	// Handle bootstrap Artifact
 	err := d.Mender.HandleBootstrapArtifact(d.Store)
 	if err != nil {

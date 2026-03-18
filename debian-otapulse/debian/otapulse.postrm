@@ -1,0 +1,28 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        # Remove configuration and state on purge
+        rm -rf /etc/otapulse
+        rm -rf /var/lib/otapulse
+        # Don't remove /data/ota — it may contain boot state needed for recovery
+        echo "Note: /data/ota/ was preserved (contains boot state files)."
+        echo "Remove manually if no longer needed: rm -rf /data/ota"
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+
+    *)
+        echo "postrm called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -1,5 +1,8 @@
 # OTAPulse
 
+[![Test](https://github.com/binaryblack/OTA-Pulse/actions/workflows/test.yml/badge.svg)](https://github.com/binaryblack/OTA-Pulse/actions/workflows/test.yml)
+[![Build Agent](https://github.com/binaryblack/OTA-Pulse/actions/workflows/build-agent.yml/badge.svg)](https://github.com/binaryblack/OTA-Pulse/actions/workflows/build-agent.yml)
+
 **Secure Over-The-Air (OTA) Update Solution for Embedded Linux Devices**
 
 OTAPulse is a complete OTA update solution designed for embedded Linux systems. It provides reliable, atomic A/B partition updates with automatic rollback capabilities, ensuring your devices always remain operational.
@@ -19,11 +22,10 @@ OTAPulse is a complete OTA update solution designed for embedded Linux systems. 
 ```
 OTA-Pulse/
 ├── meta-otapulse/          # Yocto/OpenEmbedded layer
-│   ├── classes/            # BitBake classes
-│   ├── conf/               # Layer and distro configuration
-│   ├── recipes-bsp/        # Board support (kernel, u-boot)
-│   ├── recipes-core/       # Core packages (OTA agent, monitoring)
-│   └── recipes-support/    # Support packages
+├── buildroot-otapulse/     # Buildroot BR2_EXTERNAL
+├── debian-otapulse/        # Debian/Ubuntu .deb packaging
+├── openwrt-otapulse/       # OpenWrt package (procd + UCI)
+├── generic-installer/      # Generic Linux installer
 │
 ├── soc-ota-agent/          # OTA Client Agent (Go)
 │   ├── app/                # Core application logic
@@ -33,11 +35,16 @@ OTA-Pulse/
 │   ├── examples/           # Configuration examples
 │   └── support/            # Utilities and scripts
 │
+├── scripts/                # Build and configuration tools
+├── docker/                 # Reproducible build environment
+├── tests/                  # Integration test suite
 ├── docs/                   # Documentation
-└── examples/               # Integration examples
+└── .github/workflows/      # CI/CD pipelines
 ```
 
 ## Quick Start
+
+> **New to OTAPulse?** Start with the [Quickstart Guide](docs/QUICKSTART.md) — get from zero to your first OTA update in 30 minutes using QEMU (no hardware needed).
 
 ### 1. Add the Yocto Layer
 
@@ -80,6 +87,17 @@ Flash the image to your device. On first boot, the device will automatically pro
 | x86_64 | Supported |
 | RISC-V | Experimental |
 
+### Installation Options
+
+| Method | Target | Command |
+|--------|--------|---------|
+| Yocto layer | Embedded builds | `bitbake-layers add-layer meta-otapulse` |
+| Buildroot | Embedded builds | `make BR2_EXTERNAL=buildroot-otapulse menuconfig` |
+| Debian package | Debian/Ubuntu | `sudo dpkg -i otapulse_*.deb` |
+| OpenWrt package | Routers/gateways | `opkg install otapulse_*.ipk` |
+| Generic installer | Any Linux | `sudo bash generic-installer/install.sh` |
+| Docker build | CI/CD | `docker/build.sh all` |
+
 ### Tested Yocto Versions
 
 - Kirkstone (LTS) - Recommended
@@ -92,11 +110,17 @@ Flash the image to your device. On first boot, the device will automatically pro
 
 | Document | Description |
 |----------|-------------|
-| [Integration Guide](docs/INTEGRATION.md) | Complete integration walkthrough |
+| [Quickstart Guide](docs/QUICKSTART.md) | Zero-to-first-OTA in 30 minutes |
+| [Integration Guide](docs/INTEGRATION.md) | Build system integration walkthrough |
+| [Adding to Existing Project](docs/INTEGRATING_EXISTING_PROJECT.md) | Add OTA to your existing build |
 | [Configuration Reference](docs/CONFIGURATION.md) | All configuration options |
 | [API Reference](docs/API.md) | OTA agent API documentation |
 | [Security Guide](docs/SECURITY.md) | Security best practices |
+| [Key Rotation](docs/KEY_ROTATION.md) | Rotating signing keys safely |
+| [State Scripts](docs/STATE_SCRIPTS_GUIDE.md) | Custom update lifecycle hooks |
+| [Docker Build Env](docs/DOCKER_BUILD_ENV.md) | Reproducible builds |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [Build System Roadmap](docs/TODO_BUILD_SYSTEMS.md) | Planned integrations |
 
 ## OTA Agent Commands
 
@@ -161,10 +185,11 @@ cd soc-ota-agent
 make build
 ```
 
-For cross-compilation:
+For cross-compilation (CGO requires a cross-compiler):
 
 ```bash
-GOOS=linux GOARCH=arm64 make build
+CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 make build
+CC=arm-linux-gnueabihf-gcc GOOS=linux GOARCH=arm GOARM=7 make build
 ```
 
 ## Creating Update Artifacts
@@ -206,7 +231,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for detailed security configuration.
 For integration support and questions:
 
 - Documentation: [docs/](docs/)
-- Examples: [examples/](examples/)
+- Examples: [soc-ota-agent/examples/](soc-ota-agent/examples/)
 
 ## License
 

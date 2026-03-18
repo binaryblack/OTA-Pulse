@@ -395,6 +395,77 @@ func (f *FileBasedBootEnv) detectCurrentPartitionNumber() (string, error) {
 	return "", errors.New("could not detect current root partition")
 }
 
+// ReconcileBootState detects and corrects mismatches between the actual boot
+// partition and the recorded boot state files. This fixes BUG-001 where after
+// a rollback, /data/ota/mender_boot_part still points to the failed partition.
+//
+// Returns true if a mismatch was detected and corrected.
+func (f *FileBasedBootEnv) ReconcileBootState() (bool, error) {
+	// Detect what partition we actually booted from
+	actualPartNum, err := f.detectCurrentPartitionNumber()
+	if err != nil {
+		return false, errors.Wrap(err, "boot state reconciliation: failed to detect current partition")
+	}
+
+	// Read what the boot state file thinks
+	recordedPartNum, err := f.readFile(f.menderBootPartFile, "")
+	if err != nil || recordedPartNum == "" {
+		// No recorded state yet — initialize it from actual
+		log.Infof("ReconcileBootState: No recorded boot partition, initializing to %s", actualPartNum)
+		if writeErr := f.writeFile(f.menderBootPartFile, actualPartNum); writeErr != nil {
+			return false, errors.Wrap(writeErr, "boot state reconciliation: failed to write mender_boot_part")
+		}
+		// Also set slot file
+		slot := f.partitionNumberToSlot(actualPartNum)
+		if slot != "" {
+			if writeErr := f.writeFile(f.slotFile, slot); writeErr != nil {
+				log.Warnf("ReconcileBootState: Failed to initialize slot file: %v", writeErr)
+			}
+		}
+		// Sync to boot partition so U-Boot sees the correct state
+		f.syncBootSlotToBootPartition(actualPartNum)
+		return true, nil
+	}
+
+	if actualPartNum == recordedPartNum {
+		log.Debugf("ReconcileBootState: Boot state consistent (partition %s)", actualPartNum)
+		return false, nil
+	}
+
+	// Mismatch detected — this is the BUG-001 scenario
+	log.Warnf("ReconcileBootState: MISMATCH DETECTED — actual partition %s, recorded %s. Correcting.",
+		actualPartNum, recordedPartNum)
+
+	// Update mender_boot_part to match reality
+	if writeErr := f.writeFile(f.menderBootPartFile, actualPartNum); writeErr != nil {
+		return false, errors.Wrap(writeErr, "boot state reconciliation: failed to correct mender_boot_part")
+	}
+
+	// Update slot file
+	slot := f.partitionNumberToSlot(actualPartNum)
+	if slot != "" {
+		if writeErr := f.writeFile(f.slotFile, slot); writeErr != nil {
+			log.Warnf("ReconcileBootState: Failed to update slot file: %v", writeErr)
+		}
+	}
+
+	// Reset upgrade_available to "0" since the rollback is complete
+	if writeErr := f.writeFile(f.upgradeAvailFile, "0"); writeErr != nil {
+		log.Warnf("ReconcileBootState: Failed to reset upgrade_available: %v", writeErr)
+	}
+
+	// Reset boot count
+	if writeErr := f.writeFile(f.bootCountFile, "0"); writeErr != nil {
+		log.Warnf("ReconcileBootState: Failed to reset boot_count: %v", writeErr)
+	}
+
+	// Sync to boot partition so U-Boot sees the corrected state
+	f.syncBootSlotToBootPartition(actualPartNum)
+
+	log.Infof("ReconcileBootState: Boot state corrected to partition %s (slot %s)", actualPartNum, slot)
+	return true, nil
+}
+
 // readFile reads content from a file, returning defaultVal if file doesn't exist.
 func (f *FileBasedBootEnv) readFile(path, defaultVal string) (string, error) {
 	data, err := os.ReadFile(path)

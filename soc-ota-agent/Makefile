@@ -149,6 +149,7 @@ install-modules-gen:
 install-systemd:
 	install -m 755 -d $(prefix)$(systemd_unitdir)/system
 	install -m 0644 support/otapulse-client.service $(prefix)$(systemd_unitdir)/system/
+	install -m 0644 support/otapulse-boot-reconcile.service $(prefix)$(systemd_unitdir)/system/
 
 install-examples:
 	install -m 755 -d $(prefix)$(docexamplesdir)
@@ -213,6 +214,7 @@ uninstall-modules-gen:
 
 uninstall-systemd:
 	rm -f $(prefix)$(systemd_unitdir)/system/otapulse-client.service
+	rm -f $(prefix)$(systemd_unitdir)/system/otapulse-boot-reconcile.service
 	-rmdir -p $(prefix)$(systemd_unitdir)/system
 
 uninstall-examples:

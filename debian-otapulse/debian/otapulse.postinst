@@ -1,0 +1,51 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create config directories
+        mkdir -p /etc/otapulse
+        mkdir -p /var/lib/otapulse
+        mkdir -p /data/ota
+
+        # Enable but don't start the service — user must configure first
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+
+        # Check if configuration exists
+        if [ ! -f /etc/otapulse/otapulse.conf ]; then
+            echo ""
+            echo "═══════════════════════════════════════════════════"
+            echo "  OTAPulse installed successfully!"
+            echo ""
+            echo "  Configuration required before starting:"
+            echo "    otapulse-configure.sh --output /etc/otapulse/otapulse.conf"
+            echo ""
+            echo "  Or create /etc/otapulse/otapulse.conf manually."
+            echo "  See: /usr/share/doc/otapulse/examples/"
+            echo "═══════════════════════════════════════════════════"
+            echo ""
+        else
+            echo "OTAPulse configuration found. Enable with:"
+            echo "  systemctl enable --now otapulse-client"
+        fi
+
+        # Install boot reconciliation service
+        if [ -d /run/systemd/system ] && [ -f /lib/systemd/system/otapulse-boot-reconcile.service ]; then
+            systemctl enable otapulse-boot-reconcile.service || true
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
