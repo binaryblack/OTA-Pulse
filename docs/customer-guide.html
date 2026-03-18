@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OTAPulse — Customer Integration Guide</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --sidebar-width: 280px;
+  --sidebar-bg: #1a2332;
+  --sidebar-text: #c8d6e5;
+  --sidebar-active: #4fa3e3;
+  --sidebar-hover-bg: #243447;
+  --content-bg: #ffffff;
+  --text-color: #2d3748;
+  --heading-color: #1a2332;
+  --accent: #2b6cb0;
+  --accent-light: #ebf4ff;
+  --border: #e2e8f0;
+  --code-bg: #f7fafc;
+  --code-border: #e2e8f0;
+  --table-stripe: #f7fafc;
+  --header-height: 64px;
+}
+
+html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-color); line-height: 1.7; background: var(--content-bg); }
+
+/* Header */
+.site-header {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  height: var(--header-height); background: var(--sidebar-bg);
+  display: flex; align-items: center; padding: 0 24px;
+  border-bottom: 2px solid var(--accent);
+}
+.site-header h1 { color: #fff; font-size: 1.25rem; font-weight: 600; letter-spacing: 0.02em; }
+.site-header .tagline { color: var(--sidebar-text); font-size: 0.85rem; margin-left: 16px; }
+.menu-toggle { display: none; background: none; border: none; color: #fff; font-size: 1.5rem; cursor: pointer; margin-right: 12px; }
+
+/* Sidebar */
+.sidebar {
+  position: fixed; top: var(--header-height); left: 0; bottom: 0;
+  width: var(--sidebar-width); background: var(--sidebar-bg);
+  overflow-y: auto; padding: 20px 0; z-index: 90;
+  transition: transform 0.3s ease;
+}
+.sidebar::-webkit-scrollbar { width: 4px; }
+.sidebar::-webkit-scrollbar-thumb { background: #3d566e; border-radius: 2px; }
+.sidebar nav a {
+  display: block; padding: 8px 20px; color: var(--sidebar-text);
+  text-decoration: none; font-size: 0.85rem; border-left: 3px solid transparent;
+  transition: all 0.15s ease;
+}
+.sidebar nav a:hover { background: var(--sidebar-hover-bg); color: #fff; }
+.sidebar nav a.active { border-left-color: var(--sidebar-active); color: var(--sidebar-active); background: var(--sidebar-hover-bg); }
+.sidebar nav .nav-section { padding: 16px 20px 6px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: #5a7a9a; font-weight: 600; }
+
+/* Content */
+.content {
+  margin-left: var(--sidebar-width); margin-top: var(--header-height);
+  padding: 40px 48px 80px; max-width: 900px;
+}
+
+/* Typography */
+h1 { font-size: 2rem; color: var(--heading-color); margin: 0 0 8px; padding-bottom: 12px; border-bottom: 2px solid var(--accent); }
+h2 { font-size: 1.5rem; color: var(--heading-color); margin: 48px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.15rem; color: var(--heading-color); margin: 32px 0 12px; }
+h4 { font-size: 1rem; color: var(--heading-color); margin: 24px 0 8px; }
+p { margin: 0 0 16px; }
+.subtitle { color: #718096; font-size: 0.9rem; margin-bottom: 32px; }
+ul, ol { margin: 0 0 16px; padding-left: 24px; }
+li { margin-bottom: 6px; }
+strong { color: var(--heading-color); }
+
+/* Code */
+code { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 3px; padding: 1px 5px; font-size: 0.88em; font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace; }
+pre { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 6px; padding: 16px 20px; margin: 0 0 16px; overflow-x: auto; }
+pre code { background: none; border: none; padding: 0; font-size: 0.85em; line-height: 1.6; }
+.language-label { display: inline-block; background: var(--accent); color: #fff; font-size: 0.7rem; padding: 1px 8px; border-radius: 3px 3px 0 0; margin-bottom: -1px; font-family: sans-serif; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; margin: 0 0 20px; font-size: 0.9rem; }
+th { background: var(--sidebar-bg); color: #fff; padding: 10px 14px; text-align: left; font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
+td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+tr:nth-child(even) td { background: var(--table-stripe); }
+td code { font-size: 0.82em; }
+
+/* TOC */
+.toc { background: var(--accent-light); border: 1px solid #bee3f8; border-radius: 8px; padding: 20px 24px; margin: 0 0 32px; }
+.toc h3 { margin: 0 0 12px; font-size: 1rem; color: var(--accent); }
+.toc ol { margin: 0; padding-left: 20px; }
+.toc li { margin-bottom: 4px; font-size: 0.9rem; }
+.toc a { color: var(--accent); text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+
+/* Blockquote */
+blockquote { border-left: 4px solid var(--accent); background: var(--accent-light); padding: 12px 20px; margin: 0 0 16px; border-radius: 0 6px 6px 0; }
+blockquote p { margin: 0; }
+
+/* Footer */
+.site-footer { margin-left: var(--sidebar-width); padding: 24px 48px; border-top: 1px solid var(--border); color: #a0aec0; font-size: 0.85rem; }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); }
+  .content { margin-left: 0; padding: 24px 20px 60px; }
+  .site-footer { margin-left: 0; padding: 24px 20px; }
+  .menu-toggle { display: block; }
+  .site-header .tagline { display: none; }
+}
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">&#9776;</button>
+  <h1>OTAPulse</h1>
+  <span class="tagline">Customer Integration Guide</span>
+</header>
+
+<aside class="sidebar">
+  <nav>
+    <div class="nav-section">Getting Started</div>
+    <a href="#overview">Overview</a>
+    <a href="#key-features">Key Features</a>
+    <a href="#supported-platforms">Supported Platforms</a>
+    <a href="#getting-started">Getting Started</a>
+    <div class="nav-section">Integration</div>
+    <a href="#build-system-integration">Build System Integration</a>
+    <a href="#configuration-reference">Configuration Reference</a>
+    <a href="#artifact-management">Artifact Management</a>
+    <a href="#deploying-updates">Deploying Updates</a>
+    <div class="nav-section">Customization</div>
+    <a href="#state-scripts">State Scripts</a>
+    <a href="#d-bus-api">D-Bus API</a>
+    <a href="#cli-reference">CLI Reference</a>
+    <div class="nav-section">Operations</div>
+    <a href="#security">Security</a>
+    <a href="#telemetry-fleet-monitoring">Telemetry &amp; Monitoring</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+    <a href="#faq">FAQ</a>
+  </nav>
+</aside>
+
+<main class="content">
+
+<h1>OTAPulse — Customer Integration Guide</h1>
+<p class="subtitle">Last updated: 2026-03-18</p>
+
+<div class="toc">
+<h3>Table of Contents</h3>
+<ol>
+  <li><a href="#overview">Overview</a></li>
+  <li><a href="#key-features">Key Features</a></li>
+  <li><a href="#supported-platforms">Supported Platforms</a></li>
+  <li><a href="#getting-started">Getting Started</a></li>
+  <li><a href="#build-system-integration">Build System Integration</a></li>
+  <li><a href="#configuration-reference">Configuration Reference</a></li>
+  <li><a href="#artifact-management">Artifact Management</a></li>
+  <li><a href="#deploying-updates">Deploying Updates</a></li>
+  <li><a href="#state-scripts">State Scripts</a></li>
+  <li><a href="#d-bus-api">D-Bus API</a></li>
+  <li><a href="#cli-reference">CLI Reference</a></li>
+  <li><a href="#security">Security</a></li>
+  <li><a href="#telemetry-fleet-monitoring">Telemetry &amp; Fleet Monitoring</a></li>
+  <li><a href="#troubleshooting">Troubleshooting</a></li>
+  <li><a href="#faq">FAQ</a></li>
+</ol>
+</div>
+
+<!-- OVERVIEW -->
+<h2 id="overview">Overview</h2>
+<p>OTAPulse is a production-grade Over-The-Air (OTA) update platform for embedded Linux devices. It delivers reliable, atomic A/B partition updates with automatic rollback, ensuring devices in the field always remain operational. OTAPulse handles the full update lifecycle &mdash; from artifact creation and signing through secure delivery, installation, verification, and fleet-wide monitoring.</p>
+
+<!-- KEY FEATURES -->
+<h2 id="key-features">Key Features</h2>
+<ul>
+  <li><strong>Atomic A/B updates</strong> with automatic rollback on failure</li>
+  <li><strong>Secure artifact signing</strong> (RSA-4096 and ECDSA-P384)</li>
+  <li><strong>Bandwidth-efficient updates</strong> with download resume and compression</li>
+  <li><strong>Fleet telemetry</strong> &mdash; device health, crash reports, reboot reasons, and inventory tracking</li>
+  <li><strong>State scripts</strong> for custom update lifecycle hooks (pre-install checks, post-update validation, database migrations)</li>
+  <li><strong>D-Bus API</strong> for programmatic update control from your application</li>
+  <li><strong>Multi-server failover</strong> for high-availability deployments</li>
+  <li><strong>Standalone (offline) update mode</strong> &mdash; install from local <code>.mender</code> files without a server</li>
+  <li><strong>Hardware watchdog integration</strong> with automatic recovery</li>
+  <li><strong>Dynamic partitioning</strong> &mdash; A/B partitions created automatically on first boot</li>
+  <li><strong>Key rotation</strong> &mdash; zero-downtime signing key updates across your fleet</li>
+</ul>
+
+<!-- SUPPORTED PLATFORMS -->
+<h2 id="supported-platforms">Supported Platforms</h2>
+
+<h3>Architectures</h3>
+<table>
+  <thead><tr><th>Architecture</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>ARM 32-bit (ARMv7)</td><td>Supported</td></tr>
+    <tr><td>ARM64 (ARMv8)</td><td>Supported</td></tr>
+    <tr><td>x86_64</td><td>Supported</td></tr>
+    <tr><td>RISC-V</td><td>Experimental</td></tr>
+  </tbody>
+</table>
+
+<h3>Build Systems</h3>
+<table>
+  <thead><tr><th>Build System</th><th>Integration Method</th></tr></thead>
+  <tbody>
+    <tr><td>Yocto / OpenEmbedded</td><td><code>meta-otapulse</code> layer</td></tr>
+    <tr><td>Buildroot</td><td><code>buildroot-otapulse</code> BR2_EXTERNAL</td></tr>
+    <tr><td>Debian / Ubuntu</td><td><code>.deb</code> package</td></tr>
+    <tr><td>OpenWrt</td><td><code>.ipk</code> package (procd + UCI)</td></tr>
+    <tr><td>Generic Linux</td><td>Installer script</td></tr>
+  </tbody>
+</table>
+
+<h3>Hardware Platform Guides</h3>
+<table>
+  <thead><tr><th>Platform</th><th>Boot Method</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>NXP i.MX8M Plus/Mini/Nano</td><td>U-Boot boot.scr</td><td>Tested</td></tr>
+    <tr><td>NXP i.MX6/7</td><td>U-Boot boot.scr</td><td>Supported</td></tr>
+    <tr><td>Rockchip RK3588/3568/3566</td><td>U-Boot boot.scr</td><td>Supported</td></tr>
+    <tr><td>Raspberry Pi 3/4/5</td><td>config.txt or U-Boot</td><td>Supported</td></tr>
+    <tr><td>STM32MP1</td><td>U-Boot boot.scr</td><td>Template</td></tr>
+    <tr><td>TI AM335x/AM57xx</td><td>U-Boot boot.scr</td><td>Template</td></tr>
+    <tr><td>Allwinner (sunxi)</td><td>U-Boot boot.scr</td><td>Template</td></tr>
+  </tbody>
+</table>
+
+<h3>Tested Yocto Versions</h3>
+<ul>
+  <li>Kirkstone (LTS) &mdash; Recommended</li>
+  <li>Langdale</li>
+  <li>Mickledore</li>
+  <li>Nanbield</li>
+  <li>Scarthgap</li>
+</ul>
+
+<!-- GETTING STARTED -->
+<h2 id="getting-started">Getting Started</h2>
+
+<h3>Prerequisites</h3>
+<ul>
+  <li><strong>Hardware:</strong> Target device with at least 512 MB RAM and 8 GB storage (16 GB+ recommended), dual-partition (A/B) layout support</li>
+  <li><strong>Build environment:</strong> Yocto Project (Kirkstone or later), Buildroot, or a Debian/Ubuntu host</li>
+  <li><strong>Network:</strong> Device must have network connectivity (Ethernet or Wi-Fi) for server-managed updates</li>
+  <li><strong>Tools:</strong> <code>mender-artifact</code> CLI (v3.10+), <code>openssl</code> (v1.1+), Go 1.20+ (if building from source)</li>
+</ul>
+
+<h3>Quick Start (QEMU)</h3>
+<p>You can evaluate OTAPulse in under 30 minutes using QEMU with no physical hardware:</p>
+<ol>
+  <li>Clone the repository and build the agent</li>
+  <li>Generate a configuration using the interactive wizard</li>
+  <li>Boot a virtual ARM64 device in QEMU</li>
+  <li>Create a test artifact and install it</li>
+  <li>Verify the update and commit</li>
+</ol>
+<p>For the full walkthrough, see the <strong>Quickstart Guide</strong> (<code>docs/QUICKSTART.md</code>).</p>
+
+<!-- BUILD SYSTEM INTEGRATION -->
+<h2 id="build-system-integration">Build System Integration</h2>
+
+<h3>Yocto / OpenEmbedded</h3>
+
+<h4>Step 1: Add the layer</h4>
+<pre><code>cd /path/to/your/yocto/sources
+git clone https://github.com/binaryblack/OTA-Pulse.git ota-pulse
+
+cd /path/to/your/yocto/build
+bitbake-layers add-layer ../sources/ota-pulse/meta-otapulse</code></pre>
+
+<h4>Step 2: Configure <code>conf/local.conf</code></h4>
+<pre><code># Enable OTAPulse
+INHERIT += "otapulse"
+
+# Server configuration
+OTA_SERVER_URL = "https://your-ota-server.com"
+OTAPULSE_PROVISIONING_TOKEN = "your-provisioning-token"
+
+# Device type
+MENDER_DEVICE_TYPE = "${MACHINE}"
+
+# Partition mode (dynamic recommended)
+OTAPULSE_PARTITION_MODE = "dynamic"
+
+# Enable A/B boot script
+OTAPULSE_BOOT_SCRIPT = "1"
+
+# Optional: Poll intervals (seconds)
+OTAPULSE_UPDATE_POLL_INTERVAL = "1800"
+OTAPULSE_INVENTORY_POLL_INTERVAL = "28800"</code></pre>
+
+<h4>Step 3: Add packages to your image</h4>
+<pre><code>IMAGE_INSTALL:append = " soc-ota-agent otapulse-firstboot"</code></pre>
+
+<h4>Step 4: Build</h4>
+<pre><code>bitbake your-image</code></pre>
+
+<h3>Buildroot</h3>
+<pre><code># Add as BR2_EXTERNAL
+make BR2_EXTERNAL=/path/to/OTA-Pulse/buildroot-otapulse menuconfig
+
+# Enable the OTAPulse package and build
+make</code></pre>
+
+<h3>Debian / Ubuntu</h3>
+<pre><code># Install the package
+sudo dpkg -i otapulse_*.deb
+
+# Configure
+sudo nano /etc/otapulse/otapulse.conf
+
+# Start the service
+sudo systemctl enable otapulse-client
+sudo systemctl start otapulse-client</code></pre>
+
+<h3>OpenWrt</h3>
+<pre><code># Install
+opkg install otapulse_*.ipk
+
+# Configure via UCI
+uci set otapulse.config.server_url='https://your-server.com'
+uci set otapulse.config.tenant_token='your-token'
+uci commit otapulse
+
+# Restart
+/etc/init.d/otapulse restart</code></pre>
+
+<h3>Generic Linux</h3>
+<pre><code>sudo bash generic-installer/install.sh</code></pre>
+
+<!-- CONFIGURATION REFERENCE -->
+<h2 id="configuration-reference">Configuration Reference</h2>
+<p>Main configuration file: <code>/etc/otapulse/otapulse.conf</code> (JSON format).</p>
+
+<h3>Server Settings</h3>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>ServerURL</code></td><td>string</td><td>&mdash;</td><td>OTAPulse server URL (required unless using Servers)</td></tr>
+    <tr><td><code>Servers</code></td><td>array</td><td>&mdash;</td><td>Server list for failover</td></tr>
+    <tr><td><code>TenantToken</code></td><td>string</td><td>&mdash;</td><td>Organization tenant token</td></tr>
+    <tr><td><code>ServerCertificate</code></td><td>string</td><td>&mdash;</td><td>Path to server CA certificate</td></tr>
+  </tbody>
+</table>
+
+<h3>Poll Intervals</h3>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>UpdatePollIntervalSeconds</code></td><td>int</td><td>1800</td><td>How often to check for updates (seconds)</td></tr>
+    <tr><td><code>InventoryPollIntervalSeconds</code></td><td>int</td><td>28800</td><td>How often to report device inventory</td></tr>
+    <tr><td><code>RetryPollIntervalSeconds</code></td><td>int</td><td>300</td><td>Retry interval after communication failures</td></tr>
+    <tr><td><code>RetryPollCount</code></td><td>int</td><td>0</td><td>Maximum retry count (0 = unlimited)</td></tr>
+  </tbody>
+</table>
+
+<h3>Security</h3>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>ArtifactVerifyKey</code></td><td>string</td><td>&mdash;</td><td>Path to artifact verification public key</td></tr>
+    <tr><td><code>ArtifactVerifyKeys</code></td><td>array</td><td>&mdash;</td><td>List of verification key paths (for key rotation)</td></tr>
+    <tr><td><code>SkipVerify</code></td><td>bool</td><td>false</td><td>Skip TLS certificate validation (dev only)</td></tr>
+  </tbody>
+</table>
+
+<h3>Partition &amp; Boot</h3>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>RootfsPartA</code></td><td>string</td><td>auto</td><td>Primary rootfs partition device path</td></tr>
+    <tr><td><code>RootfsPartB</code></td><td>string</td><td>auto</td><td>Secondary rootfs partition device path</td></tr>
+    <tr><td><code>UseFileBasedBootEnv</code></td><td>bool</td><td>false</td><td>Use file-based boot env instead of U-Boot env</td></tr>
+  </tbody>
+</table>
+
+<h3>Agent Behavior</h3>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>DaemonLogLevel</code></td><td>string</td><td>info</td><td>Log level: debug, info, warning, error</td></tr>
+    <tr><td><code>StateScriptTimeoutSeconds</code></td><td>int</td><td>3600</td><td>Maximum time for a state script to execute</td></tr>
+    <tr><td><code>ModuleTimeoutSeconds</code></td><td>int</td><td>0</td><td>Update module timeout</td></tr>
+  </tbody>
+</table>
+
+<h3>Example Configuration</h3>
+<pre><code>{
+  "ServerURL": "https://otapulse.example.com",
+  "TenantToken": "eyJhbGciOiJSUzI1NiIs...",
+  "UpdatePollIntervalSeconds": 1800,
+  "InventoryPollIntervalSeconds": 28800,
+  "RetryPollIntervalSeconds": 300,
+  "ServerCertificate": "/etc/otapulse/server.crt",
+  "ArtifactVerifyKey": "/etc/otapulse/artifact-verify-key.pem"
+}</code></pre>
+
+<h3>Environment Variables</h3>
+<table>
+  <thead><tr><th>Variable</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>OTAPULSE_CONF_DIR</code></td><td>Configuration directory (default: <code>/etc/otapulse</code>)</td></tr>
+    <tr><td><code>OTAPULSE_DATA_DIR</code></td><td>Data directory (default: <code>/usr/share/otapulse</code>)</td></tr>
+    <tr><td><code>OTAPULSE_DATASTORE_DIR</code></td><td>Runtime datastore (default: <code>/var/lib/otapulse</code>)</td></tr>
+    <tr><td><code>HTTPS_PROXY</code></td><td>HTTPS proxy URL</td></tr>
+    <tr><td><code>NO_PROXY</code></td><td>Proxy bypass list</td></tr>
+  </tbody>
+</table>
+
+<!-- ARTIFACT MANAGEMENT -->
+<h2 id="artifact-management">Artifact Management</h2>
+
+<h3>Creating an Artifact</h3>
+<pre><code># Full rootfs update
+mender-artifact write rootfs-image \
+  -t your-device-type \
+  -n "release-1.2.0" \
+  -f your-rootfs.ext4 \
+  -o release-1.2.0.mender
+
+# Application / single-file update
+mender-artifact write module-image \
+  -T single-file \
+  -t your-device-type \
+  -n "app-update-1.0" \
+  -f /path/to/file \
+  -o app-update-1.0.mender</code></pre>
+
+<p><strong>Required fields:</strong></p>
+<ul>
+  <li><code>-t</code> &mdash; Device type (must match the target device)</li>
+  <li><code>-n</code> &mdash; Artifact name (use semantic versioning)</li>
+  <li><code>-f</code> &mdash; Input file (rootfs image or application file)</li>
+  <li><code>-o</code> &mdash; Output <code>.mender</code> artifact path</li>
+</ul>
+
+<h3>Signing an Artifact</h3>
+<pre><code># Sign during creation
+mender-artifact write rootfs-image \
+  -t your-device-type \
+  -n "release-1.2.0" \
+  -f your-rootfs.ext4 \
+  --key artifact-signing-private.pem \
+  -o release-1.2.0-signed.mender
+
+# Sign an existing artifact
+mender-artifact sign release-1.2.0.mender -k artifact-signing-private.pem</code></pre>
+
+<h3>Verifying an Artifact</h3>
+<pre><code>mender-artifact validate release-1.2.0.mender
+mender-artifact read release-1.2.0.mender</code></pre>
+
+<!-- DEPLOYING UPDATES -->
+<h2 id="deploying-updates">Deploying Updates</h2>
+<p>From the operator's perspective, the update flow is:</p>
+<ol>
+  <li><strong>Build and sign</strong> &mdash; Create a <code>.mender</code> artifact and sign it with your private key.</li>
+  <li><strong>Upload</strong> &mdash; Upload to your OTAPulse server via the web dashboard or API.</li>
+  <li><strong>Deploy</strong> &mdash; Select target devices and initiate the deployment.</li>
+  <li><strong>Device downloads</strong> &mdash; Devices poll the server, discover the pending update, and download the artifact.</li>
+  <li><strong>Atomic installation</strong> &mdash; The agent writes the new image to the inactive partition and updates boot configuration.</li>
+  <li><strong>Reboot and verify</strong> &mdash; The device reboots into new firmware. State scripts run health checks.</li>
+  <li><strong>Commit or rollback</strong> &mdash; If verification passes, the update is committed. Otherwise, automatic rollback occurs.</li>
+</ol>
+
+<h3>Standalone (Offline) Updates</h3>
+<pre><code>sudo soc-ota-agent install /path/to/artifact.mender
+# After reboot and verification:
+sudo soc-ota-agent commit
+# Or to revert:
+sudo soc-ota-agent rollback</code></pre>
+
+<!-- STATE SCRIPTS -->
+<h2 id="state-scripts">State Scripts</h2>
+<p>State scripts let you run custom logic at specific points in the update lifecycle.</p>
+
+<h3>Lifecycle Stages</h3>
+<table>
+  <thead><tr><th>Stage</th><th>When it runs</th></tr></thead>
+  <tbody>
+    <tr><td><code>Download</code></td><td>Artifact is being downloaded</td></tr>
+    <tr><td><code>ArtifactInstall</code></td><td>Image is being written to the inactive partition</td></tr>
+    <tr><td><code>ArtifactReboot</code></td><td>Device is rebooting into the new firmware</td></tr>
+    <tr><td><code>ArtifactCommit</code></td><td>Update is being committed as permanent</td></tr>
+    <tr><td><code>ArtifactRollback</code></td><td>Device is reverting to the previous version</td></tr>
+    <tr><td><code>ArtifactFailure</code></td><td>Update has failed</td></tr>
+  </tbody>
+</table>
+
+<h3>Script Location and Naming</h3>
+<p>Place scripts in <code>/etc/otapulse/scripts/</code> using the convention:</p>
+<pre><code>&lt;State&gt;_&lt;Enter|Leave|Error&gt;_&lt;Priority&gt;</code></pre>
+<p>Priority is <code>00</code>&ndash;<code>99</code> (lower runs first). Scripts must be executable and exit with code <code>0</code> for success.</p>
+
+<h3>Example: Validate After Reboot</h3>
+<pre><code>#!/bin/sh
+# /etc/otapulse/scripts/ArtifactCommit_Enter_00
+# Return non-zero to trigger automatic rollback.
+
+if ! systemctl is-active --quiet myapp; then
+    echo "ERROR: myapp failed to start" &gt;&amp;2
+    exit 1
+fi
+
+echo "Health checks passed"
+exit 0</code></pre>
+
+<h3>Example: Stop Application Before Update</h3>
+<pre><code>#!/bin/sh
+# /etc/otapulse/scripts/ArtifactInstall_Enter_00
+systemctl stop myapp
+exit 0</code></pre>
+
+<!-- D-BUS API -->
+<h2 id="d-bus-api">D-Bus API</h2>
+<p>OTAPulse exposes a D-Bus interface for programmatic control from your application.</p>
+
+<h3>Update Control</h3>
+<table>
+  <thead><tr><th>Property</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td>Bus Name</td><td><code>io.otapulse.UpdateManager</code></td></tr>
+    <tr><td>Object Path</td><td><code>/io/otapulse/UpdateManager</code></td></tr>
+    <tr><td>Interface</td><td><code>io.otapulse.Update1</code></td></tr>
+  </tbody>
+</table>
+
+<p><strong>SetUpdateControlMap</strong> &mdash; Pause or gate updates:</p>
+<pre><code>busctl call io.otapulse.UpdateManager \
+  /io/otapulse/UpdateManager \
+  io.otapulse.Update1 SetUpdateControlMap s '{"priority": 1}'</code></pre>
+
+<h3>Authentication</h3>
+<table>
+  <thead><tr><th>Property</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td>Bus Name</td><td><code>io.otapulse.AuthenticationManager</code></td></tr>
+    <tr><td>Object Path</td><td><code>/io/otapulse/AuthenticationManager</code></td></tr>
+    <tr><td>Interface</td><td><code>io.otapulse.Authentication1</code></td></tr>
+  </tbody>
+</table>
+
+<p><strong>GetJwtToken</strong> &mdash; Retrieve the current authentication token (Python example):</p>
+<pre><code>import dbus
+
+bus = dbus.SystemBus()
+auth_proxy = bus.get_object(
+    'io.otapulse.AuthenticationManager',
+    '/io/otapulse/AuthenticationManager'
+)
+auth = dbus.Interface(auth_proxy, 'io.otapulse.Authentication1')
+token, server_url = auth.GetJwtToken()</code></pre>
+
+<!-- CLI REFERENCE -->
+<h2 id="cli-reference">CLI Reference</h2>
+<table>
+  <thead><tr><th>Command</th><th>Description</th><th>Example</th></tr></thead>
+  <tbody>
+    <tr><td><code>show-artifact</code></td><td>Display installed artifact name</td><td><code>soc-ota-agent show-artifact</code></td></tr>
+    <tr><td><code>show-provides</code></td><td>Display artifact provides</td><td><code>soc-ota-agent show-provides</code></td></tr>
+    <tr><td><code>check-update</code></td><td>Check for available update</td><td><code>soc-ota-agent check-update</code></td></tr>
+    <tr><td><code>install &lt;path&gt;</code></td><td>Install artifact from file</td><td><code>soc-ota-agent install update.mender</code></td></tr>
+    <tr><td><code>commit</code></td><td>Commit current update</td><td><code>soc-ota-agent commit</code></td></tr>
+    <tr><td><code>rollback</code></td><td>Rollback to previous version</td><td><code>soc-ota-agent rollback</code></td></tr>
+    <tr><td><code>daemon</code></td><td>Run agent in daemon mode</td><td><code>soc-ota-agent daemon</code></td></tr>
+    <tr><td><code>bootstrap</code></td><td>Initial device registration</td><td><code>soc-ota-agent bootstrap</code></td></tr>
+    <tr><td><code>send-inventory</code></td><td>Force inventory report</td><td><code>soc-ota-agent send-inventory</code></td></tr>
+    <tr><td><code>setup</code></td><td>Interactive configuration</td><td><code>soc-ota-agent setup --device-type my-device</code></td></tr>
+    <tr><td><code>snapshot dump</code></td><td>Snapshot running rootfs</td><td><code>soc-ota-agent snapshot dump &gt; rootfs.img</code></td></tr>
+    <tr><td><code>--version</code></td><td>Display agent version</td><td><code>soc-ota-agent --version</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Global Flags</h3>
+<table>
+  <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--config</code>, <code>-c</code></td><td>Path to configuration file</td></tr>
+    <tr><td><code>--fallback-config</code></td><td>Fallback configuration file</td></tr>
+    <tr><td><code>--data</code></td><td>Data store directory</td></tr>
+    <tr><td><code>--log-file</code></td><td>Path to log file</td></tr>
+    <tr><td><code>--log-level</code></td><td>Log level (debug, info, warning, error)</td></tr>
+    <tr><td><code>--trusted-certs</code></td><td>Path to trusted certificates</td></tr>
+    <tr><td><code>--forcebootstrap</code></td><td>Force device re-registration</td></tr>
+    <tr><td><code>--no-syslog</code></td><td>Disable syslog logging</td></tr>
+  </tbody>
+</table>
+
+<h3>Exit Codes</h3>
+<table>
+  <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>Success</td></tr>
+    <tr><td>1</td><td>General error</td></tr>
+    <tr><td>2</td><td>Nothing to commit</td></tr>
+    <tr><td>4</td><td>Manual reboot required</td></tr>
+  </tbody>
+</table>
+
+<!-- SECURITY -->
+<h2 id="security">Security</h2>
+
+<h3>Artifact Signing</h3>
+<p>Always sign artifacts before deployment. OTAPulse supports RSA (4096-bit recommended) and ECDSA (P-384 recommended) signing.</p>
+
+<h4>Generate signing keys</h4>
+<pre><code># RSA 4096-bit
+openssl genpkey -algorithm RSA -out signing-private.pem -pkeyopt rsa_keygen_bits:4096
+openssl rsa -in signing-private.pem -pubout -out signing-public.pem
+
+# ECDSA P-384
+openssl ecparam -name secp384r1 -genkey -noout -out signing-private.pem
+openssl ec -in signing-private.pem -pubout -out signing-public.pem</code></pre>
+<p>Deploy the <strong>public</strong> key to your devices. Keep the <strong>private</strong> key in an HSM or secure vault.</p>
+
+<h3>Key Management Recommendations</h3>
+<table>
+  <thead><tr><th>Key Type</th><th>Storage</th><th>Rotation</th></tr></thead>
+  <tbody>
+    <tr><td>Signing private key</td><td>HSM or secure vault</td><td>Annually</td></tr>
+    <tr><td>Signing public key</td><td>Device image</td><td>Updated with private key</td></tr>
+    <tr><td>Tenant token</td><td>Build system secrets</td><td>On compromise</td></tr>
+    <tr><td>Server TLS certificate</td><td>Device image</td><td>Before expiry</td></tr>
+  </tbody>
+</table>
+
+<h3>Key Rotation</h3>
+<p>OTAPulse supports zero-downtime key rotation via the <code>ArtifactVerifyKeys</code> array:</p>
+<ol>
+  <li>Generate a new key pair</li>
+  <li>Deploy the new public key to all devices (signed with the <strong>old</strong> key)</li>
+  <li>Once all devices have the new key, start signing with the new private key</li>
+  <li>Remove the old key from device configurations</li>
+  <li>Securely destroy the old private key</li>
+</ol>
+
+<h3>Network Security</h3>
+<ul>
+  <li>All device-to-server communication uses <strong>TLS 1.2+</strong></li>
+  <li>Configure <code>ServerCertificate</code> to pin the server CA for enhanced security</li>
+  <li>Use <code>HTTPS_PROXY</code> for devices behind corporate firewalls</li>
+  <li>Disable <code>SkipVerify</code> in production</li>
+</ul>
+
+<h3>Production Security Checklist</h3>
+<ul>
+  <li>Generate unique signing keys for production</li>
+  <li>Store private signing key in HSM or secure vault</li>
+  <li>Enable artifact signature verification on all devices</li>
+  <li>Use TLS with certificate verification</li>
+  <li>Implement secure device identity</li>
+  <li>Disable debug interfaces (UART, JTAG) on production hardware</li>
+  <li>Remove development credentials from production images</li>
+  <li>Set appropriate poll intervals for your fleet size</li>
+</ul>
+
+<!-- TELEMETRY -->
+<h2 id="telemetry-fleet-monitoring">Telemetry &amp; Fleet Monitoring</h2>
+<p>OTAPulse reports device health metrics and events for fleet-wide visibility.</p>
+
+<h3>Reported Data</h3>
+<table>
+  <thead><tr><th>Category</th><th>Metrics</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Device health</strong></td><td>CPU usage, memory usage, disk space, temperature</td></tr>
+    <tr><td><strong>Crash reports</strong></td><td>Core dumps with stack traces, crash frequency</td></tr>
+    <tr><td><strong>Reboot reasons</strong></td><td>Watchdog reset, kernel panic, user-initiated, OTA update</td></tr>
+    <tr><td><strong>Inventory</strong></td><td>Device type, kernel version, OS, installed artifact, MAC addresses, custom attributes</td></tr>
+    <tr><td><strong>Update status</strong></td><td>Deployment progress, success/failure, rollback events</td></tr>
+  </tbody>
+</table>
+
+<h3>Custom Inventory Attributes</h3>
+<pre><code>#!/bin/sh
+# /usr/share/otapulse/inventory/otapulse-inventory-custom
+echo "app_version=$(myapp --version)"
+echo "disk_usage=$(df -h / | awk 'NR==2 {print $5}')"</code></pre>
+
+<h3>Device Identity</h3>
+<pre><code>#!/bin/sh
+# /usr/share/otapulse/identity/otapulse-device-identity
+echo "SerialNumber=$(cat /sys/firmware/devicetree/base/serial-number 2>/dev/null || echo unknown)"
+echo "MAC=$(cat /sys/class/net/eth0/address 2>/dev/null || echo unknown)"</code></pre>
+
+<!-- TROUBLESHOOTING -->
+<h2 id="troubleshooting">Troubleshooting</h2>
+
+<h3>Agent Won't Start</h3>
+<p><strong>Check configuration syntax:</strong></p>
+<pre><code>python3 -m json.tool /etc/otapulse/otapulse.conf</code></pre>
+<p>Verify required fields are set (<code>ServerURL</code> and <code>TenantToken</code>) and view service logs:</p>
+<pre><code>systemctl status soc-ota-agent
+journalctl -u soc-ota-agent -n 50</code></pre>
+
+<h3>Device Can't Connect to Server</h3>
+<ul>
+  <li>Verify network: <code>ping your-server.com</code></li>
+  <li>Check DNS: <code>nslookup your-server.com</code></li>
+  <li>Test TLS: <code>openssl s_client -connect your-server.com:443</code></li>
+  <li>Verify firewall allows outbound port 443</li>
+  <li>Check proxy settings (<code>HTTPS_PROXY</code>)</li>
+</ul>
+
+<h3>Update Download Fails</h3>
+<ul>
+  <li>Ensure sufficient disk space (~2x artifact size)</li>
+  <li>Check network stability</li>
+  <li>Verify data directory permissions (<code>/var/lib/otapulse/</code>)</li>
+</ul>
+
+<h3>Signature Verification Fails</h3>
+<ul>
+  <li>Confirm the public key matches the signing private key</li>
+  <li>Check key format (should begin with <code>-----BEGIN PUBLIC KEY-----</code>)</li>
+  <li>Verify artifact is signed: <code>mender-artifact read artifact.mender</code></li>
+</ul>
+
+<h3>Device Keeps Rolling Back</h3>
+<ul>
+  <li>Check that your application starts successfully after update</li>
+  <li>Add a health-check state script at <code>ArtifactCommit_Enter</code></li>
+  <li>Verify boot count limits in bootloader configuration</li>
+</ul>
+
+<h3>Device Stuck in Update State</h3>
+<pre><code>systemctl stop soc-ota-agent
+rm /var/lib/otapulse/state
+rm /var/lib/otapulse/*.mender
+systemctl start soc-ota-agent</code></pre>
+
+<h3>Getting Diagnostic Information</h3>
+<p>When reporting issues, collect:</p>
+<ol>
+  <li>Agent version: <code>soc-ota-agent --version</code></li>
+  <li>Configuration (remove tokens): <code>cat /etc/otapulse/otapulse.conf</code></li>
+  <li>Logs: <code>journalctl -u soc-ota-agent --no-pager</code></li>
+  <li>System info: <code>uname -a</code> and <code>cat /etc/os-release</code></li>
+  <li>Partition layout: <code>lsblk</code></li>
+</ol>
+
+<!-- FAQ -->
+<h2 id="faq">FAQ</h2>
+
+<p><strong>Q: Does OTAPulse require a network connection?</strong><br>
+A: For server-managed deployments, yes. However, standalone (offline) mode lets you install from local files using <code>soc-ota-agent install</code>.</p>
+
+<p><strong>Q: What happens if the device loses power during an update?</strong><br>
+A: The A/B partition scheme ensures safety. The update is written to the inactive partition, so the running system is never modified. If power is lost, the device boots from the original partition.</p>
+
+<p><strong>Q: How large can an update artifact be?</strong><br>
+A: Limited only by available disk space. You need approximately 2x the artifact size in free space.</p>
+
+<p><strong>Q: Can I update individual applications without a full rootfs update?</strong><br>
+A: Yes. OTAPulse supports module-based updates using <code>mender-artifact write module-image</code> for single files or directories.</p>
+
+<p><strong>Q: How does automatic rollback work?</strong><br>
+A: After an update, the bootloader tracks boot attempts. If the device fails to boot successfully or health-check scripts fail, the bootloader switches back to the previous partition.</p>
+
+<p><strong>Q: Can I use OTAPulse with my own update server?</strong><br>
+A: OTAPulse is compatible with Mender-protocol servers. Configure <code>ServerURL</code> to point to your server instance.</p>
+
+<p><strong>Q: How do I test updates without affecting production?</strong><br>
+A: Use the QEMU-based quickstart to test in a virtual environment, or deploy to a staging device group first.</p>
+
+<p><strong>Q: What is the minimum hardware requirement?</strong><br>
+A: ARM or x86_64 processor, 512 MB RAM, 8 GB dual-partition storage, Linux kernel 4.x+ with systemd.</p>
+
+</main>
+
+<footer class="site-footer">
+  OTAPulse Documentation &mdash; Last updated 2026-03-18
+</footer>
+
+<script>
+// Sidebar active link tracking
+(function() {
+  var links = document.querySelectorAll('.sidebar nav a[href^="#"]');
+  var sections = [];
+  links.forEach(function(link) {
+    var id = link.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    if (el) sections.push({ el: el, link: link });
+  });
+
+  function onScroll() {
+    var scrollPos = window.scrollY + 100;
+    var current = null;
+    sections.forEach(function(s) {
+      if (s.el.offsetTop <= scrollPos) current = s;
+    });
+    links.forEach(function(l) { l.classList.remove('active'); });
+    if (current) current.link.classList.add('active');
+  }
+
+  window.addEventListener('scroll', onScroll);
+  onScroll();
+
+  // Close sidebar on mobile after clicking a link
+  links.forEach(function(link) {
+    link.addEventListener('click', function() {
+      if (window.innerWidth <= 900) {
+        document.querySelector('.sidebar').classList.remove('open');
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>
