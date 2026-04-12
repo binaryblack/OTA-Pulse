@@ -1,0 +1,16 @@
+# OTAPulse: alias BSP-specific partition labels to OTA-Pulse standard names.
+#
+# Some BSPs use different GPT partition labels than OTA-Pulse expects:
+#
+#   meta-tegra (NVIDIA Jetson) — uses APP / APP_b for rootfs A/B slots
+#
+# These rules add /dev/disk/by-partlabel/rootfs_a (etc.) symlinks so the
+# OTA-Pulse scripts work without per-BSP code paths.
+#
+# The rules are no-ops on systems that do not have these labels — udev only
+# fires SYMLINK+= when ENV{ID_PART_ENTRY_NAME} matches, so RPi, x86, Rockchip,
+# and other BSPs are unaffected.
+
+# meta-tegra Jetson BSP — APP / APP_b → rootfs_a / rootfs_b
+SUBSYSTEM=="block", ENV{ID_PART_ENTRY_NAME}=="APP",   SYMLINK+="disk/by-partlabel/rootfs_a"
+SUBSYSTEM=="block", ENV{ID_PART_ENTRY_NAME}=="APP_b", SYMLINK+="disk/by-partlabel/rootfs_b"

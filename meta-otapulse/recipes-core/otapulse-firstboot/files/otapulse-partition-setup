@@ -189,6 +189,126 @@ ensure_persistent_boot_scripts() {
     return 0
 }
 
+# =============================================================================
+# Static-GPT BSP support (e.g. NVIDIA Tegra / meta-tegra)
+# =============================================================================
+# Some BSPs (notably meta-tegra for NVIDIA Jetson) ship a fixed GPT layout
+# at flash time and do not allow dynamic partition creation. They also use
+# different label conventions (APP / APP_b instead of rootfs_a / rootfs_b).
+#
+# For these BSPs:
+#   1. The udev rule 99-otapulse-bsp-aliases.rules creates the rootfs_a/_b
+#      symlinks at boot via udev SYMLINK+= directives.
+#   2. We can't create a real data partition — fall back to a persistent
+#      directory on the rootfs that we bind-mount to /data.
+#   3. Skip the dynamic sgdisk-based partition creation entirely.
+#
+# This whole code path is gated on detection — non-Tegra BSPs are unaffected.
+# =============================================================================
+
+is_static_gpt_bsp() {
+    # NVIDIA Tegra detection via device tree
+    if [ -r /proc/device-tree/compatible ] && \
+       grep -q "nvidia,tegra" /proc/device-tree/compatible 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+setup_data_partition_fallback() {
+    # Persistent directory on rootfs, bind-mounted to /data so all the
+    # existing code that writes to /data works unchanged.
+    #
+    # Note: This data is on the *active* rootfs partition, not a separate
+    # data partition. After an OTA slot switch, the new rootfs will have a
+    # fresh empty /data unless the BSP provides a real data partition.
+    # Users wanting persistent data across OTA updates should add a real
+    # data partition to their flash layout (e.g. flash.xml.in for Tegra).
+    local fallback_dir="/var/local/otapulse-data"
+
+    if mountpoint -q /data 2>/dev/null; then
+        return 0
+    fi
+
+    log "No data partition found — using rootfs fallback: $fallback_dir"
+    mkdir -p "$fallback_dir"
+    mkdir -p /data
+    if mount --bind "$fallback_dir" /data; then
+        log "Bind-mounted $fallback_dir → /data"
+        # Make it permanent across reboots via fstab
+        if ! grep -q "$fallback_dir /data" /etc/fstab 2>/dev/null; then
+            echo "$fallback_dir /data none bind 0 0" >> /etc/fstab
+            log "Added bind mount to /etc/fstab"
+        fi
+        return 0
+    fi
+    return 1
+}
+
+handle_static_gpt_bsp() {
+    log "Static-GPT BSP detected (Tegra) — using BSP partition layout"
+
+    # Wait for udev to apply the alias rules (rootfs_a → APP, rootfs_b → APP_b)
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=30 || true
+    fi
+
+    if [ ! -e /dev/disk/by-partlabel/rootfs_a ]; then
+        error "rootfs_a alias not present — check that 99-otapulse-bsp-aliases.rules is installed and the BSP uses APP/APP_b labels"
+    fi
+    log "  rootfs_a → $(readlink -f /dev/disk/by-partlabel/rootfs_a)"
+
+    if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+        log "  rootfs_b → $(readlink -f /dev/disk/by-partlabel/rootfs_b)"
+    else
+        log "  rootfs_b not present (single-slot layout — set USE_REDUNDANT_FLASH_LAYOUT=1 in meta-tegra for A/B)"
+    fi
+
+    # Set up /data — either a real partition or a rootfs-backed fallback
+    setup_data_partition_fallback || log "WARNING: /data setup failed"
+
+    # Now that /data is available, ensure persistence files exist
+    ensure_persistent_machine_id || true
+    ensure_persistent_ssh_keys || true
+    ensure_persistent_boot_scripts || true
+
+    # Initialize OTA boot environment files
+    if mountpoint -q /data 2>/dev/null; then
+        local ota_dir="/data/ota"
+        mkdir -p "$ota_dir"
+        [ -f "$ota_dir/mender_boot_part" ] || echo "$ROOT_PART_NUM" > "$ota_dir/mender_boot_part"
+        [ -f "$ota_dir/boot_count" ]       || echo "0" > "$ota_dir/boot_count"
+        [ -f "$ota_dir/upgrade_available" ] || echo "0" > "$ota_dir/upgrade_available"
+        [ -f "$ota_dir/current_slot" ]     || echo "a" > "$ota_dir/current_slot"
+        log "Boot environment initialized in $ota_dir"
+
+        # Seed device_type for OTA agent compatibility checking.
+        # The agent checks /data/otapulse/device_type against update artifacts.
+        local otapulse_dir="/data/otapulse"
+        mkdir -p "$otapulse_dir"
+        if [ ! -f "$otapulse_dir/device_type" ]; then
+            # Prefer MENDER_DEVICE_TYPE if set at build time; otherwise fall
+            # back to the kernel MACHINE name from device tree.
+            local dev_type=""
+            if [ -f /etc/mender/device_type ]; then
+                dev_type=$(cat /etc/mender/device_type 2>/dev/null | sed 's/^device_type=//')
+            fi
+            if [ -z "$dev_type" ] && [ -r /proc/device-tree/model ]; then
+                dev_type=$(tr -d '\0' < /proc/device-tree/model | tr ' ' '_' | tr '[:upper:]' '[:lower:]')
+            fi
+            [ -z "$dev_type" ] && dev_type="unknown"
+            echo "device_type=$dev_type" > "$otapulse_dir/device_type"
+            log "Seeded device_type=$dev_type in $otapulse_dir/device_type"
+        fi
+    fi
+
+    # Mark complete and exit
+    mkdir -p "$(dirname $MARKER_FILE)"
+    touch "$MARKER_FILE"
+    log "Partition setup complete (static-GPT BSP path)"
+    exit 0
+}
+
 # Always ensure persistent machine-id (even if partitions already configured)
 ensure_persistent_machine_id || log "machine-id persistence skipped (data partition not ready)"
 
@@ -272,6 +392,12 @@ fi
 
 log "Base device: $BASE_DEV"
 log "Root partition number: $ROOT_PART_NUM"
+
+# Static-GPT BSP fast path (Tegra etc.) — handle and exit before any sgdisk work.
+# Non-Tegra systems fall through to the normal dynamic-partition logic below.
+if is_static_gpt_bsp; then
+    handle_static_gpt_bsp
+fi
 
 # EARLY CHECK: If all required partitions exist with correct labels and are formatted,
 # we don't need to do anything. This handles WIC images that pre-create partitions

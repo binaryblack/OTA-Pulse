@@ -25,6 +25,7 @@ SRC_URI = " \
     file://otapulse-machine-id \
     file://otapulse-machine-id.service \
     file://switch-boot-slot.sh \
+    file://99-otapulse-bsp-aliases.rules \
 "
 
 S = "${WORKDIR}"
@@ -64,6 +65,13 @@ do_install() {
     install -m 0644 ${WORKDIR}/otapulse-auto-provision.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/otapulse-machine-id.service ${D}${systemd_system_unitdir}/
 
+    # Install udev rules — alias BSP-specific partition labels (e.g. Tegra
+    # APP/APP_b) to OTA-Pulse standard names. No-op on BSPs that don't use
+    # those labels.
+    install -d ${D}${nonarch_base_libdir}/udev/rules.d
+    install -m 0644 ${WORKDIR}/99-otapulse-bsp-aliases.rules \
+        ${D}${nonarch_base_libdir}/udev/rules.d/99-otapulse-bsp-aliases.rules
+
     # Create marker directories
     install -d ${D}${localstatedir}/lib/otapulse
 }
@@ -76,5 +84,6 @@ FILES:${PN} = " \
     ${systemd_system_unitdir}/otapulse-partition-setup.service \
     ${systemd_system_unitdir}/otapulse-auto-provision.service \
     ${systemd_system_unitdir}/otapulse-machine-id.service \
+    ${nonarch_base_libdir}/udev/rules.d/99-otapulse-bsp-aliases.rules \
     ${localstatedir}/lib/otapulse \
 "

@@ -63,15 +63,18 @@ get_current_part() {
 switch_to_slot() {
     local target_slot="$1"
     local target_part
+    local target_idx
 
     case "$target_slot" in
         a|A)
             target_slot="a"
             target_part="$PART_A"
+            target_idx=0
             ;;
         b|B)
             target_slot="b"
             target_part="$PART_B"
+            target_idx=1
             ;;
         *)
             echo "Error: Invalid slot '$target_slot'. Use 'a' or 'b'."
@@ -90,8 +93,30 @@ switch_to_slot() {
     # we must also update the file there (boot.scr can only read from FAT).
     update_fat_boot_part "$target_part"
 
+    # On NVIDIA Tegra, the actual slot switch is done by the BootChain BCT
+    # via nvbootctrl. The file-based env above is only used by OTA agent
+    # state tracking — the bootloader itself reads from the BootChain BCT,
+    # not from /data/ota/.
+    update_tegra_bootctrl "$target_idx"
+
     echo "Switched to slot $target_slot (partition $target_part)"
     echo "Reboot to boot from the new slot"
+}
+
+# Tegra: switch the active boot slot via nvbootctrl. No-op on non-Tegra.
+update_tegra_bootctrl() {
+    local target_idx="$1"
+
+    if ! command -v nvbootctrl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if nvbootctrl set-active-boot-slot "$target_idx" 2>/dev/null; then
+        echo "nvbootctrl: set active boot slot to $target_idx"
+    else
+        echo "WARNING: nvbootctrl set-active-boot-slot $target_idx failed"
+        return 1
+    fi
 }
 
 # Update mender_boot_part on the FAT boot partition (if present).
