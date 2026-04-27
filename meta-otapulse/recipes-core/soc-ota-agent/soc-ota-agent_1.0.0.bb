@@ -100,7 +100,8 @@ do_compile() {
 
     # Go build flags to fix QA warnings
     # -trimpath: Remove build paths from binary (fixes buildpaths warning)
-    export GO_BUILD_FLAGS="-trimpath"
+    # -mod=vendor: use vendor/ directory; avoids GOPROXY network access
+    export GO_BUILD_FLAGS="-trimpath -mod=vendor"
 
     # Extra linker flags: strip symbols, use external linker
     export EXTRA_GO_LDFLAGS="-s -w -linkmode=external -extldflags '${LDFLAGS}'"

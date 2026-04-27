@@ -414,6 +414,40 @@ wait_for_device_ready() {
     return 1
 }
 
+# =============================================================================
+# Move GPT backup header to the actual end of disk if needed.
+#
+# WIC images are sized for the rootfs they contain (e.g. ~5 GB). When dd'd to
+# a larger SD card / eMMC / NVMe (e.g. 32 GB), the primary GPT still claims
+# the disk ends at the WIC's last sector, so sgdisk -E reports a tiny
+# last-usable-sector and free-space math goes negative. `sgdisk -e` rewrites
+# the backup header at the real end of disk and updates the primary header's
+# alternate-LBA + last-usable fields.
+#
+# This is idempotent on a correctly-sized GPT (sgdisk skips the rewrite when
+# the backup is already at the end), so it is safe to run on every first-boot.
+# =============================================================================
+repair_gpt_if_needed() {
+    local device="$1"
+    local last_sector device_sectors
+    last_sector=$(sgdisk -E "$device" 2>/dev/null | tail -1 || echo "0")
+    device_sectors=$(blockdev --getsz "$device" 2>/dev/null || echo "0")
+
+    # Only repair when primary GPT thinks the disk is much smaller than it is.
+    # Threshold: backup header is in the first half of the disk = WIC mismatch.
+    if [ "$last_sector" -gt 0 ] && [ "$device_sectors" -gt 0 ] \
+        && [ "$last_sector" -lt $((device_sectors / 2)) ]; then
+        log "GPT backup at sector $last_sector but device has $device_sectors sectors — moving backup to end of disk"
+        if sgdisk -e "$device" 2>&1 | while IFS= read -r line; do log "sgdisk: $line"; done; then
+            partprobe "$device" 2>/dev/null || true
+            udevadm settle --timeout=10 2>/dev/null || true
+            log "GPT repair complete"
+        else
+            log "WARNING: sgdisk -e failed (proceeding anyway, partition setup will likely fail too)"
+        fi
+    fi
+}
+
 # Find the root device
 ROOT_PART=$(findmnt -n -o SOURCE /)
 if [ -z "$ROOT_PART" ]; then
@@ -551,6 +585,11 @@ fi
 if ! command -v sgdisk &> /dev/null; then
     error "sgdisk not found. Install gptfdisk package."
 fi
+
+# Repair GPT first if the WIC image was flashed to a larger disk than it
+# was sized for. Without this, sgdisk -E returns the WIC's last sector and
+# free-space math goes negative.
+repair_gpt_if_needed "$BASE_DEV"
 
 # Wait for device to be fully ready before reading GPT.
 # Use || true so a "not ready" result (e.g. no free sectors on a fully-allocated
