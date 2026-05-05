@@ -44,7 +44,7 @@ OTAPULSE_PLACEHOLDER_URLS ?= " \
     https://your-server.com \
     https://otapulse.example.com \
     https://monitoring.example.com \
-    http://192.168.0.122:8000 \
+    http://192.168.0.123:8000 \
     https://docker.mender.io \
     CHANGE_ME \
 "

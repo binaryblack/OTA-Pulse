@@ -62,7 +62,7 @@ SOC_OTA_SIGNING_KEYS_DIR ?= "/etc/soc-monitoring/signing-keys"
 # Example: "production-rsa-public.pem production-ecdsa-public.pem"
 SOC_OTA_VERIFY_KEY_FILES ?= "production-rsa-public.pem"
 # OTA server URL - MUST be set in your platform-specific layer or local.conf
-OTA_SERVER_URL ?= "http://192.168.0.122:8000"
+OTA_SERVER_URL ?= "http://192.168.0.123:8000"
 
 # Tenant token / API key for device authentication
 # Set this in local.conf to an API key (e.g., "smk_...") for the device to authenticate

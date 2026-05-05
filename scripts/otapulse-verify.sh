@@ -127,7 +127,7 @@ PLACEHOLDER_PATTERNS=(
     "example.com"
     "your-ota-server"
     "your-server"
-    "192.168.0.122"
+    "192.168.0.123"
     "docker.mender.io"
     "localhost"
 )
