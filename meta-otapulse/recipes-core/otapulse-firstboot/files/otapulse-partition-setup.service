@@ -17,7 +17,7 @@ RemainAfterExit=yes
 ExecStart=/usr/bin/otapulse-partition-setup
 StandardOutput=journal+console
 StandardError=journal+console
-TimeoutStartSec=300
+TimeoutStartSec=900
 # Retry on failure (device might not be ready)
 Restart=on-failure
 RestartSec=5

@@ -29,71 +29,48 @@ error() {
 }
 
 # =============================================================================
-# CRITICAL: Ensure machine-id is persistent (runs on EVERY boot)
+# Seed /data/otapulse/device_type so soc-ota-agent can verify HW compatibility
+# of incoming OTA artifacts. Without this file, the agent logs "Unable to
+# verify the existing hardware. Update will continue anyways" on every poll
+# and silently bypasses the device-type match check.
+#
+# Source priority: /etc/otapulse/device_type (always installed by the
+# soc-ota-agent recipe with `device_type=${MACHINE}`) → /etc/mender/device_type
+# (legacy mender layout) → /proc/device-tree/model (best-effort kernel name) →
+# "unknown".
+#
+# NOTE: The static-GPT (Tegra) path has its own inline seeding logic; this
+# helper is intentionally not used there to preserve byte-for-byte Tegra
+# behavior.
 # =============================================================================
-# This MUST run before early exit to handle both:
-# 1. First boot on partition A - save machine-id to /data
-# 2. First boot on partition B (after OTA) - symlink to existing /data/machine-id
-# 3. Subsequent boots - verify symlink exists
-# =============================================================================
-ensure_persistent_machine_id() {
-    PERSISTENT_MACHINE_ID="/data/machine-id"
+seed_device_type() {
+    local otapulse_dir="/data/otapulse"
+    [ -d "$otapulse_dir" ] || mkdir -p "$otapulse_dir"
+    [ -f "$otapulse_dir/device_type" ] && return 0
 
-    # Check if /data is mounted (may not be on very first boot before partitioning)
-    if ! mountpoint -q /data 2>/dev/null; then
-        # Try to mount data partition — check both "data" and "userdata" labels
-        # (Rockchip BSPs use "userdata", most others use "data")
-        local data_dev=""
-        if [ -e "/dev/disk/by-partlabel/data" ]; then
-            data_dev="/dev/disk/by-partlabel/data"
-        elif [ -e "/dev/disk/by-partlabel/userdata" ]; then
-            data_dev="/dev/disk/by-partlabel/userdata"
-        fi
-        if [ -n "$data_dev" ]; then
-            mkdir -p /data
-            mount "$data_dev" /data || return 1
-            log "Mounted $data_dev at /data for machine-id persistence"
-        else
-            # /data partition doesn't exist yet, skip for now
-            return 1
+    local src=""
+    for candidate in /etc/otapulse/device_type /etc/mender/device_type; do
+        [ -s "$candidate" ] && src="$candidate" && break
+    done
+
+    if [ -n "$src" ]; then
+        cp "$src" "$otapulse_dir/device_type"
+        log "Seeded device_type from $src: $(cat $otapulse_dir/device_type)"
+        return 0
+    fi
+
+    if [ -r /proc/device-tree/model ]; then
+        local dev_type
+        dev_type=$(tr -d '\0' < /proc/device-tree/model | tr ' ' '_' | tr '[:upper:]' '[:lower:]')
+        if [ -n "$dev_type" ]; then
+            echo "device_type=$dev_type" > "$otapulse_dir/device_type"
+            log "Seeded device_type from /proc/device-tree/model: $dev_type"
+            return 0
         fi
     fi
 
-    if [ ! -f "$PERSISTENT_MACHINE_ID" ]; then
-        # First boot ever - save current machine-id to persistent storage
-        if [ -f /etc/machine-id ] && [ ! -L /etc/machine-id ]; then
-            cp /etc/machine-id "$PERSISTENT_MACHINE_ID"
-            log "Saved machine-id to persistent storage: $(cat $PERSISTENT_MACHINE_ID)"
-        else
-            # Generate new machine-id if not exists
-            if command -v systemd-machine-id-setup &> /dev/null; then
-                systemd-machine-id-setup
-                cp /etc/machine-id "$PERSISTENT_MACHINE_ID"
-            else
-                # Manual generation fallback
-                cat /proc/sys/kernel/random/uuid | tr -d '-' > "$PERSISTENT_MACHINE_ID"
-            fi
-            log "Generated new persistent machine-id: $(cat $PERSISTENT_MACHINE_ID)"
-        fi
-    fi
-
-    # Replace /etc/machine-id with symlink to persistent copy
-    # This handles: partition B after OTA (has different machine-id file)
-    if [ -f "$PERSISTENT_MACHINE_ID" ]; then
-        if [ ! -L /etc/machine-id ]; then
-            # /etc/machine-id is a regular file, replace with symlink
-            rm -f /etc/machine-id
-            ln -sf "$PERSISTENT_MACHINE_ID" /etc/machine-id
-            log "Created symlink: /etc/machine-id -> $PERSISTENT_MACHINE_ID"
-        elif [ "$(readlink /etc/machine-id)" != "$PERSISTENT_MACHINE_ID" ]; then
-            # Symlink exists but points elsewhere, fix it
-            rm -f /etc/machine-id
-            ln -sf "$PERSISTENT_MACHINE_ID" /etc/machine-id
-            log "Fixed symlink: /etc/machine-id -> $PERSISTENT_MACHINE_ID"
-        fi
-    fi
-
-    return 0
+    echo "device_type=unknown" > "$otapulse_dir/device_type"
+    log "WARNING: seeded device_type=unknown (no source available)"
 }
 
 # =============================================================================
@@ -318,8 +295,10 @@ handle_static_gpt_bsp() {
     # Set up /data — either a real partition or a rootfs-backed fallback
     setup_data_partition_fallback || log "WARNING: /data setup failed"
 
-    # Now that /data is available, ensure persistence files exist
-    ensure_persistent_machine_id || true
+    # Now that /data is available, ensure persistence files exist.
+    # machine-id is handled by the dedicated otapulse-machine-id.service
+    # (a symlink can't work because systemd PID 1 reads /etc/machine-id
+    # before /data is mounted).
     ensure_persistent_ssh_keys || true
     ensure_persistent_boot_scripts || true
 
@@ -360,10 +339,9 @@ handle_static_gpt_bsp() {
     exit 0
 }
 
-# Always ensure persistent machine-id (even if partitions already configured)
-ensure_persistent_machine_id || log "machine-id persistence skipped (data partition not ready)"
-
 # Always ensure persistent SSH keys
+# (machine-id persistence is handled by otapulse-machine-id.service, which
+# runs After=otapulse-partition-setup.service.)
 ensure_persistent_ssh_keys || log "SSH key persistence skipped (data partition not ready)"
 
 # Always ensure boot scripts are available
@@ -393,20 +371,24 @@ wait_for_device_ready() {
         udevadm settle --timeout=30 || true
     fi
 
-    # Verify GPT is readable by checking last usable sector
+    # Check device accessibility via blockdev rather than sgdisk -E.
+    # sgdisk -E returns empty/0 whenever the primary GPT header has an invalid
+    # CRC (e.g. WIC image flashed to a larger card), so it is not usable as a
+    # readiness signal. blockdev --getsz reads device size directly from the
+    # kernel and works regardless of GPT state.
     while [ $retry -lt $max_retries ]; do
-        local last_sector=$(sgdisk -E "$device" 2>/dev/null | tail -1 || echo "0")
-        local device_sectors=$(blockdev --getsz "$device" 2>/dev/null || echo "0")
+        local device_sectors
+        device_sectors=$(blockdev --getsz "$device" 2>/dev/null)
+        device_sectors="${device_sectors:-0}"
 
-        # Last usable sector should be close to device size (within 1%)
-        # If it's very small (like 16383), GPT isn't ready yet
-        if [ "$last_sector" -gt 1000000 ] && [ "$last_sector" -gt $((device_sectors * 90 / 100)) ]; then
-            log "Device ready: last usable sector=$last_sector, device sectors=$device_sectors"
+        # >100 MB (204800 sectors × 512 B) means the block device is accessible
+        if [ "$device_sectors" -gt 204800 ]; then
+            log "Device ready: device_sectors=$device_sectors"
             return 0
         fi
 
         retry=$((retry + 1))
-        log "Device not ready yet (last_sector=$last_sector, device=$device_sectors), retry $retry/$max_retries..."
+        log "Device not ready yet (device_sectors=$device_sectors), retry $retry/$max_retries..."
         sleep 2
     done
 
@@ -430,18 +412,39 @@ wait_for_device_ready() {
 repair_gpt_if_needed() {
     local device="$1"
     local last_sector device_sectors
-    last_sector=$(sgdisk -E "$device" 2>/dev/null | tail -1 || echo "0")
-    device_sectors=$(blockdev --getsz "$device" 2>/dev/null || echo "0")
+    last_sector=$(sgdisk -E "$device" 2>/dev/null | tail -1)
+    last_sector="${last_sector:-0}"
+    device_sectors=$(blockdev --getsz "$device" 2>/dev/null)
+    device_sectors="${device_sectors:-0}"
 
-    # Only repair when primary GPT thinks the disk is much smaller than it is.
-    # Threshold: backup header is in the first half of the disk = WIC mismatch.
-    if [ "$last_sector" -gt 0 ] && [ "$device_sectors" -gt 0 ] \
-        && [ "$last_sector" -lt $((device_sectors / 2)) ]; then
+    # Repair when: device is readable AND (GPT is unreadable OR backup is in first half).
+    # last_sector=0 means sgdisk -E returned nothing (corrupted primary GPT, or
+    # sgdisk printed warnings but no sector number) — still attempt sgdisk -e.
+    if [ "$device_sectors" -gt 0 ] && \
+        { [ "$last_sector" -eq 0 ] || [ "$last_sector" -lt $((device_sectors / 2)) ]; }; then
         log "GPT backup at sector $last_sector but device has $device_sectors sectors — moving backup to end of disk"
         if sgdisk -e "$device" 2>&1 | while IFS= read -r line; do log "sgdisk: $line"; done; then
-            partprobe "$device" 2>/dev/null || true
+            sync
+            partprobe "$device" 2>/dev/null || blockdev --rereadpt "$device" 2>/dev/null || true
             udevadm settle --timeout=10 2>/dev/null || true
             log "GPT repair complete"
+            # Rebuild the primary GPT header from the now-correctly-placed backup.
+            # sgdisk -e moves the backup to end of disk but leaves the primary
+            # header CRC stale, so every subsequent sgdisk call still sees
+            # "Invalid partition data!" and exits non-zero. A backup→load cycle
+            # writes fresh primary and secondary headers with correct CRCs.
+            local _tmpgpt
+            _tmpgpt=$(mktemp /tmp/gpt_XXXXXXXX.bin 2>/dev/null || echo /tmp/gpt_repair.bin)
+            if sgdisk --backup="$_tmpgpt" "$device" 2>/dev/null && \
+               sgdisk --load-backup="$_tmpgpt" "$device" 2>/dev/null; then
+                sync
+                partprobe "$device" 2>/dev/null || blockdev --rereadpt "$device" 2>/dev/null || true
+                udevadm settle --timeout=10 2>/dev/null || true
+                log "GPT primary header rebuilt — CRC errors cleared"
+            else
+                log "WARNING: GPT primary header rebuild failed (sgdisk --backup/--load-backup)"
+            fi
+            rm -f "$_tmpgpt" 2>/dev/null || true
         else
             log "WARNING: sgdisk -e failed (proceeding anyway, partition setup will likely fail too)"
         fi
@@ -570,6 +573,9 @@ if check_all_partitions_ready; then
             log "Initialized current_slot=a"
         fi
         log "Boot environment initialized"
+
+        # Seed /data/otapulse/device_type for OTA HW-compatibility checks.
+        seed_device_type
     fi
 
     # Create marker file
@@ -612,10 +618,20 @@ if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then
     fi
 fi
 
-# Get rootfs_a size (in sectors)
-ROOTFS_A_SIZE=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition size" | awk '{print $3}')
-# Get sector size - sgdisk shows "512/512" (logical/physical), we need just the logical size
+# Get sector size (always works regardless of GPT state)
 SECTOR_SIZE=$(blockdev --getss "$BASE_DEV")
+
+# Get rootfs_a size (in sectors). sgdisk -i may return empty when the primary
+# GPT header CRC is invalid, so fall back to /sys/class/block which the kernel
+# always exports from the in-memory partition table.
+ROOTFS_A_SIZE=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition size" | awk '{print $3}')
+ROOTFS_A_SIZE="${ROOTFS_A_SIZE:-0}"
+if [ "$ROOTFS_A_SIZE" -eq 0 ]; then
+    _dev_name=$(basename "${BASE_DEV}p${ROOT_PART_NUM}" 2>/dev/null || basename "${BASE_DEV}${ROOT_PART_NUM}")
+    ROOTFS_A_SIZE=$(cat "/sys/class/block/${_dev_name}/size" 2>/dev/null || echo 0)
+    ROOTFS_A_SIZE="${ROOTFS_A_SIZE:-0}"
+    [ "$ROOTFS_A_SIZE" -gt 0 ] && log "rootfs_a size read from /sys/class/block: $ROOTFS_A_SIZE sectors"
+fi
 
 log "rootfs_a size: $ROOTFS_A_SIZE sectors ($SECTOR_SIZE bytes/sector)"
 
@@ -623,15 +639,41 @@ log "rootfs_a size: $ROOTFS_A_SIZE sectors ($SECTOR_SIZE bytes/sector)"
 ROOTFS_A_SIZE_MB=$((ROOTFS_A_SIZE * SECTOR_SIZE / 1024 / 1024))
 log "rootfs_a size: ${ROOTFS_A_SIZE_MB}MB"
 
-# Get total device size and find free space
-DEVICE_SIZE_SECTORS=$(sgdisk -p "$BASE_DEV" 2>/dev/null | grep "Disk.*sectors" | awk '{print $3}')
-LAST_SECTOR=$(sgdisk -E "$BASE_DEV" 2>/dev/null | tail -1)
+# Get total device size — prefer blockdev (bypasses GPT entirely).
+DEVICE_SIZE_SECTORS=$(blockdev --getsz "$BASE_DEV" 2>/dev/null)
+DEVICE_SIZE_SECTORS="${DEVICE_SIZE_SECTORS:-0}"
+
+# Last usable sector: try sgdisk -E first; fall back to device_size - 34
+# (GPT reserves 33 LBAs + 1 protective MBR = 34 LBAs at the end of disk).
+# sgdisk -E returns empty when the primary GPT header is invalid, which is
+# expected on first boot after flashing a WIC image to a larger card.
+LAST_SECTOR=$(sgdisk -E "$BASE_DEV" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
+LAST_SECTOR="${LAST_SECTOR:-0}"
+if [ "$LAST_SECTOR" -eq 0 ] && [ "$DEVICE_SIZE_SECTORS" -gt 0 ]; then
+    LAST_SECTOR=$((DEVICE_SIZE_SECTORS - 34))
+    log "sgdisk -E unavailable, calculated last usable sector: $LAST_SECTOR"
+fi
 
 log "Device total sectors: $DEVICE_SIZE_SECTORS"
 log "Last usable sector: $LAST_SECTOR"
 
-# Find the end of the last partition
+# Find the end of the last partition.
+# Try sgdisk -p first; if it returns empty (corrupted primary GPT), fall back
+# to reading start+size from /sys/class/block which reflects the kernel's
+# in-memory partition table (populated from the valid backup GPT).
 LAST_PART_END=$(sgdisk -p "$BASE_DEV" 2>/dev/null | grep '^ *[0-9]' | awk '{print $3}' | sort -n | tail -1)
+LAST_PART_END="${LAST_PART_END:-0}"
+if [ "$LAST_PART_END" -eq 0 ]; then
+    _base=$(basename "$BASE_DEV")
+    for _part_dir in /sys/class/block/${_base}/${_base}*/; do
+        [ -f "${_part_dir}start" ] && [ -f "${_part_dir}size" ] || continue
+        _pstart=$(cat "${_part_dir}start")
+        _psize=$(cat "${_part_dir}size")
+        _pend=$((_pstart + _psize - 1))
+        [ "$_pend" -gt "$LAST_PART_END" ] && LAST_PART_END=$_pend
+    done
+    [ "$LAST_PART_END" -gt 0 ] && log "sgdisk partition info unavailable, last partition end from /sys: $LAST_PART_END"
+fi
 FREE_START=$((LAST_PART_END + 1))
 FREE_SECTORS=$((LAST_SECTOR - FREE_START))
 FREE_SIZE_MB=$((FREE_SECTORS * SECTOR_SIZE / 1024 / 1024))
@@ -668,9 +710,8 @@ if [ "$PARTITIONS_EXIST" -eq 0 ]; then
     log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
     log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
 
-    # Create partitions (use -g to convert MBR to GPT if needed)
     log "Creating rootfs_b and data partitions..."
-    sgdisk -g \
+    sgdisk \
            -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
            -c "$ROOTFS_B_PART_NUM:rootfs_b" \
            -t "$ROOTFS_B_PART_NUM:8300" \
@@ -713,7 +754,7 @@ fi
 ROOTFS_B_FSTYPE=$(lsblk -no FSTYPE "$ROOTFS_B_DEV" 2>/dev/null || true)
 if [ -z "$ROOTFS_B_FSTYPE" ]; then
     log "Formatting rootfs_b ($ROOTFS_B_DEV)..."
-    mkfs.ext4 -F -L "rootfs_b" "$ROOTFS_B_DEV"
+    mkfs.ext4 -F -E nodiscard -L "rootfs_b" "$ROOTFS_B_DEV"
 else
     log "rootfs_b already formatted ($ROOTFS_B_FSTYPE), skipping"
 fi
@@ -721,7 +762,7 @@ fi
 DATA_FSTYPE=$(lsblk -no FSTYPE "$DATA_DEV" 2>/dev/null || true)
 if [ -z "$DATA_FSTYPE" ]; then
     log "Formatting data ($DATA_DEV)..."
-    mkfs.ext4 -F -L "data" "$DATA_DEV"
+    mkfs.ext4 -F -E nodiscard -L "data" "$DATA_DEV"
 else
     log "data already formatted ($DATA_FSTYPE), skipping"
 fi
@@ -779,9 +820,12 @@ mkdir -p /data/otapulse
 mkdir -p /data/ota
 log "Created persistent directories: /data/otapulse, /data/ota"
 
-# Ensure machine-id and SSH keys are persistent (now that /data is definitely mounted)
-ensure_persistent_machine_id || log "Warning: machine-id persistence failed"
+# Ensure SSH keys are persistent (now that /data is definitely mounted).
+# machine-id persistence is owned by otapulse-machine-id.service.
 ensure_persistent_ssh_keys || log "Warning: SSH key persistence failed"
+
+# Seed /data/otapulse/device_type for OTA HW-compatibility checks.
+seed_device_type
 
 # Initialize boot environment files for OTA agent
 # These files are required for A/B partition management

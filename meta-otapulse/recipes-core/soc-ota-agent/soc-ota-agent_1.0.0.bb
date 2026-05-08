@@ -12,12 +12,9 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 # Dependencies
 DEPENDS = " \
     openssl \
-    openssl-staticdev \
     xz \
     lmdb \
-    lmdb-staticdev \
     glib-2.0 \
-    glib-2.0-staticdev \
     go-cross-${TUNE_PKGARCH} \
     pkgconfig-native \
 "
@@ -107,7 +104,7 @@ do_compile() {
     export GO_BUILD_FLAGS="-trimpath -mod=vendor"
 
     # Extra linker flags: strip symbols, use external linker
-    export EXTRA_GO_LDFLAGS="-s -w -linkmode=external -extldflags '${LDFLAGS} -static'"
+    export EXTRA_GO_LDFLAGS="-s -w -linkmode=external -extldflags '${LDFLAGS}'"
 
     # Build using the Makefile
     oe_runmake build VERSION="${PV}"

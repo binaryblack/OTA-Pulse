@@ -27,21 +27,35 @@ log() {
     echo "[$LOG_TAG] $1"
 }
 
+# A valid machine-id is exactly 32 lowercase hex chars, optionally followed by
+# a single trailing newline. Yocto's systemd ships /etc/machine-id pre-filled
+# with 33 bytes of 0xFF as an "uninitialized" sentinel; a plain non-empty
+# check ([ -s ]) accepts that garbage and propagates it across boots once it
+# has been copied to /data. Validate the byte content explicitly instead.
+is_valid_machine_id() {
+    f="$1"
+    [ -s "$f" ] || return 1
+    LC_ALL=C head -c 32 "$f" 2>/dev/null | LC_ALL=C grep -Eq '^[0-9a-f]{32}$'
+}
+
 mkdir -p /data/etc
 
-if [ -s "$PERSIST" ]; then
-    # Persistent ID exists — restore it
+if is_valid_machine_id "$PERSIST"; then
+    # Persistent ID exists and is well-formed — restore it
     cp "$PERSIST" /etc/machine-id
     log "Restored machine-id from $PERSIST"
 else
-    # First boot (or /data was wiped) — generate a unique ID
+    [ -e "$PERSIST" ] && log "Existing $PERSIST is not a valid machine-id — regenerating"
+
+    # First boot (or /data was wiped or contains garbage) — generate a unique ID.
     if command -v systemd-machine-id-setup >/dev/null 2>&1; then
         systemd-machine-id-setup 2>/dev/null || true
     fi
 
-    # systemd-machine-id-setup may have populated /etc/machine-id;
-    # if not (e.g. read-only rootfs), fall back to /proc/sys/kernel/random/uuid
-    if [ ! -s /etc/machine-id ]; then
+    # systemd-machine-id-setup may have populated /etc/machine-id; if not
+    # (e.g. read-only rootfs) or if it left the 0xFF sentinel in place, fall
+    # back to /proc/sys/kernel/random/uuid.
+    if ! is_valid_machine_id /etc/machine-id; then
         tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
     fi
 
