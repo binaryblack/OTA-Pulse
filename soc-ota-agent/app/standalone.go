@@ -20,6 +20,8 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -594,6 +596,45 @@ func handlePreDatabaseRestore(device *dev.DeviceManager) (*standaloneData, error
 		return nil, installer.ErrorNothingToCommit
 	}
 
+	// Safety check: upgrade_available=1 alone is not sufficient evidence of
+	// a genuine in-progress OTA. The flag can be stale (agent killed mid-
+	// install), externally written (test harness, manual debugging), or
+	// orphaned (artifact_info present from a long-past install).
+	//
+	// What happens if we don't check: the synthetic standaloneData returned
+	// below flows to DoStandaloneRollback → inst.Rollback() in
+	// dual_rootfs_device.go. Rollback() inspects mender_boot_part vs the
+	// mounted partition:
+	//   - MISMATCH (pre-reboot ArtifactInstall path): writes mender_boot_part
+	//     back to the current partition. No slot switch. Always safe.
+	//   - MATCH (post-reboot path): writes mender_boot_part to the INACTIVE
+	//     partition. This is the canonical Mender "I successfully booted the
+	//     new slot, now revert" operation — safe IFF the inactive partition
+	//     is bootable. If the inactive slot is empty (e.g. dynamic-A/B layout
+	//     where rootfs_b was freshly mkfs'd but never populated by a real
+	//     OTA), the next reboot panics with "No working init found" and the
+	//     device hard-bricks. Observed on dragon-q6a (Qualcomm A/B without
+	//     bootloader-level boot-count rollback).
+	//
+	// Defence: before allowing the synthetic data through, probe the
+	// rollback target (inactive partition) for a usable init binary. If the
+	// target is unbootable, the rollback would brick the device — refuse.
+	// If the target IS bootable (legitimate post-OTA rollback on a properly
+	// populated alternate slot) or the probe is inconclusive (preserve
+	// existing behaviour to avoid breaking pre-2.0.0 deployments we can't
+	// verify), proceed.
+	if !inactivePartitionLooksBootable(dualRootfs) {
+		log.Warnf(
+			"Pre-database restore refused: upgrade_available=1 but the " +
+				"rollback target (inactive partition) does not contain a " +
+				"usable init binary. Proceeding would issue a slot switch " +
+				"to an unbootable partition (see dragon-q6a brick mode). " +
+				"If this is a legitimate post-OTA rollback, ensure the " +
+				"alternate slot is populated and retry.",
+		)
+		return nil, installer.ErrorNothingToCommit
+	}
+
 	// Forcibly sidestep the database for artifact name query and fetch it
 	// directly from the artifact_info file. This was the way to get the
 	// artifact name in the past. Normally we would call
@@ -613,6 +654,77 @@ func handlePreDatabaseRestore(device *dev.DeviceManager) (*standaloneData, error
 		artifactName: name,
 		installers:   installers,
 	}, nil
+}
+
+// inactivePartitionLooksBootable returns true if the rollback target (the
+// currently inactive partition) appears to contain a usable Linux init binary,
+// or if the probe is inconclusive (best-effort — we never want to block on a
+// transient I/O hiccup). Returns false ONLY when we can positively confirm the
+// inactive partition has no /sbin/init, /init, or /bin/init — i.e. the
+// rollback target is definitely unbootable.
+//
+// Implementation: read-only mount the inactive partition to a temp dir,
+// stat the init candidates, then unmount. The agent already runs as root in
+// the daemon and CLI paths that call here, so mount() is permitted.
+func inactivePartitionLooksBootable(dualRootfs installer.DualRootfsDevice) bool {
+	inactive, err := dualRootfs.GetInactive()
+	if err != nil || inactive == "" {
+		// Can't identify the rollback target — preserve existing behaviour
+		// rather than blocking. (Legacy single-partition layouts hit this.)
+		return true
+	}
+
+	tmpDir, err := ioutil.TempDir("", "otapulse-rb-probe-")
+	if err != nil {
+		log.Warnf("Could not create temp dir for rollback-target probe (%v); "+
+			"allowing legacy path to proceed", err)
+		return true
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Read-only mount. Let the kernel auto-detect the fstype (the agent's
+	// host environment has util-linux mount which supports -t auto).
+	mountCmd := exec.Command("mount", "-o", "ro", inactive, tmpDir)
+	if out, err := mountCmd.CombinedOutput(); err != nil {
+		// Cannot mount → either no filesystem (definitely unbootable) or a
+		// fstype mount(8) can't handle on this host. Treat as unbootable —
+		// rolling back to a partition we can't even mount is unsafe.
+		log.Warnf("Rollback-target probe: cannot mount %s read-only (%v: %s) "+
+			"— treating as unbootable",
+			inactive, err, strings.TrimSpace(string(out)))
+		return false
+	}
+	defer func() {
+		if err := exec.Command("umount", tmpDir).Run(); err != nil {
+			log.Warnf("Rollback-target probe: umount %s failed: %v", tmpDir, err)
+		}
+	}()
+
+	// Use Lstat (not Stat) so we check existence on the mounted partition
+	// without following symlinks into the host filesystem. /sbin/init is
+	// often a symlink to /lib/systemd/systemd; if we used Stat the absolute
+	// target would resolve against the host root and a broken symlink on
+	// rootfs_b could look "bootable" because the host has systemd. Lstat
+	// only checks the dirent on the mounted fs.
+	for _, candidate := range []string{"sbin/init", "init", "bin/init"} {
+		path := filepath.Join(tmpDir, candidate)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		// Regular executable: classic init. A freshly mkfs'd partition has
+		// no files at all, so any executable init here proves population.
+		if info.Mode().IsRegular() && info.Mode()&0111 != 0 {
+			return true
+		}
+		// Symlink: presence of the symlink dirent (even if target is broken)
+		// indicates a populated rootfs. A freshly mkfs'd partition contains
+		// nothing but lost+found.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreStandaloneData retrieves Artifact payload data from the database, and
