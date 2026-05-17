@@ -29,6 +29,108 @@ error() {
 }
 
 # =============================================================================
+# CRITICAL: Seed rootfs_b with a bootable copy of rootfs_a.
+# =============================================================================
+# Without this, rootfs_b is a freshly-formatted but EMPTY ext4 filesystem.
+# Any slot switch before the first real OTA — whether driven by a buggy
+# bootloader auto-fallback, a stale upgrade_available flag, a manual test,
+# or an interrupted install — will leave the device booting into an empty
+# partition with no /sbin/init, causing an unrecoverable kernel panic.
+# Boards lacking bootloader-level boot-count rollback (notably Qualcomm A/B
+# with XBL/ABL — observed brick on dragon-q6a) cannot recover from this
+# without manual reflash.
+#
+# Seeding mitigates the issue by ensuring rootfs_b contains a bootable
+# system at all times. The seed is a snapshot of rootfs_a taken once at
+# firstboot; it will be overwritten by the first real OTA. After that,
+# every slot transition lands on a known-bootable system.
+#
+# Defined early in the script so it can be invoked from any code path —
+# including the marker-file early-exit, the static-GPT BSP path, and the
+# partitions-already-exist path — without forward-reference errors. The
+# function is idempotent (no-op when /sbin/init already exists on rootfs_b)
+# and self-heals partial seeds from interrupted prior runs.
+#
+# Time cost: ~2–5 min on SD card for a ~2 GB rootfs. One-time, firstboot.
+# =============================================================================
+seed_rootfs_b() {
+    local rb_dev="$1"
+    local mnt="/tmp/.rb_seed_$$"
+
+    [ -b "$rb_dev" ] || return 0  # device doesn't exist — nothing to do
+
+    mkdir -p "$mnt"
+    if ! mount "$rb_dev" "$mnt" 2>/dev/null; then
+        log "WARNING: could not mount $rb_dev to check seed state — skipping seed"
+        rmdir "$mnt" 2>/dev/null || true
+        return 0
+    fi
+
+    # Skip if rootfs_b already has a usable /sbin/init (or /init). That's
+    # the canonical "this rootfs can boot" probe — anything else (empty
+    # fs, lost+found only, half-copied tree) is treated as needing a
+    # fresh seed. Self-heals interrupted seeds from prior firstboot runs.
+    if [ -x "$mnt/sbin/init" ] || [ -x "$mnt/init" ]; then
+        log "rootfs_b already has bootable init — skipping seed"
+        umount "$mnt" 2>/dev/null || true
+        rmdir "$mnt" 2>/dev/null || true
+        return 0
+    fi
+
+    log "Seeding rootfs_b from current rootfs (one-time recovery snapshot)..."
+    local start_ts
+    start_ts=$(date +%s)
+
+    # If rootfs_b has any leftover content from a partial prior seed, wipe
+    # it before copying so we start clean. (lost+found stays.)
+    find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
+
+    # Copy current rootfs into rootfs_b. We use `cp -a` (archive — preserves
+    # attrs and recurses) without `-x` (one-filesystem): the GNU-coreutils
+    # `-x` flag is NOT supported by busybox cp, which is what Yocto/Buildroot
+    # images typically ship. Since we only copy explicit top-level rootfs
+    # dirs (/bin, /etc, /sbin, …) and NOT /proc, /sys, /dev, /run, /tmp,
+    # /data, /mnt — the directories we copy are themselves part of the
+    # rootfs filesystem and do not contain foreign mountpoints in practice.
+    local d
+    local copy_ok=1
+    for d in /bin /boot /etc /home /lib /lib32 /lib64 /libexec /opt /root /sbin /srv /usr /var; do
+        [ -e "$d" ] || continue
+        if ! cp -a "$d" "$mnt/" 2>/dev/null; then
+            log "WARNING: cp -a $d -> $mnt failed (continuing)"
+            copy_ok=0
+        fi
+    done
+
+    # Recreate pseudo-fs / mountpoint stubs so the seed boots cleanly.
+    for d in proc sys dev run tmp data mnt media; do
+        mkdir -p "$mnt/$d" 2>/dev/null || true
+    done
+    chmod 1777 "$mnt/tmp" 2>/dev/null || true
+
+    # Verify the seed has the bootable invariant we promised. If init is
+    # still missing after the copy something went very wrong; remove what
+    # we wrote so the partition stays "obviously empty" rather than
+    # half-bootable (a half-bootable seed could brick on slot switch).
+    if [ ! -x "$mnt/sbin/init" ] && [ ! -x "$mnt/init" ]; then
+        log "WARNING: rootfs_b seed missing /sbin/init after copy — wiping to leave partition empty"
+        find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
+        copy_ok=0
+    fi
+
+    sync
+    umount "$mnt" 2>/dev/null || true
+    rmdir "$mnt" 2>/dev/null || true
+
+    local elapsed=$(( $(date +%s) - start_ts ))
+    if [ "$copy_ok" -eq 1 ]; then
+        log "rootfs_b seed complete in ${elapsed}s"
+    else
+        log "rootfs_b seed FAILED in ${elapsed}s — partition wiped, slot-switch protection NOT in place"
+    fi
+}
+
+# =============================================================================
 # Seed /data/otapulse/device_type so soc-ota-agent can verify HW compatibility
 # of incoming OTA artifacts. Without this file, the agent logs "Unable to
 # verify the existing hardware. Update will continue anyways" on every poll
@@ -346,6 +448,17 @@ ensure_persistent_ssh_keys || log "SSH key persistence skipped (data partition n
 
 # Always ensure boot scripts are available
 ensure_persistent_boot_scripts || log "Boot scripts persistence skipped (data partition not ready)"
+
+# Always attempt rootfs_b seeding when rootfs_b exists, BEFORE we honour the
+# partition-setup marker. The seed function is idempotent (no-op when
+# rootfs_b already has /sbin/init) and cheap to invoke. Running it here
+# closes the gap where a prior firstboot pass created and formatted
+# rootfs_b but failed to populate it (e.g. busybox cp lacking GNU flags) —
+# without this call, the partition marker would prevent any later attempt
+# to re-seed even after the underlying bug is fixed.
+if [ -b /dev/disk/by-partlabel/rootfs_b ]; then
+    seed_rootfs_b /dev/disk/by-partlabel/rootfs_b || true
+fi
 
 # Check if already configured
 if [ -f "$MARKER_FILE" ]; then
@@ -759,110 +872,10 @@ else
     log "rootfs_b already formatted ($ROOTFS_B_FSTYPE), skipping"
 fi
 
-# =============================================================================
-# CRITICAL: Seed rootfs_b with a bootable copy of rootfs_a.
-# =============================================================================
-# Without this, rootfs_b is a freshly-formatted but EMPTY ext4 filesystem.
-# Any slot switch before the first real OTA — whether driven by a buggy
-# bootloader auto-fallback, a stale upgrade_available flag, a manual test,
-# or an interrupted install — will leave the device booting into an empty
-# partition with no /sbin/init, causing an unrecoverable kernel panic.
-# Boards lacking bootloader-level boot-count rollback (notably Qualcomm A/B
-# with XBL/ABL — observed brick on dragon-q6a) cannot recover from this
-# without manual reflash.
-#
-# Seeding mitigates the issue by ensuring rootfs_b contains a bootable
-# system at all times. The seed is a snapshot of rootfs_a taken once at
-# firstboot; it will be overwritten by the first real OTA. After that,
-# every slot transition lands on a known-bootable system.
-#
-# Scope/safety on other boards:
-#   - Only runs after we just mkfs'd rootfs_b ourselves AND the seed has
-#     never run (marker on /data). On boards where rootfs_b was already
-#     formatted by the WIC image (most pre-allocated A/B layouts), we skip
-#     — the BSP has already populated it.
-#   - Idempotent via /data/otapulse/.rootfs_b_seeded marker.
-#   - Excludes /proc, /sys, /dev, /run, /tmp, /data, /mnt to avoid copying
-#     pseudo-filesystems or the data partition mountpoint contents.
-#   - Uses cp -ax (preserves attrs, stays on one filesystem) — available on
-#     every Yocto/Buildroot image; no rsync dependency.
-#
-# Time cost: ~2–5 min on SD card for a ~2 GB rootfs. One-time, firstboot.
-# =============================================================================
-seed_rootfs_b() {
-    local rb_dev="$1"
-    local mnt="/tmp/.rb_seed_$$"
-
-    mkdir -p "$mnt"
-    if ! mount "$rb_dev" "$mnt" 2>/dev/null; then
-        log "WARNING: could not mount $rb_dev to check seed state — skipping seed"
-        rmdir "$mnt" 2>/dev/null || true
-        return 0
-    fi
-
-    # Skip if rootfs_b already has a usable /sbin/init (or /init). That's
-    # the canonical "this rootfs can boot" probe — anything else (empty
-    # fs, lost+found only, half-copied tree) is treated as needing a
-    # fresh seed. Self-heals interrupted seeds from prior firstboot runs.
-    if [ -x "$mnt/sbin/init" ] || [ -x "$mnt/init" ]; then
-        log "rootfs_b already has bootable init — skipping seed"
-        umount "$mnt" 2>/dev/null || true
-        rmdir "$mnt" 2>/dev/null || true
-        return 0
-    fi
-
-    log "Seeding rootfs_b from current rootfs (one-time recovery snapshot)..."
-    local start_ts
-    start_ts=$(date +%s)
-
-    # If rootfs_b has any leftover content from a partial prior seed, wipe
-    # it before copying so we start clean. (lost+found stays.)
-    find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
-
-    # Copy current rootfs into rootfs_b. cp -ax preserves all attributes
-    # and stays on one filesystem (so we don't follow into /proc, /sys,
-    # /dev, /run, /tmp, /data, /mnt even if they happen to be plain dirs).
-    local d
-    local copy_ok=1
-    for d in /bin /boot /etc /home /lib /lib32 /lib64 /libexec /opt /root /sbin /srv /usr /var; do
-        [ -e "$d" ] || continue
-        if ! cp -ax "$d" "$mnt/" 2>/dev/null; then
-            log "WARNING: cp -ax $d -> $mnt failed (continuing)"
-            copy_ok=0
-        fi
-    done
-
-    # Recreate pseudo-fs / mountpoint stubs so the seed boots cleanly.
-    for d in proc sys dev run tmp data mnt media; do
-        mkdir -p "$mnt/$d" 2>/dev/null || true
-    done
-    chmod 1777 "$mnt/tmp" 2>/dev/null || true
-
-    # Verify the seed has the bootable invariant we promised. If init is
-    # still missing after the copy something went very wrong; remove what
-    # we wrote so the partition stays "obviously empty" rather than
-    # half-bootable (a half-bootable seed could brick on slot switch).
-    if [ ! -x "$mnt/sbin/init" ] && [ ! -x "$mnt/init" ]; then
-        log "WARNING: rootfs_b seed missing /sbin/init after copy — wiping to leave partition empty"
-        find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
-        copy_ok=0
-    fi
-
-    sync
-    umount "$mnt" 2>/dev/null || true
-    rmdir "$mnt" 2>/dev/null || true
-
-    local elapsed=$(( $(date +%s) - start_ts ))
-    if [ "$copy_ok" -eq 1 ]; then
-        log "rootfs_b seed complete in ${elapsed}s"
-    else
-        log "rootfs_b seed FAILED in ${elapsed}s — partition wiped, slot-switch protection NOT in place"
-    fi
-}
-
 # Always attempt seeding when we manage the dynamic A/B layout. The
-# function is idempotent (no-op if rootfs_b already has a usable init)
-# and self-heals partial seeds from interrupted prior runs.
+# function (defined near the top of this script) is idempotent — no-op
+# if rootfs_b already has a usable init — and self-heals partial seeds
+# from interrupted prior runs.
 seed_rootfs_b "$ROOTFS_B_DEV"
 
 DATA_FSTYPE=$(lsblk -no FSTYPE "$DATA_DEV" 2>/dev/null || true)
