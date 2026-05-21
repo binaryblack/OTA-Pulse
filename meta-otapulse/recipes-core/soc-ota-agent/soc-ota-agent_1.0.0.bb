@@ -78,6 +78,21 @@ export GO111MODULE = "on"
 do_compile() {
     cd ${S}
 
+    # externalsrc builds in-place in a shared source tree, and the Makefile's
+    # 'build' target is a file target (build: $(BINARY_NAME)). A stale 'otapulse'
+    # binary left in the tree by a previous board's build makes make report
+    # "Nothing to be done for 'build'", so do_compile silently ships that stale
+    # binary — linked against whichever sysroot compiled it first — to every
+    # board. On Tegra/Kirkstone (glibc 2.35) a binary left by a Scarthgap build
+    # (glibc 2.39) requires GLIBC_2.38 and fails do_package_qa [file-rdeps].
+    # Remove any stale artifact so the agent is always recompiled against THIS
+    # board's sysroot. GOCACHE is pinned per-recipe (below) for the same reason.
+    rm -f ${S}/otapulse ${S}/mender
+
+    # Isolate the Go build cache per build so cgo objects compiled for one
+    # target's sysroot are never reused for another's.
+    export GOCACHE="${WORKDIR}/go-build-cache"
+
     # Add go-cross bin directory to PATH
     export PATH="${STAGING_LIBDIR_NATIVE}/${TARGET_SYS}/go/bin:${PATH}"
 
