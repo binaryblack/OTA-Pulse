@@ -1,11 +1,24 @@
 # Yocto recipe for soc-shell-access v1.0.0
 #
+# CHANGE LOG
+# ----------
+# S16-009 (2026-05-23): Corrects S16-008's locked-password design.
+#   S16-008 created support with --password ! (locked).  A live test on RPi4
+#   proved this breaks gateway pubkey login when the device sshd has no PAM:
+#   OpenSSH's own allowed_user() rejects ALL auth methods (including publickey)
+#   for accounts whose shadow field is a locked sentinel (!, !!, *).
+#   Fix: give support a SHA-512 hash of a build-time random secret (non-locked,
+#   unknowable) + ship an sshd drop-in that disables PasswordAuthentication for
+#   support, so the unknown password can never be used over SSH.
+#
 # PURPOSE
 # -------
 # Ships the Standard SSH shell tier's non-root user (`support`) and a curated
 # sudoers allowlist so the OTA-Pulse gateway can log in as `support` (not root)
 # and run a small set of read-only diagnostics + approved service restarts via
 # NOPASSWD sudo — nothing else.
+# Also ships an sshd drop-in (10-soc-support.conf) enforcing pubkey-only auth
+# for the support user (PasswordAuthentication no, AuthenticationMethods publickey).
 #
 # OPERATOR-NON-EDITABLE PROPERTY
 # -------------------------------
@@ -89,6 +102,7 @@ SRC_URI = " \
     file://soc-support.sudoers \
     file://soc-readlog \
     file://.keep \
+    file://sshd_config.d/10-soc-support.conf \
 "
 
 S = "${WORKDIR}"
@@ -119,8 +133,28 @@ USERADD_PACKAGES = "${PN}"
 #                       explicit --gid below so the GID is stable.
 #   --gid support     : primary group 'support' (created by GROUPADD_PARAM).
 #   --groups ""       : no secondary groups — not wheel, not sudo, not root.
-#   --password !      : locked password; login is via SSH key only.
-USERADD_PARAM:${PN} = "--system --shell /bin/sh --home-dir /home/support --create-home --no-user-group --gid support --password ! support"
+#   --password *      : INITIAL placeholder — do_install replaces this with a
+#                       real SHA-512 hash at build time (see below).  We cannot
+#                       pass the final hash here because it is generated at
+#                       install time from openssl rand.
+#
+# PASSWORD DESIGN (S16-009 fix):
+#   The device sshd is compiled WITHOUT PAM (no /etc/pam.d/sshd → UsePAM no).
+#   OpenSSH's allowed_user() inspects the shadow field directly and rejects ALL
+#   auth methods — including publickey — when the field is a locked/disabled
+#   sentinel (!, !!, *).  S16-008 used --password ! which triggered this check
+#   and broke gateway pubkey login (proven on RPi4 live test).
+#
+#   The fix: generate a SHA-512crypt hash of a 32-byte random secret at
+#   do_install time using `openssl passwd -6`.  The hash is present and not a
+#   locked sentinel, so allowed_user() is satisfied.  The plaintext secret is
+#   discarded immediately after hashing — it is never stored in the image or
+#   logs, is different on every build, and is therefore effectively unknowable.
+#   The sshd drop-in (10-soc-support.conf, see below) disables
+#   PasswordAuthentication for support, so the unknown password cannot be used
+#   over SSH regardless.
+#   Result: passwd -S support shows status "P" (password set), NOT "L" (locked).
+USERADD_PARAM:${PN} = "--system --shell /bin/sh --home-dir /home/support --create-home --no-user-group --gid support --password * support"
 
 # Create the primary group for the support user with a stable GID.
 # Using 'support' as the group name; GID is auto-assigned in system range.
@@ -172,6 +206,79 @@ do_install() {
     #    world-read (SSH authorized_keys must not be world-readable).
     # ------------------------------------------------------------------
     install -d -m 0750 ${D}/home/support
+
+    # ------------------------------------------------------------------
+    # 4. sshd drop-in: pubkey-only auth for the support user
+    #    Installed 0644 root:root into /etc/ssh/sshd_config.d/ which is
+    #    Include-d by the OE-core/poky sshd_config at its top line:
+    #      Include /etc/ssh/sshd_config.d/*.conf
+    #    No modification to the main sshd_config is required.
+    #
+    #    The Match User support block sets:
+    #      PasswordAuthentication no
+    #      KbdInteractiveAuthentication no
+    #      PubkeyAuthentication yes
+    #      AuthenticationMethods publickey
+    #    This ensures the (unknowable) password generated in step 5 below
+    #    can NEVER be used over SSH — only the gateway pubkey works.
+    # ------------------------------------------------------------------
+    install -d -m 0755 ${D}${sysconfdir}/ssh/sshd_config.d
+    install -m 0644 ${FILESDIR}/sshd_config.d/10-soc-support.conf \
+        ${D}${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf
+    chown root:root ${D}${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf
+
+    # NOTE: shadow password replacement (step 5 / S16-009 fix) is done in
+    # pkg_postinst:${PN} below, not here.  The useradd class creates the
+    # support user in the rootfs shadow at do_rootfs time, which runs AFTER
+    # do_install.  pkg_postinst runs after useradd completes, so it can
+    # update the shadow field with the build-time-generated random hash.
+}
+
+# ---------------------------------------------------------------------------
+# pkg_postinst: replace the support user's placeholder shadow password with
+# a build-time SHA-512crypt hash of an unknowable random secret.
+#
+# This runs in fakeroot at do_rootfs time, AFTER the useradd class has
+# created the support user in ${IMAGE_ROOTFS}/etc/shadow.  It replaces
+# the initial '*' placeholder with a real hash so allowed_user() in
+# OpenSSH (no-PAM builds) does not see a locked sentinel.
+#
+# IMPLEMENTATION NOTES
+# --------------------
+# - We cannot set the final hash in USERADD_PARAM because the random secret
+#   must be generated fresh at image-assembly time and cannot be known at
+#   parse time.
+# - We do NOT use `usermod -R "$D" -p ...` here: pkg_postinst does not run
+#   under PSEUDO, and usermod may not be available natively for the target.
+#   Instead, we use a direct sed on $D/etc/shadow — the same approach used
+#   by OE-core's useradd_base.bbclass for in-image shadow edits.
+# - openssl passwd -6 is available on all modern build hosts (openssl 1.1+).
+# - The plaintext secret is a 32-byte hex string that exists only in the
+#   shell variable `_secret` for the duration of this subshell; it is never
+#   written to disk, the image, or any log.  A fresh secret is generated
+#   on every build, so the hash is not reproducible.
+# ---------------------------------------------------------------------------
+pkg_postinst:${PN} () {
+    # Only run at image assembly time ($D is the target rootfs root).
+    # When $D is empty this is an on-device postinst run — we skip it
+    # because the hash is baked in at build time; nothing to do on device.
+    if [ -n "$D" ]; then
+        _shadow="$D/etc/shadow"
+        if [ -f "$_shadow" ] && grep -q "^support:" "$_shadow"; then
+            # Generate a SHA-512crypt hash of a random 32-byte secret.
+            # openssl passwd -6 uses SHA-512crypt ($6$...$...).
+            # The secret never leaves this subshell.
+            _secret=$(openssl rand -hex 32)
+            _hash=$(printf '%s' "$_secret" | openssl passwd -6 -stdin)
+            unset _secret
+            # Replace only the password field (field 2) for the support line.
+            # sed expression: match ^support:<any-field2>: and substitute field 2.
+            sed --follow-symlinks -i \
+                "s|^support:[^:]*:|support:${_hash}:|" \
+                "$_shadow"
+            unset _hash
+        fi
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -179,18 +286,19 @@ do_install() {
 # ---------------------------------------------------------------------------
 FILES:${PN} = " \
     ${sysconfdir}/sudoers.d/10-soc-support \
+    ${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf \
     ${libexecdir}/soc-diag \
     ${libexecdir}/soc-diag/.keep \
     ${libexecdir}/soc-diag/soc-readlog \
     /home/support \
 "
 
-# CONFFILES: declare the sudoers drop-in as a managed config file that OTA
-# replaces (rather than merging with local changes).  This is the mechanism
-# by which the operator-non-editable property is enforced at the package
-# manager level: an OTA update always overwrites the file.
+# CONFFILES: declare both managed config drop-ins as OTA-replaced files so
+# the package manager always overwrites them on update (operator edits do
+# not persist across OTA updates).
 CONFFILES:${PN} = " \
     ${sysconfdir}/sudoers.d/10-soc-support \
+    ${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf \
 "
 
 # ---------------------------------------------------------------------------
