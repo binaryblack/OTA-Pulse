@@ -4,6 +4,7 @@ go 1.14
 
 require (
 	github.com/bmatsuo/lmdb-go v1.6.1-0.20160816100615-69ad631904c9
+	github.com/creack/pty v1.1.9
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/godbus/dbus v4.1.0+incompatible
 	github.com/gorilla/websocket v1.4.3-0.20220104015952-9111bb834a68
