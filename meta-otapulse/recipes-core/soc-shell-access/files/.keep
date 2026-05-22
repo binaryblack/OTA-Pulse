@@ -1,0 +1,4 @@
+# This file ensures the /usr/libexec/soc-diag/ directory is tracked by the
+# package manager.  Vendor diagnostic scripts are dropped in here by other
+# recipes or OTA updates and are referenced by the soc-support sudoers
+# allowlist (SOC_DIAG alias).  Do not remove this file.

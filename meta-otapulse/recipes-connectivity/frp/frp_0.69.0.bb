@@ -21,7 +21,7 @@ TCP/UDP proxies across NAT boundaries.  OTA-Pulse uses it for the Remote SSH \
 terminal feature (soc-ota-tunneld supervises frpc on-device)."
 HOMEPAGE = "https://github.com/fatedier/frp"
 LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://LICENSE;md5=ccc13f8f0e2ee8e7ce4c89d8ec11e1e9"
+LIC_FILES_CHKSUM = "file://LICENSE;md5=fa818a259cbed7ce8bc2a22d35a464fc"
 
 # -----------------------------------------------------------------------
 # Architecture mapping: Yocto TARGET_ARCH → frp release arch suffix
