@@ -5,14 +5,15 @@
 # binary, and skip strip + SPDX checks that do not apply to foreign pre-built
 # binaries.
 #
-# IMPORTANT — SHA256 CHECKSUMS:
-# The SRC_URI[sha256sum] placeholder below is intentionally left blank.
-# You MUST fill in the real per-architecture checksum before baking.
-# To obtain it, run:
-#   curl -sL <URL> | sha256sum
-# for each architecture's tarball, where <URL> matches the pattern below.
-# Leaving a wrong or empty checksum will cause BitBake to fail the fetch task
-# with a checksum mismatch — that is the intended safety net.
+# SHA256 CHECKSUMS:
+# Because SRC_URI fetches a DIFFERENT tarball per architecture, the checksum
+# must also be per-arch.  We carry the verified checksums in FRP_SHA256:<arch>
+# override variables below and feed the active one into SRC_URI[sha256sum].
+# The values were taken from frp's official release manifest
+# (frp_sha256_checksums.txt for v0.69.0) and independently re-verified by
+# downloading each tarball from the release URL.  To add a new arch, drop in
+# its tarball checksum as another FRP_SHA256:<arch> line (or in a .bbappend).
+# A wrong/empty checksum makes BitBake fail the fetch — the intended safety net.
 
 SUMMARY = "frp (Fast Reverse Proxy) client — NAT-traversal reverse tunnel client"
 DESCRIPTION = "frpc (frp client) connects to an frps server to establish reverse \
@@ -44,18 +45,15 @@ FRP_ARCH            = "UNSUPPORTED_ARCH_${TARGET_ARCH}"
 # -----------------------------------------------------------------------
 SRC_URI = "https://github.com/fatedier/frp/releases/download/v${PV}/frp_${PV}_linux_${FRP_ARCH}.tar.gz"
 
-# INTEGRATOR ACTION REQUIRED:
-# Replace "FILL_IN_SHA256_FOR_ARCH" with the real sha256sum of the tarball
-# for each architecture you need to support.  Using a .bbappend per machine
-# is the cleanest way to set the per-arch checksum:
-#
-#   SRC_URI[sha256sum] = "<actual_sha256_of_frp_0.69.0_linux_arm64.tar.gz>"
-#
-# Example (NOT authoritative — verify before use):
-#   aarch64: verify with `sha256sum frp_0.69.0_linux_arm64.tar.gz`
-#   arm:     verify with `sha256sum frp_0.69.0_linux_arm.tar.gz`
-#   x86_64:  verify with `sha256sum frp_0.69.0_linux_amd64.tar.gz`
-SRC_URI[sha256sum] = "FILL_IN_SHA256_FOR_ARCH_see_comment_above"
+# Per-arch verified sha256 of frp_0.69.0_linux_<arch>.tar.gz (matches frp's
+# official frp_sha256_checksums.txt for v0.69.0).
+FRP_SHA256:aarch64 = "24a4fc82b4c041835103419685ea124c4d6a7dbf83d0425481c5831b4ce4b3a4"
+FRP_SHA256:arm     = "8ee99ad9b09eafe5f77fea7cbd9db15deb056dc2857955477972ccb31a74e708"
+FRP_SHA256:x86_64  = "6b90d1cd28fc661f170c0de90dde03d2c63e4fd7ce0ae2da2ca1c28014b8146e"
+# Unsupported arches get an obviously-invalid value so the fetch fails loudly.
+FRP_SHA256         = "UNSUPPORTED_ARCH_${TARGET_ARCH}_supply_FRP_SHA256_override"
+
+SRC_URI[sha256sum] = "${FRP_SHA256}"
 
 S = "${WORKDIR}/frp_${PV}_linux_${FRP_ARCH}"
 
