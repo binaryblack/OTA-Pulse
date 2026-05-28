@@ -5,6 +5,14 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 After=network-online.target
 Wants=network-online.target
 
+# Don't run (and don't crash-loop) until the per-device tunnel credential has
+# been provisioned to /data/frp/credential.  systemd reports the unit as
+# "condition failed" instead of restart-counter spinning when the file is
+# missing — see BUG-013 for the underlying provisioning gap.  Once the
+# credential is written, `systemctl start soc-ota-tunneld` will pick it up.
+ConditionPathExists=/data/frp/credential
+ConditionFileNotEmpty=/data/frp/credential
+
 [Service]
 Type=simple
 User=root
