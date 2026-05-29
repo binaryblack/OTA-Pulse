@@ -6,11 +6,18 @@
 #   IMAGE_INSTALL:append = " otapulse-firstboot"
 
 # Raspberry Pi boot partition (contains firmware, kernel, DTBs)
-# RPi firmware must be in boot partition, not raw on disk
-part /boot --source bootimg-partition --ondisk mmcblk --fstype=vfat --label boot --part-name boot --active --align 4096 --size 100
+# RPi firmware must be in boot partition, not raw on disk.
+#
+# --ondisk MUST be the full device name (mmcblk0, not mmcblk): wic concatenates
+# it with the partition suffix to build /etc/fstab entries for partitions whose
+# --source is bootimg-partition / rootfs, so "mmcblk" produces "/dev/mmcblkp1"
+# (missing the controller index 0). systemd then hangs ~1m30s waiting for that
+# nonexistent device before timing out the boot. See same comment in
+# beagleplay-ti.wks for the original bug report.
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --part-name boot --active --align 4096 --size 100
 
 # Root filesystem A - sized to content, GPT label for OTA agent
-part / --source rootfs --ondisk mmcblk --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
 
 # GPT partition table
 bootloader --ptable gpt

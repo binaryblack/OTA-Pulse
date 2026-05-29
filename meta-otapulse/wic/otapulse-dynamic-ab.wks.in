@@ -27,14 +27,14 @@
 
 # Bootloader (imx-boot for i.MX, u-boot for others)
 # Written at 32KB offset, no partition table entry
-part u-boot --source rawcopy --sourceparams="file=${IMX_BOOT_BINARY}" --ondisk mmcblk --no-table --align ${IMX_BOOT_SEEK}
+part u-boot --source rawcopy --sourceparams="file=${IMX_BOOT_BINARY}" --ondisk mmcblk2 --no-table --align ${IMX_BOOT_SEEK}
 
 # Boot partition (FAT32, contains kernel and DTB)
-part /boot --source bootimg-partition --ondisk mmcblk --fstype=vfat --label boot --part-name boot --active --align 8192 --size 64
+part /boot --source bootimg-partition --ondisk mmcblk2 --fstype=vfat --label boot --part-name boot --active --align 8192 --size 64
 
 # Root filesystem A (primary) - sized to content
 # GPT partition label set for OTA agent to identify
-part / --source rootfs --ondisk mmcblk --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
+part / --source rootfs --ondisk mmcblk2 --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
 
 # Use GPT partition table (required for partition labels)
 bootloader --ptable gpt
