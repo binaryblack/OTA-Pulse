@@ -6,13 +6,13 @@
 #   IMAGE_INSTALL:append = " otapulse-firstboot"
 
 # i.MX8M Plus bootloader at 32KB offset
-part u-boot --source rawcopy --sourceparams="file=imx-boot" --ondisk mmcblk --no-table --align 32
+part u-boot --source rawcopy --sourceparams="file=imx-boot" --ondisk mmcblk2 --no-table --align 32
 
 # Boot partition (FAT32)
-part /boot --source bootimg-partition --ondisk mmcblk --fstype=vfat --label boot --part-name boot --active --align 8192 --size 64
+part /boot --source bootimg-partition --ondisk mmcblk2 --fstype=vfat --label boot --part-name boot --active --align 8192 --size 64
 
 # Root filesystem A - sized to content, GPT label for OTA agent
-part / --source rootfs --ondisk mmcblk --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
+part / --source rootfs --ondisk mmcblk2 --fstype=ext4 --label rootfs_a --part-name rootfs_a --align 8192
 
 # GPT partition table
 bootloader --ptable gpt
