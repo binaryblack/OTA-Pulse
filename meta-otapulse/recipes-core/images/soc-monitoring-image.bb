@@ -59,6 +59,27 @@ IMAGE_INSTALL += " \
     pv \
     "
 
+# Network test tooling — required by the TETS-ARE interruption suite
+# (INT-001..004) and any future test that injects network faults. tc is
+# also useful for tunnel + bandwidth diagnostics on production fleets.
+#   has_iptables  → iptables binary present (legacy iptables, not nft only)
+#   has_tc_netem  → tc binary + sch_netem.ko both available at runtime
+IMAGE_INSTALL += " \
+    iproute2-tc \
+    iptables \
+    kernel-module-sch-netem \
+    "
+
+# Auto-load sch_netem at boot so `tc qdisc add ... netem ...` works without
+# a manual modprobe. The .ko ships via kernel-modules / kernel-module-sch-netem
+# above; this just tells systemd-modules-load.service to insmod it on boot.
+ROOTFS_POSTPROCESS_COMMAND += "otapulse_enable_netem_autoload;"
+
+otapulse_enable_netem_autoload() {
+    install -d ${IMAGE_ROOTFS}${sysconfdir}/modules-load.d
+    echo "sch_netem" > ${IMAGE_ROOTFS}${sysconfdir}/modules-load.d/netem.conf
+}
+
 # Monitoring and telemetry
 # Using memfaultd-bin (shell script version) to avoid Rust build issues
 IMAGE_INSTALL += " \
