@@ -222,8 +222,8 @@ func (c DaemonConfig) Validate() error {
 // The rendered string is suitable for writing directly to RenderedConfigPath
 // and then passing to frpc via "-c <path>".
 //
-// SECURITY: token is embedded in the returned string — callers MUST write it
-// to a 0600 file.  Do NOT log the returned string.
+// SECURITY: token is embedded in the returned string (inside [proxies.metadatas])
+// — callers MUST write it to a 0600 file.  Do NOT log the returned string.
 //
 // frp v0.69 TOML structure:
 //
@@ -232,7 +232,7 @@ func (c DaemonConfig) Validate() error {
 //
 //	[auth]
 //	method = "token"
-//	token  = "<sotc_...>"
+//	token  = ""
 //
 //	[[proxies]]
 //	name       = "<proxyName>"
@@ -240,6 +240,13 @@ func (c DaemonConfig) Validate() error {
 //	localIP    = "127.0.0.1"
 //	localPort  = <LocalSSHPort>
 //	remotePort = <RemotePortHint>   # omitted when RemotePortHint == 0
+//	[proxies.metadatas]
+//	sotc_token = "<sotc_...>"
+//
+// The sotc credential moves from [auth].token to [proxies.metadatas].sotc_token
+// so the LAN frps httpPlugin device-auth handler can read it from
+// content.metas.sotc_token on the Login op, while frp itself authenticates
+// with an empty token (matching the frps auth.method = "none" configuration).
 func RenderFrpcTOML(c DaemonConfig, token string) string {
 	var sb strings.Builder
 
@@ -247,9 +254,12 @@ func RenderFrpcTOML(c DaemonConfig, token string) string {
 	fmt.Fprintf(&sb, "serverPort = %d\n", c.ServerPort)
 	sb.WriteString("\n")
 
-	// Auth block — reuse token format from CredentialAuthLines for consistency.
-	// CredentialAuthLines returns the legacy [auth]\nmethod=...\ntoken=... lines.
-	sb.WriteString(CredentialAuthLines(token))
+	// Auth block — empty token so frps auth.method = "none" is satisfied.
+	// The sotc credential is carried in [proxies.metadatas].sotc_token instead,
+	// where the frps httpPlugin device-auth handler reads it from the Login op.
+	sb.WriteString("[auth]\n")
+	sb.WriteString("method = \"token\"\n")
+	sb.WriteString("token = \"\"\n")
 	sb.WriteString("\n")
 
 	// Proxy block.
@@ -261,6 +271,12 @@ func RenderFrpcTOML(c DaemonConfig, token string) string {
 	if c.RemotePortHint != 0 {
 		fmt.Fprintf(&sb, "remotePort = %d\n", c.RemotePortHint)
 	}
+
+	// [proxies.metadatas] is a TOML sub-table of the current [[proxies]] entry.
+	// It MUST come after all key/value pairs of the [[proxies]] table because a
+	// sub-table header terminates the parent table's key/value section.
+	sb.WriteString("[proxies.metadatas]\n")
+	fmt.Fprintf(&sb, "sotc_token = %q\n", token)
 
 	return sb.String()
 }
