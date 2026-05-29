@@ -5,6 +5,18 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 After=network-online.target
 Wants=network-online.target
 
+# TASK-S29-006 — gate startup on the first-boot tunnel-credential mint.
+# otapulse-auto-provision (oneshot) writes /data/otapulse/.tunnel-provisioned
+# only after it has successfully POSTed to /tunnel-credential/rotate,
+# saved /data/frp/credential, and patched proxyName in tunnel.conf.
+# Without this gate, soc-ota-tunneld would crash-loop on the missing
+# credential before auto-provision completes.
+After=otapulse-auto-provision.service
+Wants=otapulse-auto-provision.service
+ConditionPathExists=/data/otapulse/.tunnel-provisioned
+# Defence-in-depth — also require the credential file itself.
+ConditionPathExists=/data/frp/credential
+
 [Service]
 Type=simple
 User=root
