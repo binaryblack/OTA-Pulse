@@ -1,0 +1,24 @@
+# OTA-Pulse Remote SSH — sshd overrides for the 'support' user.
+#
+# Operators tunneling in via the gateway connect as 'support'. PTY is required
+# (xterm.js); X11 + agent + tcp forwarding are explicitly off so a hijacked
+# session cannot pivot. AllowTcpForwarding=no also blocks ssh -L/-R from the
+# tunneled side. PermitUserEnvironment=no stops ~/.ssh/environment overrides
+# from escaping the controlled environment.
+#
+# NOTE: PermitUserEnvironment is a global-only directive; it must appear before
+# any Match block (OpenSSH rejects it inside Match and exits with status 255).
+PermitUserEnvironment no
+
+Match User support
+    PermitTTY yes
+    AllowAgentForwarding no
+    AllowTcpForwarding no
+    AllowStreamLocalForwarding no
+    X11Forwarding no
+    PermitTunnel no
+    PermitUserRC no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    GatewayPorts no
+    PermitOpen none

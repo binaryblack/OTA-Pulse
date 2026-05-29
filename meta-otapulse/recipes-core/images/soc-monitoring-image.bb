@@ -126,3 +126,10 @@ TOOLCHAIN_TARGET_TASK += "packagegroup-core-standalone-sdk-target"
 # Generic systemd configuration - suppress common warnings
 # To silence systemd warning about /home/root, add this to your local.conf:
 # ROOT_HOME = "/root"
+
+# Added by /verify-remote-ssh remote-ssh integration (TODO-002)
+IMAGE_INSTALL:append = " \
+    frp \
+    soc-ota-tunneld \
+    soc-shell-access \
+    "
