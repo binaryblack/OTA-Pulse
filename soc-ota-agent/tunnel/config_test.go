@@ -390,16 +390,30 @@ func TestRenderFrpcTOML(t *testing.T) {
 			assertContains("serverAddr", "serverAddr = "+tc.wantServer)
 			assertContains("serverPort", "serverPort = "+tc.wantPort)
 			assertContains("auth method", `method = "token"`)
-			assertContains("auth token", tc.wantToken)
+			// [auth].token must be empty — sotc moves to [proxies.metadatas].
+			assertContains("auth token empty", `token = ""`)
+			// The bare "token" key (not sotc_token) must not hold the credential.
+			// Use newline prefix to avoid matching the "sotc_token" key name.
+			assertAbsent("sotc not in auth token", "\ntoken = \""+tc.wantToken)
 			assertContains("[auth]", "[auth]")
 			assertContains("[[proxies]]", "[[proxies]]")
 			assertContains("proxyName", "name = "+tc.wantProxyName)
 			assertContains("type=tcp", `type = "tcp"`)
 			assertContains("localIP", `localIP = "127.0.0.1"`)
 			assertContains("localPort", "localPort = "+tc.wantLocalPort)
+			// sotc credential must appear in [proxies.metadatas].
+			assertContains("[proxies.metadatas]", "[proxies.metadatas]")
+			assertContains("sotc_token in metadatas", `sotc_token = "`+tc.wantToken+`"`)
 
 			if tc.wantRemote {
 				assertContains("remotePort", "remotePort = "+tc.wantRemotePort)
+				// remotePort must appear before [proxies.metadatas] (sub-table
+				// terminates the parent table's key/value section).
+				rpIdx := strings.Index(out, "remotePort")
+				metaIdx := strings.Index(out, "[proxies.metadatas]")
+				if rpIdx > metaIdx {
+					t.Errorf("remotePort must appear before [proxies.metadatas] in TOML\nGot:\n%s", out)
+				}
 			} else {
 				assertAbsent("remotePort absent", "remotePort")
 			}
@@ -409,6 +423,31 @@ func TestRenderFrpcTOML(t *testing.T) {
 			// are the right approach).
 			_ = out // already tested above
 		})
+	}
+}
+
+func TestRenderFrpcTOML_SotcInMetadatas(t *testing.T) {
+	t.Parallel()
+	c := DefaultDaemonConfig()
+	c.ServerAddr = "10.0.0.5"
+	c.ProxyName = "dev-abc123"
+	out := RenderFrpcTOML(c, "sotc_deadbeef")
+
+	// [auth].token must be empty
+	if !strings.Contains(out, `token = ""`) {
+		t.Fatalf("expected [auth].token = \"\" in rendered TOML; got:\n%s", out)
+	}
+	// "token = " (the bare auth key, not sotc_token) must not carry the credential.
+	// We check for the bare key preceded by a newline to avoid matching "sotc_token".
+	if strings.Contains(out, "\ntoken = \"sotc_deadbeef\"") {
+		t.Fatalf("sotc must NOT appear in [auth].token; got:\n%s", out)
+	}
+	// [proxies.metadatas].sotc_token must carry the credential
+	if !strings.Contains(out, "[proxies.metadatas]") {
+		t.Fatalf("missing [proxies.metadatas] sub-table; got:\n%s", out)
+	}
+	if !strings.Contains(out, `sotc_token = "sotc_deadbeef"`) {
+		t.Fatalf("missing sotc_token in [proxies.metadatas]; got:\n%s", out)
 	}
 }
 
