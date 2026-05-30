@@ -71,6 +71,12 @@ OTAPULSE_TENANT_TOKEN ?= ""
 
 S = "${EXTERNALSRC}"
 
+# Prevent base_do_configure from running 'make clean' when the configure task
+# hash changes.  soc-ota-tunneld shares this EXTERNALSRC tree; a 'make clean'
+# from either recipe would delete build artifacts that the other recipe's
+# do_install still needs.
+CLEANBROKEN = "1"
+
 # Build configuration
 export CGO_ENABLED = "1"
 export GO111MODULE = "on"
