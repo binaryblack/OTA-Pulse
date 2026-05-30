@@ -252,9 +252,12 @@ func RenderFrpcTOML(c DaemonConfig, token string) string {
 
 	fmt.Fprintf(&sb, "serverAddr = %q\n", c.ServerAddr)
 	fmt.Fprintf(&sb, "serverPort = %d\n", c.ServerPort)
-	// user = the device_id (== ProxyName). The frps device-auth httpPlugin
-	// cross-checks the Login `user` field against the device row's device_id.
-	fmt.Fprintf(&sb, "user = %q\n", c.ProxyName)
+	// NOTE: do NOT set a client `user` here. frp prefixes every proxy name with
+	// "<user>." when a user is set, registering this proxy as
+	// "<device_id>.<device_id>" — but the backend session gateway looks the
+	// device tunnel up by the BARE device_id, so a prefixed name reads as
+	// "device not online" (409). The backend's optional Login user cross-check
+	// is skipped when user is empty, so leaving it unset is correct.
 	// Client-level login metadatas. CRITICAL: the frps httpPlugin gates the
 	// *Login* op, and frp only carries the client-level `metadatas` (this
 	// top-level table) in the Login envelope's `metas` — per-proxy
