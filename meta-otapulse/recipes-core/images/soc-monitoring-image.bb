@@ -113,9 +113,12 @@ IMAGE_INSTALL += " \
     "
 
 # Extra development tools (remove for production)
+# gdb removed: gdb-14.2 configure.ac pins Autoconf 2.69 but this tree's
+# autoconf-native is 2.72e, so autoreconf fails (Makefile.in never generated)
+# — an upstream/toolchain incompatibility unrelated to the monitoring stack.
+# strace builds fine and is kept. (BUG-040)
 IMAGE_INSTALL:append = " \
     strace \
-    gdb \
     "
 
 # Image size configuration
