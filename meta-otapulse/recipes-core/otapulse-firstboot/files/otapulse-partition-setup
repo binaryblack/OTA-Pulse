@@ -29,108 +29,6 @@ error() {
 }
 
 # =============================================================================
-# CRITICAL: Seed rootfs_b with a bootable copy of rootfs_a.
-# =============================================================================
-# Without this, rootfs_b is a freshly-formatted but EMPTY ext4 filesystem.
-# Any slot switch before the first real OTA — whether driven by a buggy
-# bootloader auto-fallback, a stale upgrade_available flag, a manual test,
-# or an interrupted install — will leave the device booting into an empty
-# partition with no /sbin/init, causing an unrecoverable kernel panic.
-# Boards lacking bootloader-level boot-count rollback (notably Qualcomm A/B
-# with XBL/ABL — observed brick on dragon-q6a) cannot recover from this
-# without manual reflash.
-#
-# Seeding mitigates the issue by ensuring rootfs_b contains a bootable
-# system at all times. The seed is a snapshot of rootfs_a taken once at
-# firstboot; it will be overwritten by the first real OTA. After that,
-# every slot transition lands on a known-bootable system.
-#
-# Defined early in the script so it can be invoked from any code path —
-# including the marker-file early-exit, the static-GPT BSP path, and the
-# partitions-already-exist path — without forward-reference errors. The
-# function is idempotent (no-op when /sbin/init already exists on rootfs_b)
-# and self-heals partial seeds from interrupted prior runs.
-#
-# Time cost: ~2–5 min on SD card for a ~2 GB rootfs. One-time, firstboot.
-# =============================================================================
-seed_rootfs_b() {
-    local rb_dev="$1"
-    local mnt="/tmp/.rb_seed_$$"
-
-    [ -b "$rb_dev" ] || return 0  # device doesn't exist — nothing to do
-
-    mkdir -p "$mnt"
-    if ! mount "$rb_dev" "$mnt" 2>/dev/null; then
-        log "WARNING: could not mount $rb_dev to check seed state — skipping seed"
-        rmdir "$mnt" 2>/dev/null || true
-        return 0
-    fi
-
-    # Skip if rootfs_b already has a usable /sbin/init (or /init). That's
-    # the canonical "this rootfs can boot" probe — anything else (empty
-    # fs, lost+found only, half-copied tree) is treated as needing a
-    # fresh seed. Self-heals interrupted seeds from prior firstboot runs.
-    if [ -x "$mnt/sbin/init" ] || [ -x "$mnt/init" ]; then
-        log "rootfs_b already has bootable init — skipping seed"
-        umount "$mnt" 2>/dev/null || true
-        rmdir "$mnt" 2>/dev/null || true
-        return 0
-    fi
-
-    log "Seeding rootfs_b from current rootfs (one-time recovery snapshot)..."
-    local start_ts
-    start_ts=$(date +%s)
-
-    # If rootfs_b has any leftover content from a partial prior seed, wipe
-    # it before copying so we start clean. (lost+found stays.)
-    find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
-
-    # Copy current rootfs into rootfs_b. We use `cp -a` (archive — preserves
-    # attrs and recurses) without `-x` (one-filesystem): the GNU-coreutils
-    # `-x` flag is NOT supported by busybox cp, which is what Yocto/Buildroot
-    # images typically ship. Since we only copy explicit top-level rootfs
-    # dirs (/bin, /etc, /sbin, …) and NOT /proc, /sys, /dev, /run, /tmp,
-    # /data, /mnt — the directories we copy are themselves part of the
-    # rootfs filesystem and do not contain foreign mountpoints in practice.
-    local d
-    local copy_ok=1
-    for d in /bin /boot /etc /home /lib /lib32 /lib64 /libexec /opt /root /sbin /srv /usr /var; do
-        [ -e "$d" ] || continue
-        if ! cp -a "$d" "$mnt/" 2>/dev/null; then
-            log "WARNING: cp -a $d -> $mnt failed (continuing)"
-            copy_ok=0
-        fi
-    done
-
-    # Recreate pseudo-fs / mountpoint stubs so the seed boots cleanly.
-    for d in proc sys dev run tmp data mnt media; do
-        mkdir -p "$mnt/$d" 2>/dev/null || true
-    done
-    chmod 1777 "$mnt/tmp" 2>/dev/null || true
-
-    # Verify the seed has the bootable invariant we promised. If init is
-    # still missing after the copy something went very wrong; remove what
-    # we wrote so the partition stays "obviously empty" rather than
-    # half-bootable (a half-bootable seed could brick on slot switch).
-    if [ ! -x "$mnt/sbin/init" ] && [ ! -x "$mnt/init" ]; then
-        log "WARNING: rootfs_b seed missing /sbin/init after copy — wiping to leave partition empty"
-        find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
-        copy_ok=0
-    fi
-
-    sync
-    umount "$mnt" 2>/dev/null || true
-    rmdir "$mnt" 2>/dev/null || true
-
-    local elapsed=$(( $(date +%s) - start_ts ))
-    if [ "$copy_ok" -eq 1 ]; then
-        log "rootfs_b seed complete in ${elapsed}s"
-    else
-        log "rootfs_b seed FAILED in ${elapsed}s — partition wiped, slot-switch protection NOT in place"
-    fi
-}
-
-# =============================================================================
 # Seed /data/otapulse/device_type so soc-ota-agent can verify HW compatibility
 # of incoming OTA artifacts. Without this file, the agent logs "Unable to
 # verify the existing hardware. Update will continue anyways" on every poll
@@ -184,98 +82,65 @@ seed_device_type() {
 # Solution: Store SSH host keys in /data (persistent) and symlink from /etc/ssh
 # =============================================================================
 ensure_persistent_ssh_keys() {
-    # ── Static-GPT BSP path (Tegra) ──────────────────────────────────────────
+    # ── Universal plain-file host-key scheme (BUG-001) ───────────────────────
     # SSH host keys are pre-generated at build time (by the openssh bbappend)
-    # and are IDENTICAL on both A and B rootfs slots — so there is no need to
-    # persist them to /data.  Symlinking /etc/ssh/ → /data/ssh/ creates a race:
-    # if /data is not yet mounted when sshd reads its keys, sshd exits and SSH
-    # is unreachable after a power cycle.
+    # and shipped as plain files in /etc/ssh on every slot.  We deliberately do
+    # NOT symlink them into /data on any BSP:
     #
-    # For Tegra: keep keys as plain files.  If a previous run already created
-    # symlinks, convert them back to regular files so sshd has no /data dep.
-    if is_static_gpt_bsp; then
-        local SSH_KEY_TYPES="rsa ecdsa ed25519"
-        for key_type in $SSH_KEY_TYPES; do
-            local system_key="/etc/ssh/ssh_host_${key_type}_key"
-            local system_pub="/etc/ssh/ssh_host_${key_type}_key.pub"
-
-            [ -L "$system_key" ] || continue  # already a regular file — nothing to do
-
-            if [ -f "$system_key" ]; then
-                # Valid symlink: copy the target content into a regular file
-                cp --remove-destination "$(readlink -f "$system_key")" "$system_key"
-                chmod 600 "$system_key"
-                log "SSH $key_type key: converted symlink → regular file"
-                if [ -L "$system_pub" ] && [ -f "$system_pub" ]; then
-                    cp --remove-destination "$(readlink -f "$system_pub")" "$system_pub"
-                    chmod 644 "$system_pub"
-                fi
-            else
-                # Broken symlink: /data not mounted yet.  Try the bind-mount
-                # source directory directly (always on the rootfs ext4).
-                local fallback="/var/local/otapulse-data/ssh/ssh_host_${key_type}_key"
-                if [ -f "$fallback" ]; then
-                    rm -f "$system_key" "$system_pub"
-                    cp "$fallback" "$system_key" && chmod 600 "$system_key"
-                    [ -f "${fallback}.pub" ] && cp "${fallback}.pub" "$system_pub" && chmod 644 "$system_pub"
-                    log "SSH $key_type key: restored from $fallback (broken symlink)"
-                else
-                    # Last resort: regenerate the key
-                    rm -f "$system_key" "$system_pub"
-                    if command -v ssh-keygen >/dev/null 2>&1; then
-                        ssh-keygen -q -t "$key_type" -f "$system_key" -N '' 2>/dev/null \
-                            && log "SSH $key_type key: regenerated (no backup found)"
-                    else
-                        log "WARNING: cannot restore SSH $key_type key — ssh-keygen not available"
-                    fi
-                fi
-            fi
-        done
-        return 0
-    fi
-
-    # ── Standard (dynamic-partition) path ────────────────────────────────────
-    PERSISTENT_SSH_DIR="/data/ssh"
-    SSH_KEY_TYPES="rsa ecdsa ed25519"
-
-    # Check if /data is mounted
-    if ! mountpoint -q /data 2>/dev/null; then
-        return 1
-    fi
-
-    # Create persistent SSH directory
-    mkdir -p "$PERSISTENT_SSH_DIR"
-    chmod 700 "$PERSISTENT_SSH_DIR"
-
+    #   A /data symlink makes sshd depend on /data being mounted.  sshd.service
+    #   was ordered After=otapulse-partition-setup.service, and this oneshot has
+    #   TimeoutStartSec=900 — so on a board where partition-setup stalls (e.g.
+    #   beagleplay's GPT-repair path), sshd is held off for the FULL 900s and
+    #   the board is SSH-dead for >15 min after a soft reboot until a hard power
+    #   cycle (BUG-001).  Keeping host keys as plain files removes the /data
+    #   dependency entirely, so sshd can start immediately from the baked-in
+    #   keys regardless of partition-setup timing.
+    #
+    # Previously only static-GPT (Tegra) BSPs took the plain-file path; that
+    # carve-out left dynamic-partition boards (beagleplay et al.) symlinking
+    # into /data and exposed to the stall.  This is now applied to ALL BSPs.
+    # Test clients use StrictHostKeyChecking=no, so distinct per-slot keys after
+    # an OTA slot switch do not break reconnection.
+    #
+    # If a previous image revision left /data symlinks behind, convert them
+    # back to regular files so sshd has no /data dependency.
+    local SSH_KEY_TYPES="rsa ecdsa ed25519"
     for key_type in $SSH_KEY_TYPES; do
-        PERSISTENT_KEY="$PERSISTENT_SSH_DIR/ssh_host_${key_type}_key"
-        SYSTEM_KEY="/etc/ssh/ssh_host_${key_type}_key"
+        local system_key="/etc/ssh/ssh_host_${key_type}_key"
+        local system_pub="/etc/ssh/ssh_host_${key_type}_key.pub"
 
-        if [ ! -f "$PERSISTENT_KEY" ]; then
-            # First boot - copy existing key or generate new one
-            if [ -f "$SYSTEM_KEY" ] && [ ! -L "$SYSTEM_KEY" ]; then
-                cp "$SYSTEM_KEY" "$PERSISTENT_KEY"
-                cp "${SYSTEM_KEY}.pub" "${PERSISTENT_KEY}.pub" 2>/dev/null || true
-                log "Saved SSH $key_type key to persistent storage"
+        [ -L "$system_key" ] || continue  # already a regular file — nothing to do
+
+        if [ -f "$system_key" ]; then
+            # Valid symlink: copy the target content into a regular file
+            cp --remove-destination "$(readlink -f "$system_key")" "$system_key"
+            chmod 600 "$system_key"
+            log "SSH $key_type key: converted symlink → regular file"
+            if [ -L "$system_pub" ] && [ -f "$system_pub" ]; then
+                cp --remove-destination "$(readlink -f "$system_pub")" "$system_pub"
+                chmod 644 "$system_pub"
             fi
-        fi
-
-        # Symlink system key to persistent key
-        if [ -f "$PERSISTENT_KEY" ]; then
-            if [ ! -L "$SYSTEM_KEY" ]; then
-                rm -f "$SYSTEM_KEY" "${SYSTEM_KEY}.pub"
-                ln -sf "$PERSISTENT_KEY" "$SYSTEM_KEY"
-                ln -sf "${PERSISTENT_KEY}.pub" "${SYSTEM_KEY}.pub" 2>/dev/null || true
-                log "Created symlink: $SYSTEM_KEY -> $PERSISTENT_KEY"
+        else
+            # Broken symlink: /data not mounted yet.  Try the bind-mount
+            # source directory directly (always on the rootfs ext4).
+            local fallback="/var/local/otapulse-data/ssh/ssh_host_${key_type}_key"
+            if [ -f "$fallback" ]; then
+                rm -f "$system_key" "$system_pub"
+                cp "$fallback" "$system_key" && chmod 600 "$system_key"
+                [ -f "${fallback}.pub" ] && cp "${fallback}.pub" "$system_pub" && chmod 644 "$system_pub"
+                log "SSH $key_type key: restored from $fallback (broken symlink)"
+            else
+                # Last resort: regenerate the key
+                rm -f "$system_key" "$system_pub"
+                if command -v ssh-keygen >/dev/null 2>&1; then
+                    ssh-keygen -q -t "$key_type" -f "$system_key" -N '' 2>/dev/null \
+                        && log "SSH $key_type key: regenerated (no backup found)"
+                else
+                    log "WARNING: cannot restore SSH $key_type key — ssh-keygen not available"
+                fi
             fi
         fi
     done
-
-    # Restart sshd if keys were changed (only if sshd is running)
-    if systemctl is-active --quiet sshd 2>/dev/null; then
-        systemctl restart sshd || true
-    fi
-
     return 0
 }
 
@@ -448,17 +313,6 @@ ensure_persistent_ssh_keys || log "SSH key persistence skipped (data partition n
 
 # Always ensure boot scripts are available
 ensure_persistent_boot_scripts || log "Boot scripts persistence skipped (data partition not ready)"
-
-# Always attempt rootfs_b seeding when rootfs_b exists, BEFORE we honour the
-# partition-setup marker. The seed function is idempotent (no-op when
-# rootfs_b already has /sbin/init) and cheap to invoke. Running it here
-# closes the gap where a prior firstboot pass created and formatted
-# rootfs_b but failed to populate it (e.g. busybox cp lacking GNU flags) —
-# without this call, the partition marker would prevent any later attempt
-# to re-seed even after the underlying bug is fixed.
-if [ -b /dev/disk/by-partlabel/rootfs_b ]; then
-    seed_rootfs_b /dev/disk/by-partlabel/rootfs_b || true
-fi
 
 # Check if already configured
 if [ -f "$MARKER_FILE" ]; then
@@ -871,12 +725,6 @@ if [ -z "$ROOTFS_B_FSTYPE" ]; then
 else
     log "rootfs_b already formatted ($ROOTFS_B_FSTYPE), skipping"
 fi
-
-# Always attempt seeding when we manage the dynamic A/B layout. The
-# function (defined near the top of this script) is idempotent — no-op
-# if rootfs_b already has a usable init — and self-heals partial seeds
-# from interrupted prior runs.
-seed_rootfs_b "$ROOTFS_B_DEV"
 
 DATA_FSTYPE=$(lsblk -no FSTYPE "$DATA_DEV" 2>/dev/null || true)
 if [ -z "$DATA_FSTYPE" ]; then

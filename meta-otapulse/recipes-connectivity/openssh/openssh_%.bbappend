@@ -62,8 +62,10 @@ EOF
     cat > ${D}${sysconfdir}/systemd/system/sshd.service << 'EOF'
 [Unit]
 Description=OpenSSH Daemon
-# Wait for partition-setup so SSH host key symlinks into /data are valid.
-After=network.target sshdgenkeys.service otapulse-partition-setup.service
+# Host keys are plain files baked into the image (no /data symlinks), so sshd
+# has no dependency on otapulse-partition-setup. Gating on it only risked the
+# 900s TimeoutStartSec stall that left beagleplay SSH-dead after reboot (BUG-001).
+After=network.target sshdgenkeys.service
 
 [Service]
 EnvironmentFile=-/etc/default/ssh
