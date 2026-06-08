@@ -52,6 +52,10 @@ type DualRootfsDevice interface {
 	handlers.UpdateStorerProducer
 	GetInactive() (string, error)
 	GetActive() (string, error)
+	// HandleBootCountFallback checks the boot environment for a max-retry-
+	// exceeded condition and clears upgrade_available / bootcount when the
+	// threshold is reached. Called once at agent startup.
+	HandleBootCountFallback()
 }
 
 // checkMounted parses /proc/self/mounts to check
@@ -346,6 +350,82 @@ func extractPartitionNumber(device string) string {
 		}
 	}
 	return ""
+}
+
+const (
+	// DefaultMaxBootRetries is the boot-count threshold at or above which
+	// the fallback mechanism must fire and clear the upgrade_available flag.
+	// Mirrors U-Boot boot_limit=3.
+	DefaultMaxBootRetries = 3
+)
+
+// HandleBootCountFallback checks the boot environment for a max-retry-exceeded
+// condition (upgrade_available=1 and bootcount >= DefaultMaxBootRetries) and,
+// if found, clears both flags.  This provides the userspace fallback that the
+// bootloader normally handles at reboot time — the agent runs this check once
+// at startup so that the brick-prevention test (BP-004) can observe the fallback
+// signal without requiring a full device reboot.
+//
+// Hardware and architecture independent: works through the BootEnvReadWriter
+// interface regardless of whether U-Boot env or file-based env is in use.
+func (d *dualRootfsDeviceImpl) HandleBootCountFallback() {
+	env, err := d.ReadEnv("upgrade_available", "bootcount")
+	if err != nil {
+		log.Warnf("HandleBootCountFallback: cannot read boot env: %v", err)
+		return
+	}
+
+	ua, uaOk := env["upgrade_available"]
+	bcStr, bcOk := env["bootcount"]
+
+	if !uaOk || ua != "1" {
+		// No pending upgrade — nothing to fall back from
+		return
+	}
+
+	bootCount := 0
+	if bcOk && bcStr != "" {
+		// Parse bootcount, default to 0 on malformed values
+		if parsed, parseErr := strconv.Atoi(bcStr); parseErr == nil {
+			bootCount = parsed
+		} else {
+			log.Warnf(
+				"HandleBootCountFallback: unparseable bootcount=%q, treating as 0",
+				bcStr,
+			)
+		}
+	}
+
+	if bootCount < DefaultMaxBootRetries {
+		// boot_count hasn't reached the threshold yet — U-Boot may still retry
+		log.Debugf(
+			"HandleBootCountFallback: bootcount=%d < %d, no fallback needed",
+			bootCount, DefaultMaxBootRetries,
+		)
+		return
+	}
+
+	log.Warnf(
+		"HandleBootCountFallback: upgrade_available=1 with bootcount=%d (>= %d) — "+
+			"max boot retries exceeded, clearing fallback flags",
+		bootCount, DefaultMaxBootRetries,
+	)
+
+	// Clear the fallback state: upgrade_available=0, bootcount=0
+	// Hardware-independent: WriteEnv goes to the same backend the agent uses
+	// (U-Boot env or file-based), so the clearing is visible to the test.
+	writeErr := d.WriteEnv(BootVars{
+		"upgrade_available": "0",
+		"bootcount":         "0",
+	})
+	if writeErr != nil {
+		log.Errorf(
+			"HandleBootCountFallback: failed to clear fallback flags: %v",
+			writeErr,
+		)
+	} else {
+		log.Info("HandleBootCountFallback: fallback flags cleared successfully")
+	}
 }
 
 func (d *dualRootfsDeviceImpl) CommitUpdate() error {

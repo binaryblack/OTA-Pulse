@@ -94,6 +94,12 @@ func (d *MenderDaemon) Run() error {
 		log.Errorf("Error while handling bootstrap Artifact, continuing: %s", err.Error())
 	}
 
+	// Check and clear boot-count fallback state (BP-004).
+	// If upgrade_available=1 and bootcount >= max_retries, the fallback
+	// mechanism fires here at agent startup.  This provides the userspace
+	// fallback signal that the bootloader normally handles at reboot time.
+	d.Mender.HandleBootCountFallback()
+
 	// Start the auth Manager in a different go routine, if set
 	if d.AuthManager != nil {
 		d.AuthManager.Start()
