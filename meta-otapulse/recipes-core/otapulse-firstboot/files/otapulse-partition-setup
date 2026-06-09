@@ -230,11 +230,19 @@ setup_data_partition_fallback() {
     mkdir -p /data
     if mount --bind "$fallback_dir" /data; then
         log "Bind-mounted $fallback_dir → /data"
-        # Make it permanent across reboots via fstab
-        if ! grep -q "$fallback_dir /data" /etc/fstab 2>/dev/null; then
-            echo "$fallback_dir /data none bind 0 0" >> /etc/fstab
-            log "Added bind mount to /etc/fstab"
-        fi
+        # Remove any conflicting /data entries from fstab before adding the
+        # bind-mount.  The base-files template ships a PARTLABEL=data line
+        # that will never work on boards without a dedicated data partition
+        # (e.g. Tegra / Jetson with UDA label).  Leaving both lines in fstab
+        # causes systemd to only process the first (failing) entry, so the
+        # bind-mount never activates after reboot.
+        #
+        # Pattern: delete non-comment lines whose mount-point field is
+        # exactly "/data".  The bind-mount is then added as the sole /data
+        # entry, making the setting durable across reboots.
+        sed -i '/^[^#].* \/data /d' /etc/fstab
+        echo "$fallback_dir /data none bind 0 0" >> /etc/fstab
+        log "Updated /etc/fstab: removed stale /data entries, added bind mount"
         return 0
     fi
     return 1
@@ -588,6 +596,17 @@ fi
 # Get sector size (always works regardless of GPT state)
 SECTOR_SIZE=$(blockdev --getss "$BASE_DEV")
 
+# Detect partition-table type so we use the right tool: sgdisk for GPT, sfdisk
+# for MBR (DOS). Amlogic/ODROID-C4 boots from an MBR medium because the FIP at
+# sector 1 would corrupt a GPT (see odroid-c4.wks). On MBR there are no
+# partition names — identification is via filesystem LABELs aliased to
+# /dev/disk/by-partlabel by 99-otapulse-bsp-aliases.rules. Crucially, sfdisk
+# only rewrites the sector-0 MBR table and never the FIP, so growing the table
+# at firstboot is safe. Default to gpt when blkid can't tell (every other board).
+PTTYPE=$(blkid -o value -s PTTYPE "$BASE_DEV" 2>/dev/null || true)
+[ -z "$PTTYPE" ] && PTTYPE="gpt"
+log "Partition table type: $PTTYPE"
+
 # Get rootfs_a size (in sectors). sgdisk -i may return empty when the primary
 # GPT header CRC is invalid, so fall back to /sys/class/block which the kernel
 # always exports from the in-memory partition table.
@@ -677,15 +696,26 @@ if [ "$PARTITIONS_EXIST" -eq 0 ]; then
     log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
     log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
 
-    log "Creating rootfs_b and data partitions..."
-    sgdisk \
-           -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
-           -c "$ROOTFS_B_PART_NUM:rootfs_b" \
-           -t "$ROOTFS_B_PART_NUM:8300" \
-           -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
-           -c "$DATA_PART_NUM:data" \
-           -t "$DATA_PART_NUM:8300" \
-           "$BASE_DEV"
+    log "Creating rootfs_b and data partitions ($PTTYPE)..."
+    if [ "$PTTYPE" = "dos" ]; then
+        # MBR: append two Linux (type 83) primary partitions with sfdisk. This
+        # only touches the sector-0 partition table — never the FIP at sector 1.
+        # Partition names don't exist on MBR; the ext4 LABELs set when formatting
+        # below drive /dev/disk/by-partlabel via 99-otapulse-bsp-aliases.rules.
+        printf 'start=%s, size=%s, type=83\nstart=%s, type=83\n' \
+            "$ROOTFS_B_START" "$ROOTFS_A_SIZE" "$DATA_START" \
+            | sfdisk --append --force "$BASE_DEV"
+    else
+        # GPT: create named, typed partitions with sgdisk (unchanged path).
+        sgdisk \
+               -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
+               -c "$ROOTFS_B_PART_NUM:rootfs_b" \
+               -t "$ROOTFS_B_PART_NUM:8300" \
+               -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
+               -c "$DATA_PART_NUM:data" \
+               -t "$DATA_PART_NUM:8300" \
+               "$BASE_DEV"
+    fi
 
     # Inform kernel of partition changes
     log "Updating kernel partition table..."
@@ -734,20 +764,39 @@ else
     log "data already formatted ($DATA_FSTYPE), skipping"
 fi
 
-# Update rootfs_a partition label if needed
 ROOTFS_A_DEV="$ROOT_PART"
-CURRENT_LABEL=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
-if [ "$CURRENT_LABEL" != "rootfs_a" ]; then
-    log "Setting rootfs_a partition label..."
-    sgdisk -c "$ROOT_PART_NUM:rootfs_a" "$BASE_DEV"
-fi
 
-# Set boot partition label
-BOOT_PART_NUM=1
-BOOT_LABEL=$(sgdisk -i "$BOOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
-if [ "$BOOT_LABEL" != "boot" ]; then
-    log "Setting boot partition label..."
-    sgdisk -c "$BOOT_PART_NUM:boot" "$BASE_DEV"
+# GPT partition-NAME maintenance (rootfs_a / boot). Skipped on MBR, which has no
+# partition names — and where running sgdisk -c would convert the disk to GPT
+# and corrupt the FIP. On MBR, identification comes from the filesystem LABELs
+# (set by the WKS and by mkfs above) via 99-otapulse-bsp-aliases.rules.
+if [ "$PTTYPE" != "dos" ]; then
+    # Update rootfs_a partition label if needed
+    CURRENT_LABEL=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
+    if [ "$CURRENT_LABEL" != "rootfs_a" ]; then
+        log "Setting rootfs_a partition label..."
+        sgdisk -c "$ROOT_PART_NUM:rootfs_a" "$BASE_DEV"
+    fi
+
+    # Set the boot partition's GPT name — but ONLY on the real FAT boot
+    # partition, found dynamically. DO NOT hardcode partition 1: on RK3588
+    # (Radxa CM5) partition 1 is the raw "uboot" partition that the Rockchip
+    # Miniloader locates by its GPT name "uboot" to find U-Boot. Renaming it to
+    # "boot" makes SPL unable to find U-Boot -> the board fails to boot from eMMC
+    # ("spl: partition error / failed to boot from all boot devices"). The wic
+    # already names the FAT partition "boot", so this is usually a no-op; we only
+    # act if no "boot" GPT name exists yet, and never touch a "uboot" partition.
+    if [ ! -e /dev/disk/by-partlabel/boot ]; then
+        BOOT_DEV=$(lsblk -lnpo NAME,FSTYPE "$BASE_DEV" 2>/dev/null | awk '$2=="vfat"{print $1; exit}')
+        if [ -n "$BOOT_DEV" ]; then
+            BOOT_PART_NUM=$(echo "$BOOT_DEV" | grep -oE '[0-9]+$')
+            BOOT_LABEL=$(sgdisk -i "$BOOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
+            if [ "$BOOT_LABEL" != "boot" ] && [ "$BOOT_LABEL" != "uboot" ]; then
+                log "Setting boot partition label on $BOOT_DEV (p$BOOT_PART_NUM)..."
+                sgdisk -c "$BOOT_PART_NUM:boot" "$BASE_DEV"
+            fi
+        fi
+    fi
 fi
 
 # Final partition table update

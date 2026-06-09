@@ -91,7 +91,7 @@ switch_to_slot() {
 
     # If boot.scr reads mender_boot_part from a FAT boot partition,
     # we must also update the file there (boot.scr can only read from FAT).
-    update_fat_boot_part "$target_part"
+    update_fat_boot_part "$target_part" "$target_slot"
 
     # On NVIDIA Tegra, the actual slot switch is done by the BootChain BCT
     # via nvbootctrl. The file-based env above is only used by OTA agent
@@ -119,23 +119,35 @@ update_tegra_bootctrl() {
     fi
 }
 
-# Update mender_boot_part on the FAT boot partition (if present).
-# boot.scr on i.MX8, some Rockchip, etc. reads this file via U-Boot
-# 'load mmc' which can only access the FAT filesystem, not /data/ota/.
+# Update slot state on the FAT boot partition (if present).
+# boot.scr reads mender_boot_part (partition number) and mender_boot_slot_b
+# (marker file: present = slot B, absent = slot A) via U-Boot 'load mmc',
+# which can only access the FAT filesystem, not /data/ota/.
+#
+# The marker-file scheme avoids setexpr.b (byte memory dereference), which
+# is absent from the Rockchip vendor U-Boot 2017.09 used on RK3588 boards.
 update_fat_boot_part() {
     local target_part="$1"
+    local target_slot="$2"
     local fat_dev=""
 
-    # Find the FAT boot partition by label
-    for dev in /dev/mmcblk*p1 /dev/sd?1; do
-        [ -b "$dev" ] || continue
-        local fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
-        local label=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
-        if [ "$fstype" = "vfat" ] && [ "$label" = "boot" ]; then
-            fat_dev="$dev"
-            break
-        fi
-    done
+    # Prefer the udev by-label symlink -- works regardless of partition number
+    # (Radxa CM5 has FAT on p2, not p1, so a p1-only scan misses it).
+    if [ -e "/dev/disk/by-label/boot" ]; then
+        fat_dev=$(readlink -f /dev/disk/by-label/boot)
+    else
+        # Fallback: scan the first four partitions on eMMC and SATA/USB disks.
+        for dev in /dev/mmcblk*p[1-4] /dev/sd?[1-4]; do
+            [ -b "$dev" ] || continue
+            local _fstype _label
+            _fstype=$(blkid -s TYPE  -o value "$dev" 2>/dev/null)
+            _label=$(blkid  -s LABEL -o value "$dev" 2>/dev/null)
+            if [ "$_fstype" = "vfat" ] && [ "$_label" = "boot" ]; then
+                fat_dev="$dev"
+                break
+            fi
+        done
+    fi
 
     [ -n "$fat_dev" ] || return 0
 
@@ -143,11 +155,19 @@ update_fat_boot_part() {
     mkdir -p "$mnt"
 
     if mount "$fat_dev" "$mnt" 2>/dev/null; then
-        # Only update if boot.scr exists (confirms this FAT is the boot source)
+        # Only update if boot.scr exists (confirms this FAT is the boot source).
         if [ -f "$mnt/boot.scr" ]; then
             printf '%s' "$target_part" > "$mnt/mender_boot_part"
+            # Write/remove the slot-B marker file used by the boot script.
+            if [ "$target_slot" = "b" ]; then
+                printf 'b' > "$mnt/mender_boot_slot_b"
+                rm -f "$mnt/mender_boot_slot_a"
+            else
+                printf 'a' > "$mnt/mender_boot_slot_a"
+                rm -f "$mnt/mender_boot_slot_b"
+            fi
             sync
-            echo "Updated FAT boot partition ($fat_dev) mender_boot_part=$target_part"
+            echo "Updated FAT boot partition ($fat_dev): mender_boot_part=$target_part slot=$target_slot"
         fi
         umount "$mnt" 2>/dev/null
     fi
