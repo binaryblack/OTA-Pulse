@@ -129,6 +129,10 @@ func (f FakeDevice) GetInactive() (string, error) {
 	return "", errors.New("Not implemented")
 }
 
+func (f FakeDevice) HandleBootCountFallback() {
+	// no-op for tests
+}
+
 func (f FakeDevice) NewUpdateStorer(*string, int) (handlers.UpdateStorer, error) {
 	return &f, nil
 }

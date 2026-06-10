@@ -70,6 +70,10 @@ type Controller interface {
 
 	RestoreInstallersFromTypeList(payloadTypes []string) error
 
+	// HandleBootCountFallback checks and clears upgrade_available/bootcount
+	// when the max-retry threshold is exceeded. Called at agent startup.
+	HandleBootCountFallback()
+
 	StateRunner
 }
 
@@ -808,6 +812,14 @@ func (m *Mender) HandleBootstrapArtifact(s store.Store) error {
 
 	return nil
 
+}
+
+// HandleBootCountFallback delegates to the DualRootfsDevice to check and clear
+// upgrade_available / bootcount when the max-retry threshold is exceeded.
+func (m *Mender) HandleBootCountFallback() {
+	if m.DeviceManager != nil && m.DeviceManager.InstallerFactories.DualRootfs != nil {
+		m.DeviceManager.InstallerFactories.DualRootfs.HandleBootCountFallback()
+	}
 }
 
 func validateAndParseBootstrapArtifact(
