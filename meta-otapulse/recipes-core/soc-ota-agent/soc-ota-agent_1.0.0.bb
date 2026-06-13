@@ -282,7 +282,7 @@ do_create_runtime_spdx[noexec] = "1"
 # Track config variables in do_install hash so sstate is invalidated when they change.
 # Without this, BitBake cannot detect shell variable changes in do_install and will
 # reuse a stale cached package even when OTA_SERVER_URL or credentials change.
-do_install[vardeps] += "OTA_SERVER_URL OTAPULSE_TENANT_TOKEN SOC_OTA_SIGNATURE_VERIFICATION"
+do_install[vardeps] += "OTA_SERVER_URL OTAPULSE_TENANT_TOKEN SOC_OTA_SIGNATURE_VERIFICATION SOC_OTA_VERIFY_KEY_FILES SOC_OTA_SIGNING_KEYS_DIR"
 
 # Ensure SPDX tasks don't fail even when SPDX generation is enabled globally
 # This is needed for compatibility with builds that have INHERIT += "create-spdx"
