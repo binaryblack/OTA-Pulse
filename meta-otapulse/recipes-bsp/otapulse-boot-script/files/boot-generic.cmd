@@ -38,11 +38,10 @@ if load mmc ${mmcdev}:${mmcpart} ${scriptaddr} mender_boot_part; then
     echo "OTAPulse: Found mender_boot_part file"
     # Read the first character (ASCII: '2' = 0x32, '3' = 0x33)
     setexpr.b bootpart *${scriptaddr}
-    if test ${bootpart} = 32; then
+    if test ${bootpart} = 50; then
         setenv bootpart 2
         echo "OTAPulse: Boot slot A (rootfs_a, partition 2)"
-    fi
-    if test ${bootpart} = 33; then
+    elif test ${bootpart} = 51; then
         setenv bootpart 3
         echo "OTAPulse: Boot slot B (rootfs_b, partition 3)"
     fi
