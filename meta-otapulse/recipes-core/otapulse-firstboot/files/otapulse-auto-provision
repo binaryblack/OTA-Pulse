@@ -26,6 +26,20 @@ error() {
     exit 0
 }
 
+# Per-deployment admin-credential override (optional).
+# Sourced here so a MANUAL run of this script picks up the override too — the
+# systemd unit reads the same file via EnvironmentFile=, but a direct invocation
+# (e.g. during re-onboarding) would otherwise miss it.
+PROVISION_ENV="/etc/otapulse/provision.env"
+if [ -f "$PROVISION_ENV" ]; then
+    log "Loading provisioning overrides from $PROVISION_ENV"
+    set -a
+    # shellcheck disable=SC1090
+    # '|| log' keeps a malformed override file from aborting first-boot onboarding under 'set -e'.
+    . "$PROVISION_ENV" || log "WARNING: failed to source $PROVISION_ENV, ignoring overrides"
+    set +a
+fi
+
 # Check if already provisioned
 if [ -f "$PROVISION_MARKER" ]; then
     log "Device already auto-provisioned, skipping"
@@ -126,8 +140,8 @@ fi
 # Method 2: Try admin-based registration (for test environments)
 # This requires admin credentials to be configured
 if [ -z "$API_KEY" ]; then
-    ADMIN_EMAIL="${OTAPULSE_ADMIN_EMAIL:-krishna.slanger@gmail.com}"
-    ADMIN_PASSWORD="${OTAPULSE_ADMIN_PASSWORD:-test1234}"
+    ADMIN_EMAIL="${OTAPULSE_ADMIN_EMAIL:-admin@socmon.local}"
+    ADMIN_PASSWORD="${OTAPULSE_ADMIN_PASSWORD:-Admin@123}"
 
     log "Attempting admin-based registration..."
 
@@ -173,6 +187,29 @@ print(d.get('org_id', ''))" 2>/dev/null || true)
 
         if [ -n "$DEVICE_UUID" ] || echo "$REG_RESPONSE" | grep -q "already exists"; then
             log "Device registered or already exists"
+
+            # Resolve the device UUID when the device already existed: the POST
+            # above returns no id for an existing device, but the tunnel-credential
+            # mint below needs the UUID. A re-onboard (reflash keeps the machine-id)
+            # is the common case, so look it up by device_id via the search filter.
+            if [ -z "$DEVICE_UUID" ]; then
+                LOOKUP_RESPONSE=$(curl -s --max-time 30 \
+                    -G "${SERVER_URL}/api/devices" \
+                    --data-urlencode "organization_id=${ORG_ID}" \
+                    --data-urlencode "search=${DEVICE_ID}" \
+                    -H "Authorization: Bearer $JWT_TOKEN" 2>/dev/null || echo '{}')
+                DEVICE_UUID=$(echo "$LOOKUP_RESPONSE" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('items', d if isinstance(d, list) else [])
+device_id = '$DEVICE_ID'
+print(next((x.get('id', '') for x in items if x.get('device_id') == device_id), ''))" 2>/dev/null || true)
+                if [ -n "$DEVICE_UUID" ]; then
+                    log "Resolved existing device UUID: $DEVICE_UUID"
+                else
+                    log "Could not resolve device UUID for existing device"
+                fi
+            fi
 
             # Create API key (organization_id required as query parameter)
             KEY_NAME="auto-provision-${DEVICE_ID:0:8}-$(date +%s)"

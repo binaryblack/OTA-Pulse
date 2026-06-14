@@ -15,9 +15,13 @@ StandardOutput=journal+console
 StandardError=journal+console
 TimeoutStartSec=180
 
-# Environment for admin credentials (override in local.conf if needed)
-Environment="OTAPULSE_ADMIN_EMAIL=krishna.slanger@gmail.com"
-Environment="OTAPULSE_ADMIN_PASSWORD=test1234"
+# Admin credentials for first-boot registration.
+# Per-deployment override: write KEY=value lines to /etc/otapulse/provision.env
+# (OTAPULSE_ADMIN_EMAIL=, OTAPULSE_ADMIN_PASSWORD=). The leading '-' makes the
+# file optional. The script also sources this file directly so manual runs match.
+EnvironmentFile=-/etc/otapulse/provision.env
+Environment="OTAPULSE_ADMIN_EMAIL=admin@socmon.local"
+Environment="OTAPULSE_ADMIN_PASSWORD=Admin@123"
 
 [Install]
 WantedBy=multi-user.target
