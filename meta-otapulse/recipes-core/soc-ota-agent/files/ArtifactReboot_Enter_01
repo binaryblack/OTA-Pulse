@@ -1,82 +1,103 @@
 #!/bin/sh
 # OTAPulse State Script: ArtifactReboot_Enter
 #
-# Two responsibilities, checked in order:
+# Runs (from the incoming artifact) right after an OTA install, just before the
+# reboot. Two responsibilities, checked in order:
 #
-# 1. RPi4 tryboot: if /boot/tryboot.txt exists AND /boot/cmdline.txt exists
-#    (VideoCore direct-boot platform), schedule a tryboot reboot instead of
-#    the plain reboot the agent would otherwise issue.  The tryboot mechanism
-#    is self-reverting — if the new slot does not run otapulse-tryboot-commit
-#    to promote tryboot.txt → cmdline.txt, the next power cycle reverts to the
-#    original cmdline.txt automatically (no SD-card-pull required).
+# 1. RPi4 tryboot (VideoCore direct-boot): arm a SELF-REVERTING slot trial and
+#    issue `reboot "0 tryboot"` so the firmware boots the new slot for ONE boot.
+#    We mount the FAT boot partition EXPLICITLY (by label) and derive the target
+#    slot from /data/ota/mender_boot_part — we do NOT rely on /boot being mounted
+#    (it is not, in fstab) nor on the agent having pre-written the boot files. The
+#    files written are config.txt-FORMAT (the firmware reads tryboot.txt as
+#    config.txt):
+#      - cmdline.txt          left UNCHANGED  → old slot = rollback target
+#      - cmdline_tryboot.txt   current cmdline with root=<new slot>
+#      - tryboot.txt           config.txt + `cmdline=cmdline_tryboot.txt`
+#    On a good boot otapulse-tryboot-commit promotes cmdline_tryboot.txt -> cmdline.txt;
+#    on a bad boot / power-cut the one-shot is consumed and the next boot reverts.
 #
 # 2. FAT boot-env sync (iMX8MP and any boot.scr board): copy
 #    /data/ota/mender_boot_part to the FAT boot partition so U-Boot's boot.scr
 #    can read the target slot on the next boot.
 
-set -e
+BOOT_PART_FILE="/data/ota/mender_boot_part"
+
+# Locate the FAT "boot" partition by filesystem label (works regardless of /boot
+# being mounted; the firmware reads the same partition for the tryboot one-shot).
+find_fat_boot() {
+    for dev in /dev/disk/by-partlabel/boot /dev/mmcblk*p1 /dev/nvme*n1p1 /dev/sd?1; do
+        [ -b "$dev" ] || continue
+        FSTYPE=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+        LABEL=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+        if [ "$FSTYPE" = "vfat" ] && [ "$LABEL" = "boot" ]; then
+            echo "$dev"; return 0
+        fi
+    done
+    return 1
+}
+
+FAT_DEV=$(find_fat_boot)
+if [ -z "$FAT_DEV" ]; then
+    echo "ArtifactReboot_Enter: No FAT boot partition found, nothing to do"
+    exit 0
+fi
+
+MNT="/tmp/.otapulse_fat_$$"
+mkdir -p "$MNT"
+if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
+    echo "ArtifactReboot_Enter: Failed to mount $FAT_DEV"
+    rmdir "$MNT" 2>/dev/null || true
+    exit 0
+fi
+
+cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; }
 
 # ── 1. RPi4 tryboot ──────────────────────────────────────────────────────────
-# Detect: VideoCore direct-boot platform has cmdline.txt on the FAT /boot.
-# tryboot.txt is written by soc-ota-agent (file_bootenv.go writeTrybootSlot) during
-# OTA install — a config.txt-format file with `cmdline=cmdline_tryboot.txt` — so the
-# slot trial is self-reverting without any test-framework involvement.
-if [ -f "/boot/cmdline.txt" ] && [ -f "/boot/tryboot.txt" ]; then
-    echo "ArtifactReboot_Enter: tryboot.txt found — scheduling tryboot reboot"
-    # Issue the tryboot reboot after a short delay so the agent can log the
-    # state-machine transition before the system goes down.  Exit 0 immediately
-    # so the agent proceeds; the nohup reboot fires ~2s later.
-    # 'reboot "0 tryboot"' passes the argument to reboot(2)/LINUX_REBOOT_CMD_RESTART2;
-    # the RPi VideoCore firmware reads it and uses tryboot.txt for ONE boot only.
-    # If the new slot commits (otapulse-tryboot-commit.service runs), tryboot.txt
-    # is promoted to cmdline.txt.  Otherwise the next power cycle reverts to the
-    # original cmdline.txt (brick-proof).
-    nohup sh -c 'sleep 2; reboot "0 tryboot" 2>/dev/null || reboot' >/dev/null 2>&1 &
-    exit 0
+# VideoCore direct-boot platform = config.txt + cmdline.txt on the FAT boot part.
+if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FILE" ]; then
+    TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+    if [ -n "$TARGET_PART" ]; then
+        # Target rootfs device shares the FAT's disk. find_fat_boot may have
+        # returned a /dev/disk/by-* SYMLINK (e.g. .../by-partlabel/boot), so resolve
+        # it to the real node first (/dev/mmcblk0p1), strip the trailing partition
+        # number, and append the target partition number -> /dev/mmcblk0p<N>. This
+        # matches the existing cmdline.txt root= format (root=/dev/mmcblk0pN).
+        FAT_REAL=$(readlink -f "$FAT_DEV" 2>/dev/null || echo "$FAT_DEV")
+        DISK_PREFIX=$(printf '%s' "$FAT_REAL" | sed -E 's/[0-9]+$//')
+        TARGET_DEV="${DISK_PREFIX}${TARGET_PART}"
+
+        # cmdline_tryboot.txt = current cmdline with root= swapped to the new slot.
+        CUR=$(cat "$MNT/cmdline.txt")
+        NEW=$(printf '%s' "$CUR" | sed -E "s#root=[^ ]+#root=${TARGET_DEV}#")
+        printf '%s\n' "$NEW" > "$MNT/cmdline_tryboot.txt"
+
+        # tryboot.txt = config.txt (minus any existing cmdline= directive) plus our
+        # cmdline override. config.txt FORMAT — the firmware parses tryboot.txt as
+        # config.txt during the one-shot.
+        grep -vE '^[[:space:]]*cmdline=' "$MNT/config.txt" > "$MNT/tryboot.txt" 2>/dev/null || \
+            cp -f "$MNT/config.txt" "$MNT/tryboot.txt"
+        printf 'cmdline=cmdline_tryboot.txt\n' >> "$MNT/tryboot.txt"
+        sync
+        echo "ArtifactReboot_Enter: armed tryboot trial root=${TARGET_DEV} on ${FAT_DEV} (cmdline.txt untouched)"
+        cleanup
+        # Issue the tryboot one-shot. nohup+sleep so the agent can log the state
+        # transition first; `reboot "0 tryboot"` passes the arg to the VideoCore
+        # firmware, which uses tryboot.txt for ONE boot only.
+        nohup sh -c 'sleep 2; reboot "0 tryboot" 2>/dev/null || reboot' >/dev/null 2>&1 &
+        exit 0
+    fi
 fi
 
 # ── 2. FAT boot-env sync (boot.scr platforms: iMX8, BeaglePlay) ─────────────
-BOOT_PART_FILE="/data/ota/mender_boot_part"
-
-if [ ! -f "$BOOT_PART_FILE" ]; then
-    echo "ArtifactReboot_Enter: No $BOOT_PART_FILE, nothing to sync"
-    exit 0
-fi
-
-TARGET_PART=$(cat "$BOOT_PART_FILE")
-
-# Find the FAT boot partition by label
-FAT_DEV=""
-for dev in /dev/mmcblk*p1 /dev/sd?1; do
-    [ -b "$dev" ] || continue
-    FSTYPE=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
-    LABEL=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
-    if [ "$FSTYPE" = "vfat" ] && [ "$LABEL" = "boot" ]; then
-        FAT_DEV="$dev"
-        break
-    fi
-done
-
-if [ -z "$FAT_DEV" ]; then
-    echo "ArtifactReboot_Enter: No FAT boot partition found, skipping"
-    exit 0
-fi
-
-MNT="/tmp/.bootfat_reboot_$$"
-mkdir -p "$MNT"
-
-if mount "$FAT_DEV" "$MNT" 2>/dev/null; then
-    if [ -f "$MNT/boot.scr" ]; then
-        printf '%s' "$TARGET_PART" > "$MNT/mender_boot_part"
-        sync
-        echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART"
-    else
-        echo "ArtifactReboot_Enter: No boot.scr on $FAT_DEV, skipping"
-    fi
-    umount "$MNT" 2>/dev/null
+if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/boot.scr" ]; then
+    TARGET_PART=$(cat "$BOOT_PART_FILE")
+    printf '%s' "$TARGET_PART" > "$MNT/mender_boot_part"
+    sync
+    echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART"
 else
-    echo "ArtifactReboot_Enter: Failed to mount $FAT_DEV"
+    echo "ArtifactReboot_Enter: not an RPi tryboot platform and no boot.scr — nothing to sync"
 fi
 
-rmdir "$MNT" 2>/dev/null || true
+cleanup
 exit 0
