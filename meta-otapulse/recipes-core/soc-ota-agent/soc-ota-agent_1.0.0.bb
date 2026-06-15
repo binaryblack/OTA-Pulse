@@ -53,6 +53,7 @@ SRC_URI = " \
     file://soc-ota-agent.service \
     file://device_type \
     file://soc-ota-provision \
+    file://ArtifactReboot_Enter_01 \
 "
 
 # Signature verification configuration
@@ -209,6 +210,20 @@ do_install() {
 
     # Create scripts directory
     install -d ${D}${sysconfdir}/otapulse/scripts
+
+    # Stage Mender state scripts for embedding into the .mender artifact.
+    # mender-artifact.bbclass scans ${datadir}/otapulse/state-scripts and passes
+    # each via `mender-artifact write --script`. This is REQUIRED for Artifact*
+    # transition scripts (ArtifactReboot_Enter/_Leave, ArtifactCommit_*) to run on
+    # device during an OTA — Mender takes those scripts from the ARTIFACT, not the
+    # rootfs, so a rootfs-only install would never execute them.
+    # ArtifactReboot_Enter_01 self-gates: on RPi4 (VideoCore direct boot) it issues
+    # `reboot "0 tryboot"` when /boot/tryboot.txt exists; on U-Boot boards it syncs
+    # /data/ota/mender_boot_part to the FAT boot partition; otherwise it is a no-op.
+    # NOTE: externalsrc recipe — SRC_URI files are referenced from ${FILESDIR}
+    # (${THISDIR}/files), not ${WORKDIR}, exactly like otapulse.conf.in/soc-ota-provision above.
+    install -d ${D}${datadir}/otapulse/state-scripts
+    install -m 0755 ${FILESDIR}/ArtifactReboot_Enter_01 ${D}${datadir}/otapulse/state-scripts/ArtifactReboot_Enter_01
 
     # Install identity script (to new OTAPulse path with new naming)
     install -d ${D}${datadir}/otapulse/identity

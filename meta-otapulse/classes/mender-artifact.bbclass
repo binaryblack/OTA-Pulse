@@ -94,6 +94,19 @@ python do_generate_mender_artifact() {
            '--artifact-name', artifact_name,
            '--device-type', device_type]
 
+    # Embed Mender state scripts (ArtifactReboot_Enter/_Leave, ArtifactCommit_*, ...).
+    # Artifact* transition scripts are taken from the ARTIFACT at update time, not the
+    # rootfs, so they MUST be embedded here via --script or they never run on device.
+    # Providing recipes stage them in ${datadir}/otapulse/state-scripts within the rootfs.
+    image_rootfs = d.getVar('IMAGE_ROOTFS')
+    state_scripts_dir = os.path.join(image_rootfs or '', 'usr', 'share', 'otapulse', 'state-scripts')
+    if os.path.isdir(state_scripts_dir):
+        for sf in sorted(os.listdir(state_scripts_dir)):
+            sp = os.path.join(state_scripts_dir, sf)
+            if os.path.isfile(sp) and sf != 'version':
+                cmd.extend(['--script', sp])
+                bb.note("Embedding Mender state script: %s" % sf)
+
     # Add compression option
     if compression and compression != 'none':
         cmd.extend(['--compression', compression])
@@ -225,6 +238,15 @@ python do_generate_mender_artifact_unsigned() {
            '--output-path', mender_out,
            '--artifact-name', artifact_name,
            '--device-type', device_type]
+
+    # Embed Mender state scripts (see do_generate_mender_artifact for rationale).
+    image_rootfs = d.getVar('IMAGE_ROOTFS')
+    state_scripts_dir = os.path.join(image_rootfs or '', 'usr', 'share', 'otapulse', 'state-scripts')
+    if os.path.isdir(state_scripts_dir):
+        for sf in sorted(os.listdir(state_scripts_dir)):
+            sp = os.path.join(state_scripts_dir, sf)
+            if os.path.isfile(sp) and sf != 'version':
+                cmd.extend(['--script', sp])
 
     if compression and compression != 'none':
         cmd.extend(['--compression', compression])
