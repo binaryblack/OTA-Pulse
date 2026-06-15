@@ -18,8 +18,9 @@ set -e
 
 # ── 1. RPi4 tryboot ──────────────────────────────────────────────────────────
 # Detect: VideoCore direct-boot platform has cmdline.txt on the FAT /boot.
-# tryboot.txt is written by the test framework (e2e_ota.py) before triggering
-# the OTA, replacing the permanent cmdline.txt modification with a trial boot.
+# tryboot.txt is written by soc-ota-agent (file_bootenv.go writeTrybootSlot) during
+# OTA install — a config.txt-format file with `cmdline=cmdline_tryboot.txt` — so the
+# slot trial is self-reverting without any test-framework involvement.
 if [ -f "/boot/cmdline.txt" ] && [ -f "/boot/tryboot.txt" ]; then
     echo "ArtifactReboot_Enter: tryboot.txt found — scheduling tryboot reboot"
     # Issue the tryboot reboot after a short delay so the agent can log the
