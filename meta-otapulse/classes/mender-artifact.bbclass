@@ -19,6 +19,26 @@ MENDER_ARTIFACT_COMPRESSION ?= "gzip"
 SOC_OTA_SIGNING_KEY ?= ""
 SOC_OTA_SIGNING_CERT ?= ""
 
+# Stage Mender state scripts out of the rootfs into a stable WORKDIR location
+# WHILE the rootfs still exists (end of do_rootfs). do_generate_mender_artifact
+# runs much later (after do_image_complete) and builds the artifact from the
+# .ext4 file — by then ${IMAGE_ROOTFS} may be emptied/removed (rm_work, image
+# postprocessing), so reading state scripts directly from it there is unreliable.
+# Providing recipes install Artifact* transition scripts (ArtifactReboot_Enter/_Leave,
+# ArtifactCommit_*, ...) to ${datadir}/otapulse/state-scripts in the rootfs.
+MENDER_STATE_SCRIPTS_STAGE = "${WORKDIR}/otapulse-mender-scripts"
+
+otapulse_stage_mender_scripts() {
+    src="${IMAGE_ROOTFS}/usr/share/otapulse/state-scripts"
+    dst="${MENDER_STATE_SCRIPTS_STAGE}"
+    rm -rf "$dst"
+    if [ -d "$src" ]; then
+        install -d "$dst"
+        cp -a "$src"/. "$dst"/ 2>/dev/null || true
+    fi
+}
+ROOTFS_POSTPROCESS_COMMAND:append = " otapulse_stage_mender_scripts;"
+
 python do_generate_mender_artifact() {
     import os
     import subprocess
@@ -97,10 +117,10 @@ python do_generate_mender_artifact() {
     # Embed Mender state scripts (ArtifactReboot_Enter/_Leave, ArtifactCommit_*, ...).
     # Artifact* transition scripts are taken from the ARTIFACT at update time, not the
     # rootfs, so they MUST be embedded here via --script or they never run on device.
-    # Providing recipes stage them in ${datadir}/otapulse/state-scripts within the rootfs.
-    image_rootfs = d.getVar('IMAGE_ROOTFS')
-    state_scripts_dir = os.path.join(image_rootfs or '', 'usr', 'share', 'otapulse', 'state-scripts')
-    if os.path.isdir(state_scripts_dir):
+    # They are staged out of the rootfs at do_rootfs time (otapulse_stage_mender_scripts)
+    # because ${IMAGE_ROOTFS} is unreliable this late in the image build.
+    state_scripts_dir = d.getVar('MENDER_STATE_SCRIPTS_STAGE')
+    if state_scripts_dir and os.path.isdir(state_scripts_dir):
         for sf in sorted(os.listdir(state_scripts_dir)):
             sp = os.path.join(state_scripts_dir, sf)
             if os.path.isfile(sp) and sf != 'version':
@@ -240,9 +260,8 @@ python do_generate_mender_artifact_unsigned() {
            '--device-type', device_type]
 
     # Embed Mender state scripts (see do_generate_mender_artifact for rationale).
-    image_rootfs = d.getVar('IMAGE_ROOTFS')
-    state_scripts_dir = os.path.join(image_rootfs or '', 'usr', 'share', 'otapulse', 'state-scripts')
-    if os.path.isdir(state_scripts_dir):
+    state_scripts_dir = d.getVar('MENDER_STATE_SCRIPTS_STAGE')
+    if state_scripts_dir and os.path.isdir(state_scripts_dir):
         for sf in sorted(os.listdir(state_scripts_dir)):
             sp = os.path.join(state_scripts_dir, sf)
             if os.path.isfile(sp) and sf != 'version':
