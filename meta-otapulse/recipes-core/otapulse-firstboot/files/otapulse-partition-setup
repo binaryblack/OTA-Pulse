@@ -817,8 +817,19 @@ touch "$MARKER_FILE"
 
 log "Partition setup complete!"
 log "Final partition layout:"
-sgdisk -p "$BASE_DEV"
-lsblk -o NAME,SIZE,LABEL,PARTLABEL,FSTYPE "$BASE_DEV"
+# Diagnostic only — MUST be non-fatal (script runs under `set -e`). Use the tool
+# that matches the table: `sgdisk -p` on an MBR disk finds "invalid GPT + valid
+# MBR", converts to GPT in memory and prints alarming "may be garbage" warnings;
+# worse, on some gptfdisk versions it can exit non-zero, which under set -e would
+# abort the script HERE — after partitions exist but before /data/ota boot-env is
+# seeded, leaving a half-provisioned device. sfdisk -l lists MBR cleanly and is
+# already a dependency (used for --append above). All guarded with || true.
+if [ "$PTTYPE" = "dos" ]; then
+    sfdisk -l "$BASE_DEV" || true
+else
+    sgdisk -p "$BASE_DEV" || true
+fi
+lsblk -o NAME,SIZE,LABEL,PARTLABEL,FSTYPE "$BASE_DEV" || true
 
 # Mount data partition
 if [ ! -d "/data" ]; then
