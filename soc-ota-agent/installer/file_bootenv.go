@@ -306,119 +306,25 @@ func (f *FileBasedBootEnv) getDeviceForPartNum(partNum string) string {
 }
 
 // updateDirectBootSlot points the next boot at newRootDev on a direct-boot
-// (no U-Boot) platform. On Raspberry Pi (identified by config.txt on the FAT boot
-// partition) it arms a SELF-REVERTING VideoCore "tryboot" trial so a bad new slot
-// auto-rolls-back on the next power cycle. On any other direct-boot board it falls
-// back to the legacy permanent cmdline.txt rewrite.
+// (no U-Boot) platform by PERMANENTLY rewriting root= in cmdline.txt. This applies to
+// Raspberry Pi (VideoCore) and any other direct-boot board alike: the firmware always
+// reads root= from cmdline.txt, so the switch reliably takes.
+//
+// This replaces the earlier RPi-only VideoCore "tryboot" one-shot (reboot "0 tryboot"
+// + tryboot.txt-as-config). That self-reverting trial proved non-functional on this
+// image — systemd's reboot did not engage tryboot and the device booted back to the
+// original slot every time (BUG-074). The permanent rewrite trades firmware
+// auto-rollback for a switch that actually takes; hardware auto-rollback would need an
+// autoboot.txt tryboot_a_b two-boot-partition layout (a separate boot-integration
+// change). updateBootCmdline keeps a cmdline_prev.txt backup as a manual rollback
+// target, which otapulse-tryboot-commit clears on the first good boot of the new slot.
 func (f *FileBasedBootEnv) updateDirectBootSlot(bootDir, newRootDev string) {
-	if _, err := os.Stat(filepath.Join(bootDir, "config.txt")); err == nil {
-		// Raspberry Pi VideoCore: config.txt present → use the tryboot one-shot.
-		f.writeTrybootSlot(bootDir, newRootDev)
-		return
-	}
-	// Non-RPi direct-boot board: no tryboot firmware support, rewrite cmdline.txt.
 	f.updateBootCmdline(bootDir, newRootDev)
 }
 
-// writeTrybootSlot arms a self-reverting Raspberry Pi tryboot trial of newRootDev.
-//
-// Instead of permanently rewriting cmdline.txt (which gives NO auto-rollback if the
-// new slot is bad), we use the VideoCore "tryboot" one-shot. The three boot files:
-//
-//   - cmdline.txt         : left UNCHANGED → still root=<old slot> = the rollback target
-//   - cmdline_tryboot.txt : kernel cmdline with root=<new slot> = the trial slot
-//   - tryboot.txt         : a copy of config.txt PLUS `cmdline=cmdline_tryboot.txt`
-//
-// ArtifactReboot_Enter_01 then issues `reboot "0 tryboot"`, so the firmware reads
-// tryboot.txt AS config.txt for ONE boot only, which redirects the kernel cmdline to
-// cmdline_tryboot.txt → boots the new slot. On a good boot, otapulse-tryboot-commit
-// promotes cmdline_tryboot.txt → cmdline.txt (permanent) and removes the trial files.
-// On a bad boot / power-cut the one-shot is already consumed, so the next boot reads
-// the unchanged cmdline.txt → old slot. No SD-card pull required.
-//
-// IMPORTANT: tryboot.txt MUST be in config.txt format (key=value), NOT a raw kernel
-// cmdline — the firmware parses it as config.txt. Writing raw `root=...` here is the
-// historical bug that left the board booting the original slot every time.
-func (f *FileBasedBootEnv) writeTrybootSlot(bootDir, newRootDev string) {
-	cmdlinePath := filepath.Join(bootDir, "cmdline.txt")
-	configPath := filepath.Join(bootDir, "config.txt")
-	trybootPath := filepath.Join(bootDir, "tryboot.txt")
-	cmdlineTrybootPath := filepath.Join(bootDir, "cmdline_tryboot.txt")
-
-	// Base the trial cmdline on the CURRENT cmdline.txt (old slot); swap root= only.
-	data, err := os.ReadFile(cmdlinePath)
-	if err != nil {
-		log.Debugf("FileBasedBootEnv: No cmdline.txt at %s: %v — falling back to permanent rewrite", cmdlinePath, err)
-		f.updateBootCmdline(bootDir, newRootDev)
-		return
-	}
-	parts := strings.Fields(strings.TrimSpace(string(data)))
-	changed := false
-	for i, p := range parts {
-		if strings.HasPrefix(p, "root=") {
-			parts[i] = "root=" + newRootDev
-			changed = true
-		}
-	}
-	if !changed {
-		log.Debugf("FileBasedBootEnv: No root= in cmdline.txt at %s, skipping tryboot setup", cmdlinePath)
-		return
-	}
-	trialCmdline := strings.Join(parts, " ") + "\n"
-
-	// 1. cmdline_tryboot.txt → the new slot's kernel cmdline (cmdline.txt untouched).
-	if err := os.WriteFile(cmdlineTrybootPath, []byte(trialCmdline), 0644); err != nil {
-		log.Warnf("FileBasedBootEnv: Failed to write cmdline_tryboot.txt, falling back to permanent rewrite: %v", err)
-		f.updateBootCmdline(bootDir, newRootDev)
-		return
-	}
-
-	// 2. tryboot.txt = config.txt content + a `cmdline=cmdline_tryboot.txt` directive.
-	//    The firmware reads tryboot.txt as config.txt during the tryboot one-shot, so
-	//    this is config.txt FORMAT, not a raw kernel cmdline.
-	cfg, err := os.ReadFile(configPath)
-	if err != nil {
-		// config.txt missing despite the dispatcher check (race/unmounted): a minimal
-		// tryboot.txt carrying just the cmdline override still boots the new slot.
-		log.Debugf("FileBasedBootEnv: No config.txt at %s (%v); writing minimal tryboot.txt", configPath, err)
-		cfg = nil
-	}
-	tryboot := stripCmdlineDirective(string(cfg))
-	if tryboot != "" && !strings.HasSuffix(tryboot, "\n") {
-		tryboot += "\n"
-	}
-	tryboot += "cmdline=cmdline_tryboot.txt\n"
-	if err := os.WriteFile(trybootPath, []byte(tryboot), 0644); err != nil {
-		log.Warnf("FileBasedBootEnv: Failed to write tryboot.txt: %v", err)
-		// Remove the half-armed trial so we don't leave a dangling cmdline_tryboot.txt.
-		_ = os.Remove(cmdlineTrybootPath)
-		f.updateBootCmdline(bootDir, newRootDev)
-		return
-	}
-	syscall.Sync()
-	log.Infof("FileBasedBootEnv: Armed tryboot trial: cmdline_tryboot.txt root → %s, tryboot.txt written (cmdline.txt unchanged for rollback)", newRootDev)
-}
-
-// stripCmdlineDirective removes any existing `cmdline=` line from config.txt content
-// so the tryboot.txt we build deterministically points at cmdline_tryboot.txt.
-func stripCmdlineDirective(cfg string) string {
-	if cfg == "" {
-		return ""
-	}
-	lines := strings.Split(cfg, "\n")
-	out := make([]string, 0, len(lines))
-	for _, ln := range lines {
-		if strings.HasPrefix(strings.TrimSpace(ln), "cmdline=") {
-			continue
-		}
-		out = append(out, ln)
-	}
-	return strings.Join(out, "\n")
-}
-
 // updateBootCmdline permanently rewrites the root= parameter in /boot/cmdline.txt to
-// point to newRootDev. Used as the fallback for non-RPi direct-boot platforms (no
-// tryboot firmware) — RPi uses writeTrybootSlot for self-reverting trials instead.
+// point to newRootDev, after saving the current (old-slot) cmdline to cmdline_prev.txt
+// as a manual rollback target. Used for all direct-boot (no U-Boot) platforms.
 func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
 	cmdlinePath := filepath.Join(bootDir, "cmdline.txt")
 	data, err := os.ReadFile(cmdlinePath)
@@ -439,6 +345,16 @@ func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
 	if !changed {
 		log.Debugf("FileBasedBootEnv: No root= in cmdline.txt at %s, skipping", cmdlinePath)
 		return
+	}
+
+	// Preserve the original (old-slot) cmdline as a manual rollback target, ONCE — do
+	// not clobber a backup written earlier in this same OTA cycle (e.g. by an earlier
+	// SetUpdatedPartition call). otapulse-tryboot-commit removes it on a good boot.
+	prevPath := filepath.Join(bootDir, "cmdline_prev.txt")
+	if _, statErr := os.Stat(prevPath); os.IsNotExist(statErr) {
+		if werr := os.WriteFile(prevPath, data, 0644); werr != nil {
+			log.Warnf("FileBasedBootEnv: Failed to write cmdline_prev.txt rollback backup: %v", werr)
+		}
 	}
 
 	updated := strings.Join(parts, " ") + "\n"

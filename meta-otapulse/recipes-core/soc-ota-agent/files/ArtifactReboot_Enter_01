@@ -4,18 +4,22 @@
 # Runs (from the incoming artifact) right after an OTA install, just before the
 # reboot. Two responsibilities, checked in order:
 #
-# 1. RPi4 tryboot (VideoCore direct-boot): arm a SELF-REVERTING slot trial and
-#    issue `reboot "0 tryboot"` so the firmware boots the new slot for ONE boot.
-#    We mount the FAT boot partition EXPLICITLY (by label) and derive the target
-#    slot from /data/ota/mender_boot_part — we do NOT rely on /boot being mounted
-#    (it is not, in fstab) nor on the agent having pre-written the boot files. The
-#    files written are config.txt-FORMAT (the firmware reads tryboot.txt as
-#    config.txt):
-#      - cmdline.txt          left UNCHANGED  → old slot = rollback target
-#      - cmdline_tryboot.txt   current cmdline with root=<new slot>
-#      - tryboot.txt           config.txt + `cmdline=cmdline_tryboot.txt`
-#    On a good boot otapulse-tryboot-commit promotes cmdline_tryboot.txt -> cmdline.txt;
-#    on a bad boot / power-cut the one-shot is consumed and the next boot reverts.
+# 1. RPi4 direct-boot (VideoCore) A/B slot switch: PERMANENTLY point the next boot
+#    at the new slot by rewriting root= in cmdline.txt, then plain-reboot. We mount
+#    the FAT boot partition EXPLICITLY (by label) and derive the target slot from
+#    /data/ota/mender_boot_part — we do NOT rely on /boot being mounted (it is not,
+#    in fstab). The firmware ALWAYS reads root= from cmdline.txt, so this reliably
+#    switches the slot.
+#      - cmdline_prev.txt   saved copy of the original cmdline (old slot) = manual
+#                           rollback target; otapulse-tryboot-commit removes it on
+#                           the first good boot of the new slot.
+#      - cmdline.txt        rewritten root=<new slot>.
+#    NOTE: this replaces the earlier VideoCore "tryboot" one-shot (reboot "0 tryboot"
+#    + tryboot.txt-as-config). That mechanism proved non-functional on this image —
+#    systemd's reboot did not engage tryboot and the device booted back to the
+#    original slot every time (BUG-074). Permanent rewrite trades firmware
+#    auto-rollback for a switch that actually takes; hardware auto-rollback would
+#    require an autoboot.txt tryboot_a_b two-boot-partition layout (separate change).
 #
 # 2. FAT boot-env sync (iMX8MP and any boot.scr board): copy
 #    /data/ota/mender_boot_part to the FAT boot partition so U-Boot's boot.scr
@@ -53,11 +57,11 @@ fi
 
 cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; }
 
-# ── 1. RPi4 tryboot ──────────────────────────────────────────────────────────
+# ── 1. RPi4 direct-boot (VideoCore) permanent slot switch ───────────────────
 # VideoCore direct-boot platform = config.txt + cmdline.txt on the FAT boot part.
 if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FILE" ]; then
     TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
-    if [ -n "$TARGET_PART" ]; then
+    if [ -n "$TARGET_PART" ] && grep -q 'root=' "$MNT/cmdline.txt"; then
         # Target rootfs device shares the FAT's disk. find_fat_boot may have
         # returned a /dev/disk/by-* SYMLINK (e.g. .../by-partlabel/boot), so resolve
         # it to the real node first (/dev/mmcblk0p1), strip the trailing partition
@@ -67,24 +71,25 @@ if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FIL
         DISK_PREFIX=$(printf '%s' "$FAT_REAL" | sed -E 's/[0-9]+$//')
         TARGET_DEV="${DISK_PREFIX}${TARGET_PART}"
 
-        # cmdline_tryboot.txt = current cmdline with root= swapped to the new slot.
+        # Preserve the ORIGINAL cmdline (old slot) as a manual rollback target, ONCE
+        # (don't clobber a backup from an earlier write in this same OTA cycle).
+        [ -f "$MNT/cmdline_prev.txt" ] || cp -f "$MNT/cmdline.txt" "$MNT/cmdline_prev.txt"
+
+        # Permanently point root= at the new slot. The firmware always honours
+        # cmdline.txt, so the next boot lands on the new slot.
         CUR=$(cat "$MNT/cmdline.txt")
         NEW=$(printf '%s' "$CUR" | sed -E "s#root=[^ ]+#root=${TARGET_DEV}#")
-        printf '%s\n' "$NEW" > "$MNT/cmdline_tryboot.txt"
+        printf '%s\n' "$NEW" > "$MNT/cmdline.txt.new" && mv -f "$MNT/cmdline.txt.new" "$MNT/cmdline.txt"
 
-        # tryboot.txt = config.txt (minus any existing cmdline= directive) plus our
-        # cmdline override. config.txt FORMAT — the firmware parses tryboot.txt as
-        # config.txt during the one-shot.
-        grep -vE '^[[:space:]]*cmdline=' "$MNT/config.txt" > "$MNT/tryboot.txt" 2>/dev/null || \
-            cp -f "$MNT/config.txt" "$MNT/tryboot.txt"
-        printf 'cmdline=cmdline_tryboot.txt\n' >> "$MNT/tryboot.txt"
+        # Remove any stale files from the abandoned tryboot one-shot scheme so the
+        # firmware can't pick them up.
+        rm -f "$MNT/tryboot.txt" "$MNT/cmdline_tryboot.txt"
         sync
-        echo "ArtifactReboot_Enter: armed tryboot trial root=${TARGET_DEV} on ${FAT_DEV} (cmdline.txt untouched)"
+        echo "ArtifactReboot_Enter: switched cmdline.txt root=${TARGET_DEV} on ${FAT_DEV} (prev saved to cmdline_prev.txt)"
         cleanup
-        # Issue the tryboot one-shot. nohup+sleep so the agent can log the state
-        # transition first; `reboot "0 tryboot"` passes the arg to the VideoCore
-        # firmware, which uses tryboot.txt for ONE boot only.
-        nohup sh -c 'sleep 2; reboot "0 tryboot" 2>/dev/null || reboot' >/dev/null 2>&1 &
+        # Plain reboot — the firmware reads the rewritten cmdline.txt → new slot.
+        # nohup+sleep so the agent can log the state transition first.
+        nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &
         exit 0
     fi
 fi
