@@ -154,5 +154,57 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
     echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL}"
 fi
 
+# ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────
+# UEFI + systemd-boot Automatic Boot Assessment: loader/entries/ holds
+# slot-a+N.conf and/or slot-b+N.conf. The +N suffix is the remaining boot-count;
+# systemd-boot selects the entry with the highest positive count. To switch slots:
+# exhaust the current slot entry (rename to +0 — systemd-boot skips +0 entries)
+# and restore/create the target slot entry with +3 tries. otapulse-boot-confirm
+# resets the winning entry to +3 on every successful boot (no extra work here).
+if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
+    TARGET_PART=$(cat "$BOOT_PART_FILE")
+    PART_B=""
+    if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+        PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+    fi
+    if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+        TARGET_SLOT="b"; CURRENT_SLOT="a"
+        TARGET_LABEL="rootfs_b"; CURRENT_LABEL="rootfs_a"
+    else
+        TARGET_SLOT="a"; CURRENT_SLOT="b"
+        TARGET_LABEL="rootfs_a"; CURRENT_LABEL="rootfs_b"
+    fi
+    ENTRIES="$MNT/loader/entries"
+    # sort -r picks slot-a+3.conf before slot-a+0.conf (higher count first)
+    CURRENT_CONF=$(find "$ENTRIES" -maxdepth 1 -name "slot-${CURRENT_SLOT}+*.conf" 2>/dev/null \
+                   | sort -r | head -1)
+    TARGET_CONF=$(find "$ENTRIES" -maxdepth 1 -name "slot-${TARGET_SLOT}+*.conf" 2>/dev/null \
+                  | sort -r | head -1)
+    if [ -n "$CURRENT_CONF" ]; then
+        # Exhaust current slot: rename to +0 (systemd-boot will not select a +0 entry)
+        CURRENT_0="$ENTRIES/slot-${CURRENT_SLOT}+0.conf"
+        [ "$CURRENT_CONF" != "$CURRENT_0" ] && mv "$CURRENT_CONF" "$CURRENT_0"
+        TARGET_3="$ENTRIES/slot-${TARGET_SLOT}+3.conf"
+        if [ -n "$TARGET_CONF" ]; then
+            # Target entry already exists (e.g. +0 left from an earlier reverse OTA) — restore to +3
+            [ "$TARGET_CONF" != "$TARGET_3" ] && mv "$TARGET_CONF" "$TARGET_3"
+        else
+            # No target entry yet — generate from the current template, swapping root=PARTLABEL=
+            sed "s/root=PARTLABEL=${CURRENT_LABEL}/root=PARTLABEL=${TARGET_LABEL}/g" \
+                "$CURRENT_0" > "$TARGET_3"
+        fi
+        sync
+        # systemd-boot honours loader.conf's `default` pin OVER the ABA try-counts,
+        # so the entry rename alone is not enough — repoint default to the target slot.
+        if [ -f "$MNT/loader/loader.conf" ]; then
+            sed -i "s/^default .*/default slot-${TARGET_SLOT}*/" "$MNT/loader/loader.conf"
+            sync
+        fi
+        echo "ArtifactReboot_Enter: EFI ABA -> slot-${TARGET_SLOT}+3.conf (root=PARTLABEL=${TARGET_LABEL})"
+    else
+        echo "ArtifactReboot_Enter: EFI ABA: no slot-${CURRENT_SLOT}+*.conf in loader/entries — skip"
+    fi
+fi
+
 cleanup
 exit 0
