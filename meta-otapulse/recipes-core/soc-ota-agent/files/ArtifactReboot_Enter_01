@@ -94,14 +94,64 @@ if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FIL
     fi
 fi
 
-# ── 2. FAT boot-env sync (boot.scr platforms: iMX8, BeaglePlay) ─────────────
+# ── 2. FAT boot-env sync (boot.scr platforms: iMX8, BeaglePlay, Rockchip) ───
 if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/boot.scr" ]; then
     TARGET_PART=$(cat "$BOOT_PART_FILE")
     printf '%s' "$TARGET_PART" > "$MNT/mender_boot_part"
+
+    # Marker-file slot scheme: some boot.scr variants ignore the numeric
+    # mender_boot_part entirely and instead select Slot B *iff* the marker file
+    # 'mender_boot_slot_b' is PRESENT on this FAT (absent => Slot A). This scheme
+    # is used by vendor U-Boots that lack setexpr.b (Rockchip RK3588 2017.09 — see
+    # README-rockchip-rk3588.md). Writing only the numeric mender_boot_part there
+    # leaves the marker untouched, so the boot.scr always falls through to Slot A
+    # and the A/B switch never takes. Detect the scheme directly from the boot.scr
+    # (it embeds the literal string) so this is correct on marker boards and a
+    # NO-OP on numeric-scheme boards; derive the target slot from the rootfs_b
+    # PARTLABEL so there are no hardcoded partition numbers.
+    if grep -q mender_boot_slot_b "$MNT/boot.scr" 2>/dev/null; then
+        PART_B=""
+        if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+            PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+        fi
+        if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+            printf 'b' > "$MNT/mender_boot_slot_b"
+            rm -f "$MNT/mender_boot_slot_a"
+            echo "ArtifactReboot_Enter: marker scheme -> Slot B (mender_boot_slot_b created)"
+        else
+            rm -f "$MNT/mender_boot_slot_b"
+            printf 'a' > "$MNT/mender_boot_slot_a"
+            echo "ArtifactReboot_Enter: marker scheme -> Slot A (mender_boot_slot_b removed)"
+        fi
+    fi
     sync
     echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART"
 else
     echo "ArtifactReboot_Enter: not an RPi tryboot platform and no boot.scr — nothing to sync"
+fi
+
+# ── 3. extlinux.conf slot switch ─────────────────────────────────────────────
+# Some boards (e.g. Rockchip RK3588 via U-Boot distroboot) boot via extlinux
+# even when boot.scr is present — distroboot picks up extlinux/extlinux.conf
+# FIRST and never executes boot.scr. In that case the static root=PARTLABEL=...
+# in the extlinux.conf 'append' line determines the boot slot; neither the
+# numeric mender_boot_part NOR the mender_boot_slot_b marker is consulted.
+# Detect by presence of extlinux/extlinux.conf and update root=PARTLABEL= there.
+if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
+    TARGET_PART=$(cat "$BOOT_PART_FILE")
+    PART_B=""
+    if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+        PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+    fi
+    if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+        TARGET_LABEL="rootfs_b"
+    else
+        TARGET_LABEL="rootfs_a"
+    fi
+    sed -i "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${TARGET_LABEL}/g" \
+        "$MNT/extlinux/extlinux.conf"
+    sync
+    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL}"
 fi
 
 cleanup
