@@ -1,10 +1,13 @@
 #!/bin/sh
 # OTAPulse State Script: ArtifactReboot_Enter
 #
-# TWO-COPY FILE — keep sections 2/3/4 identical in both locations:
+# TWO-COPY FILE — keep ALL sections (1/2/3/4) identical in both locations:
 #   (1) otapulse_testagent/framework/state_scripts/ArtifactReboot_Enter_01  [test-repo / artifact re-bake]
 #   (2) multiboard_yocto/sources/OTA-Pulse/meta-otapulse/recipes-core/soc-ota-agent/files/ArtifactReboot_Enter_01  [Yocto image build]
-# Section 1 (RPi4 VideoCore boot) is intentionally diverged between the two copies.
+# Section 1 (RPi4 VideoCore boot) was previously diverged (test-repo kept the dead
+# tryboot one-shot); it is now ALIGNED (both permanent cmdline.txt rewrite) and IS
+# checked by the sync hook — leaving it diverged broke E2E-001 p3->p2 because the
+# test embeds THIS copy into its on-the-fly artifact (BUG-074).
 # After editing either copy run:  scripts/check-state-script-sync.sh
 # The pre-commit hook enforces this automatically.
 #
