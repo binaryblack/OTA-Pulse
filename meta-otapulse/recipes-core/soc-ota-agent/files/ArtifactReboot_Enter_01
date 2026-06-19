@@ -1,6 +1,13 @@
 #!/bin/sh
 # OTAPulse State Script: ArtifactReboot_Enter
 #
+# TWO-COPY FILE — keep sections 2/3/4 identical in both locations:
+#   (1) otapulse_testagent/framework/state_scripts/ArtifactReboot_Enter_01  [test-repo / artifact re-bake]
+#   (2) multiboard_yocto/sources/OTA-Pulse/meta-otapulse/recipes-core/soc-ota-agent/files/ArtifactReboot_Enter_01  [Yocto image build]
+# Section 1 (RPi4 VideoCore boot) is intentionally diverged between the two copies.
+# After editing either copy run:  scripts/check-state-script-sync.sh
+# The pre-commit hook enforces this automatically.
+#
 # Runs (from the incoming artifact) right after an OTA install, just before the
 # reboot. Two responsibilities, checked in order:
 #
