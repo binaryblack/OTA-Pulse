@@ -444,12 +444,42 @@ send_heartbeat() {
     local uptime_seconds
     uptime_seconds=$(awk '{print int($1)}' /proc/uptime)
 
+    # Report tunnel connectivity so the backend can keep tunnel_online=true after
+    # reboots without manual DB intervention (BUG-100).
+    #
+    # Signal: soc-ota-tunneld process active (daemon liveness, not frpc
+    # establishment). There is a window of seconds after daemon start where
+    # connected:true is emitted before frpc completes the Login handshake, but
+    # that false-positive window is bounded and negligible compared to the prior
+    # false-negative (tunnel_status permanently stuck at "unknown" after every
+    # reboot until manual SQL).
+    #
+    # tunnel_id routing: the backend session router uses tunnel_id when set and
+    # falls back to device_id otherwise.  device_id IS the frps proxy name
+    # (machine-id, enforced by the frps auth plugin).  We only populate tunnel_id
+    # when proxyName is explicitly set in tunnel.conf (i.e., after auto-provision),
+    # so we never persist an incorrect routing key.  When proxyName is empty,
+    # omitting tunnel_id lets the backend's own device_id fallback route correctly.
+    local tunnel_json=""
+    if systemctl is-active --quiet soc-ota-tunneld 2>/dev/null; then
+        local proxy_name="" tunnel_id_field=""
+        if [ -f "/etc/otapulse/tunnel.conf" ]; then
+            proxy_name=$(jq -r '.proxyName // ""' /etc/otapulse/tunnel.conf 2>/dev/null || true)
+        fi
+        if [ -n "${proxy_name}" ]; then
+            # Strip characters that would break inline JSON (quotes, backslashes).
+            proxy_name=$(printf '%s' "${proxy_name}" | tr -d '"\\')
+            tunnel_id_field=",\"tunnel_id\":\"${proxy_name}\""
+        fi
+        tunnel_json=",\"tunnel\":{\"connected\":true${tunnel_id_field}}"
+    fi
+
     # Send heartbeat (OTA updates are handled by soc-ota-agent)
     curl -s -X POST \
         -H "Content-Type: application/json" \
         -H "X-API-Key: ${API_KEY}" \
         -H "X-Device-ID: ${DEVICE_ID}" \
-        -d "{\"firmware_version\":\"${FIRMWARE_VERSION}\",\"uptime\":${uptime_seconds}}" \
+        -d "{\"firmware_version\":\"${FIRMWARE_VERSION}\",\"uptime\":${uptime_seconds}${tunnel_json}}" \
         "${SERVER_URL}/api/v1/heartbeat" \
         --connect-timeout 10 \
         --max-time 30 \
