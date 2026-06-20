@@ -184,98 +184,65 @@ seed_device_type() {
 # Solution: Store SSH host keys in /data (persistent) and symlink from /etc/ssh
 # =============================================================================
 ensure_persistent_ssh_keys() {
-    # ── Static-GPT BSP path (Tegra) ──────────────────────────────────────────
+    # ── Universal plain-file host-key scheme (BUG-001) ───────────────────────
     # SSH host keys are pre-generated at build time (by the openssh bbappend)
-    # and are IDENTICAL on both A and B rootfs slots — so there is no need to
-    # persist them to /data.  Symlinking /etc/ssh/ → /data/ssh/ creates a race:
-    # if /data is not yet mounted when sshd reads its keys, sshd exits and SSH
-    # is unreachable after a power cycle.
+    # and shipped as plain files in /etc/ssh on every slot.  We deliberately do
+    # NOT symlink them into /data on any BSP:
     #
-    # For Tegra: keep keys as plain files.  If a previous run already created
-    # symlinks, convert them back to regular files so sshd has no /data dep.
-    if is_static_gpt_bsp; then
-        local SSH_KEY_TYPES="rsa ecdsa ed25519"
-        for key_type in $SSH_KEY_TYPES; do
-            local system_key="/etc/ssh/ssh_host_${key_type}_key"
-            local system_pub="/etc/ssh/ssh_host_${key_type}_key.pub"
-
-            [ -L "$system_key" ] || continue  # already a regular file — nothing to do
-
-            if [ -f "$system_key" ]; then
-                # Valid symlink: copy the target content into a regular file
-                cp --remove-destination "$(readlink -f "$system_key")" "$system_key"
-                chmod 600 "$system_key"
-                log "SSH $key_type key: converted symlink → regular file"
-                if [ -L "$system_pub" ] && [ -f "$system_pub" ]; then
-                    cp --remove-destination "$(readlink -f "$system_pub")" "$system_pub"
-                    chmod 644 "$system_pub"
-                fi
-            else
-                # Broken symlink: /data not mounted yet.  Try the bind-mount
-                # source directory directly (always on the rootfs ext4).
-                local fallback="/var/local/otapulse-data/ssh/ssh_host_${key_type}_key"
-                if [ -f "$fallback" ]; then
-                    rm -f "$system_key" "$system_pub"
-                    cp "$fallback" "$system_key" && chmod 600 "$system_key"
-                    [ -f "${fallback}.pub" ] && cp "${fallback}.pub" "$system_pub" && chmod 644 "$system_pub"
-                    log "SSH $key_type key: restored from $fallback (broken symlink)"
-                else
-                    # Last resort: regenerate the key
-                    rm -f "$system_key" "$system_pub"
-                    if command -v ssh-keygen >/dev/null 2>&1; then
-                        ssh-keygen -q -t "$key_type" -f "$system_key" -N '' 2>/dev/null \
-                            && log "SSH $key_type key: regenerated (no backup found)"
-                    else
-                        log "WARNING: cannot restore SSH $key_type key — ssh-keygen not available"
-                    fi
-                fi
-            fi
-        done
-        return 0
-    fi
-
-    # ── Standard (dynamic-partition) path ────────────────────────────────────
-    PERSISTENT_SSH_DIR="/data/ssh"
-    SSH_KEY_TYPES="rsa ecdsa ed25519"
-
-    # Check if /data is mounted
-    if ! mountpoint -q /data 2>/dev/null; then
-        return 1
-    fi
-
-    # Create persistent SSH directory
-    mkdir -p "$PERSISTENT_SSH_DIR"
-    chmod 700 "$PERSISTENT_SSH_DIR"
-
+    #   A /data symlink makes sshd depend on /data being mounted.  sshd.service
+    #   was ordered After=otapulse-partition-setup.service, and this oneshot has
+    #   TimeoutStartSec=900 — so on a board where partition-setup stalls (e.g.
+    #   beagleplay's GPT-repair path), sshd is held off for the FULL 900s and
+    #   the board is SSH-dead for >15 min after a soft reboot until a hard power
+    #   cycle (BUG-001).  Keeping host keys as plain files removes the /data
+    #   dependency entirely, so sshd can start immediately from the baked-in
+    #   keys regardless of partition-setup timing.
+    #
+    # Previously only static-GPT (Tegra) BSPs took the plain-file path; that
+    # carve-out left dynamic-partition boards (beagleplay et al.) symlinking
+    # into /data and exposed to the stall.  This is now applied to ALL BSPs.
+    # Test clients use StrictHostKeyChecking=no, so distinct per-slot keys after
+    # an OTA slot switch do not break reconnection.
+    #
+    # If a previous image revision left /data symlinks behind, convert them
+    # back to regular files so sshd has no /data dependency.
+    local SSH_KEY_TYPES="rsa ecdsa ed25519"
     for key_type in $SSH_KEY_TYPES; do
-        PERSISTENT_KEY="$PERSISTENT_SSH_DIR/ssh_host_${key_type}_key"
-        SYSTEM_KEY="/etc/ssh/ssh_host_${key_type}_key"
+        local system_key="/etc/ssh/ssh_host_${key_type}_key"
+        local system_pub="/etc/ssh/ssh_host_${key_type}_key.pub"
 
-        if [ ! -f "$PERSISTENT_KEY" ]; then
-            # First boot - copy existing key or generate new one
-            if [ -f "$SYSTEM_KEY" ] && [ ! -L "$SYSTEM_KEY" ]; then
-                cp "$SYSTEM_KEY" "$PERSISTENT_KEY"
-                cp "${SYSTEM_KEY}.pub" "${PERSISTENT_KEY}.pub" 2>/dev/null || true
-                log "Saved SSH $key_type key to persistent storage"
+        [ -L "$system_key" ] || continue  # already a regular file — nothing to do
+
+        if [ -f "$system_key" ]; then
+            # Valid symlink: copy the target content into a regular file
+            cp --remove-destination "$(readlink -f "$system_key")" "$system_key"
+            chmod 600 "$system_key"
+            log "SSH $key_type key: converted symlink → regular file"
+            if [ -L "$system_pub" ] && [ -f "$system_pub" ]; then
+                cp --remove-destination "$(readlink -f "$system_pub")" "$system_pub"
+                chmod 644 "$system_pub"
             fi
-        fi
-
-        # Symlink system key to persistent key
-        if [ -f "$PERSISTENT_KEY" ]; then
-            if [ ! -L "$SYSTEM_KEY" ]; then
-                rm -f "$SYSTEM_KEY" "${SYSTEM_KEY}.pub"
-                ln -sf "$PERSISTENT_KEY" "$SYSTEM_KEY"
-                ln -sf "${PERSISTENT_KEY}.pub" "${SYSTEM_KEY}.pub" 2>/dev/null || true
-                log "Created symlink: $SYSTEM_KEY -> $PERSISTENT_KEY"
+        else
+            # Broken symlink: /data not mounted yet.  Try the bind-mount
+            # source directory directly (always on the rootfs ext4).
+            local fallback="/var/local/otapulse-data/ssh/ssh_host_${key_type}_key"
+            if [ -f "$fallback" ]; then
+                rm -f "$system_key" "$system_pub"
+                cp "$fallback" "$system_key" && chmod 600 "$system_key"
+                [ -f "${fallback}.pub" ] && cp "${fallback}.pub" "$system_pub" && chmod 644 "$system_pub"
+                log "SSH $key_type key: restored from $fallback (broken symlink)"
+            else
+                # Last resort: regenerate the key
+                rm -f "$system_key" "$system_pub"
+                if command -v ssh-keygen >/dev/null 2>&1; then
+                    ssh-keygen -q -t "$key_type" -f "$system_key" -N '' 2>/dev/null \
+                        && log "SSH $key_type key: regenerated (no backup found)"
+                else
+                    log "WARNING: cannot restore SSH $key_type key — ssh-keygen not available"
+                fi
             fi
         fi
     done
-
-    # Restart sshd if keys were changed (only if sshd is running)
-    if systemctl is-active --quiet sshd 2>/dev/null; then
-        systemctl restart sshd || true
-    fi
-
     return 0
 }
 

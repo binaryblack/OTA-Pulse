@@ -1,0 +1,128 @@
+#!/bin/sh
+# soc-readlog — validated log reader for the Standard shell tier.
+#
+# Managed by OTA — do not edit; changes are overwritten on update.
+#
+# The 'support' user runs this via sudo (covered by the SOC_DIAG sudoers
+# alias: /usr/libexec/soc-diag/*).  It replaces a raw 'sudo cat /var/log/*'
+# entry, which was exploitable: sudoers matches '*' in a command argument
+# with fnmatch() WITHOUT FNM_PATHNAME, so 'sudo cat /var/log/../../etc/shadow'
+# would have matched '/var/log/*' and read arbitrary root-owned files.
+#
+# This wrapper accepts exactly ONE argument: a basename (no path) of a file
+# under /var/log/.  It rejects any name containing '/', '..', or control
+# characters, canonicalises the resulting path, and re-verifies that the
+# resolved file is strictly under /var/log/ and is a regular file before
+# reading it.  No traversal, no symlink escape, no shell injection.
+
+set -u
+
+PROG="soc-readlog"
+LOGDIR="/var/log"
+
+err() {
+    printf '%s: %s\n' "$PROG" "$1" >&2
+}
+
+usage() {
+    err "usage: $PROG <logfile-name>   (basename only, under $LOGDIR)"
+    exit 2
+}
+
+# --- Argument count: exactly one ------------------------------------------
+if [ "$#" -ne 1 ]; then
+    usage
+fi
+
+name="$1"
+
+# --- Reject empty -----------------------------------------------------------
+if [ -z "$name" ]; then
+    err "empty log name"
+    exit 2
+fi
+
+# --- Reject any control character or newline in the name --------------------
+# Strip all printable, non-slash, "safe" chars; if anything remains the name
+# contained a disallowed (e.g. control) character.  Uses a POSIX character
+# class so it is locale-robust.  Quoting prevents glob/word-splitting.
+case "$name" in
+    *[[:cntrl:]]*)
+        err "log name contains control characters: rejected"
+        exit 2
+        ;;
+esac
+
+# --- Reject path separators and traversal ----------------------------------
+# Basename-only: no '/' anywhere, and reject '.' / '..' explicitly.
+case "$name" in
+    */*)
+        err "log name must not contain '/': rejected"
+        exit 2
+        ;;
+    *..*)
+        err "log name must not contain '..': rejected"
+        exit 2
+        ;;
+    .|..)
+        err "log name must not be '.' or '..': rejected"
+        exit 2
+        ;;
+    -*)
+        # A leading '-' could be interpreted as an option; the 'cat --' below
+        # already neutralises this, but reject early for clarity.
+        err "log name must not start with '-': rejected"
+        exit 2
+        ;;
+esac
+
+target="$LOGDIR/$name"
+
+# --- Must be a regular file (not a dir, device, fifo, socket) ---------------
+if [ ! -f "$target" ]; then
+    err "no such regular file: $LOGDIR/$name"
+    exit 1
+fi
+
+# --- Canonical-path re-check: resolve symlinks and confirm containment ------
+# Defends against a symlink inside /var/log pointing outside it.  Prefer
+# realpath; fall back to readlink -f; if neither exists, fall back to a
+# physical 'cd' check.  The resolved path MUST be exactly "$LOGDIR/<base>"
+# where <base> contains no '/'.
+canon=""
+if command -v realpath >/dev/null 2>&1; then
+    canon=$(realpath -- "$target" 2>/dev/null) || canon=""
+elif command -v readlink >/dev/null 2>&1; then
+    canon=$(readlink -f -- "$target" 2>/dev/null) || canon=""
+fi
+
+if [ -n "$canon" ]; then
+    # Resolved path must sit directly inside the canonical /var/log.
+    canon_logdir=""
+    if command -v realpath >/dev/null 2>&1; then
+        canon_logdir=$(realpath -- "$LOGDIR" 2>/dev/null) || canon_logdir="$LOGDIR"
+    else
+        canon_logdir=$(readlink -f -- "$LOGDIR" 2>/dev/null) || canon_logdir="$LOGDIR"
+    fi
+    case "$canon" in
+        "$canon_logdir"/*)
+            # Resolved path is under /var/log; also ensure it is still a
+            # single level down (no nested traversal via resolved symlink).
+            rest=${canon#"$canon_logdir"/}
+            case "$rest" in
+                */*)
+                    err "resolved path escapes top-level $LOGDIR: rejected"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        *)
+            err "resolved path is outside $LOGDIR: rejected"
+            exit 1
+            ;;
+    esac
+    target="$canon"
+fi
+
+# --- Read it.  '--' ends option parsing; "$target" is a vetted absolute path.
+exec cat -- "$target"

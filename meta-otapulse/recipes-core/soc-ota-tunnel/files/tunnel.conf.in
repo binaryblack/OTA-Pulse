@@ -1,0 +1,10 @@
+{
+    "serverAddr": "@SERVER_ADDR@",
+    "serverPort": @SERVER_PORT@,
+    "localSshPort": 22,
+    "proxyName": "",
+    "frpcPath": "/usr/bin/frpc",
+    "credentialPath": "/data/frp/credential",
+    "renderedConfigPath": "/data/frp/frpc.toml",
+    "remotePortHint": 0
+}

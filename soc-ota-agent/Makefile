@@ -95,6 +95,14 @@ build: $(BINARY_NAME)
 $(BINARY_NAME): $(PKGFILES)
 	$(GO) build $(GO_BUILD_FLAGS) $(GO_LDFLAGS) $(BUILDV) $(BUILDTAGS) -o $(BINARY_NAME)
 
+# soc-ota-tunneld — statically linked, CGO-free reverse-SSH tunnel supervisor.
+# Kept separate from the main CGO agent so it has minimal RSS and independent
+# lifecycle.  CGO_ENABLED=0 is enforced here regardless of the top-level
+# CGO_ENABLED setting; -s -w strips symbols.
+TUNNELD_BINARY_NAME ?= soc-ota-tunneld
+build-tunneld:
+	CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags "-s -w" -o $(TUNNELD_BINARY_NAME) ./cmd/soc-ota-tunneld
+
 # Legacy target for backward compatibility
 mender: $(BINARY_NAME)
 	@echo "Building legacy 'mender' target (now builds '$(BINARY_NAME)')"
@@ -222,7 +230,7 @@ uninstall-examples:
 clean:
 	$(GO) clean
 	rm -f coverage.txt
-	rm -f $(BINARY_NAME) $(LEGACY_BINARY_NAME)
+	rm -f $(BINARY_NAME) $(LEGACY_BINARY_NAME) $(TUNNELD_BINARY_NAME)
 
 get-tools:
 	set -e ; for t in $(TOOLS); do \
@@ -294,6 +302,7 @@ instrument-binary:
 	gobinarycoverage github.com/mendersoftware/mender
 
 .PHONY: build
+.PHONY: build-tunneld
 .PHONY: clean
 .PHONY: get-tools
 .PHONY: test

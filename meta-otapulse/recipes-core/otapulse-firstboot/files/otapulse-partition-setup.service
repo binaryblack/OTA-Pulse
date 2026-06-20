@@ -5,11 +5,15 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 # NOTE: No ConditionPathExists — the script itself checks the marker file and
 # exits early if partitions are already configured. The service MUST run on
 # every boot so that ensure_persistent_ssh_keys() and ensure_persistent_machine_id()
-# execute, which maintain symlinks into /data for SSH host keys and machine-id.
+# execute, which normalize SSH host keys to plain files and maintain machine-id.
+# NOTE: sshd.service is deliberately NOT in Before= — host keys are plain files
+# in the image (no /data dependency), so gating sshd on this oneshot only risks
+# the 900s TimeoutStartSec stall that made beagleplay SSH-dead after reboot
+# (BUG-001).
 DefaultDependencies=no
 After=local-fs.target systemd-udev-settle.service
 Wants=systemd-udev-settle.service
-Before=soc-ota-agent.service memfaultd.service sshd.service
+Before=soc-ota-agent.service memfaultd.service
 
 [Service]
 Type=oneshot

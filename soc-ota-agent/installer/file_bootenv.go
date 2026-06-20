@@ -280,9 +280,14 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
 	//
 	// Only do this when U-Boot env tools are absent — on U-Boot platforms the
 	// bootloader manages root= itself and cmdline.txt changes are unnecessary.
-	_, errPrintenv := exec.LookPath("fw_printenv")
-	_, errSetenv := exec.LookPath("fw_setenv")
-	isDirectBoot := errPrintenv != nil && errSetenv != nil
+	// A board is "direct boot" (no U-Boot) when it has no WORKING U-Boot
+	// environment. Detecting this by binary presence (exec.LookPath) is wrong:
+	// the image ships u-boot-fw-utils (RRECOMMENDS) even on boards without a
+	// U-Boot env — e.g. RPi4/VideoCore — where fw_printenv is present but
+	// non-functional. That false-negative left isDirectBoot=false and SKIPPED
+	// the cmdline.txt rewrite below, so the A/B slot switch never took on RPi4
+	// (BUG-074). Probe whether fw_printenv can actually read an environment.
+	isDirectBoot := !uBootEnvWorks()
 	if isDirectBoot {
 		bootDir := filepath.Dir(bootFile)
 		newRootDev := f.getDeviceForPartNum(partNum)
@@ -292,6 +297,26 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
 			log.Debugf("FileBasedBootEnv: Could not determine root device for partition %s, skipping cmdline.txt update", partNum)
 		}
 	}
+}
+
+// uBootEnvWorks reports whether a WORKING U-Boot environment is present: the
+// fw_printenv binary exists AND can actually read the environment. Boards may
+// ship u-boot-fw-utils without having a real U-Boot env (RPi4/VideoCore direct
+// boot), where fw_printenv exits non-zero ("Cannot read environment ..."). Those
+// must be treated as direct boot so cmdline.txt is rewritten for the A/B switch
+// (BUG-074). Keying off binary presence alone misclassified them as U-Boot.
+func uBootEnvWorks() bool {
+	path, err := exec.LookPath("fw_printenv")
+	if err != nil {
+		return false
+	}
+	// fw_printenv with no args dumps the whole environment; a board with no
+	// U-Boot env returns a non-zero exit. Output is discarded — we only need
+	// the exit status. Read-only, so safe to run during an OTA install.
+	if err := exec.Command(path).Run(); err != nil {
+		return false
+	}
+	return true
 }
 
 // getDeviceForPartNum returns the full block device path for the given partition number.

@@ -5,7 +5,10 @@
 
 set -e
 
-SLOT="$1"  # A or B
+# BUG-074 (Defect 1): The Go agent passes "a" or "b" (lowercase); normalise here
+# so the rest of the script's comparisons against "A"/"B" all work correctly.
+# Using printf+tr avoids any dependency on bash-only ${var^^} (this is /bin/sh).
+SLOT=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')  # A or B
 BOOT_CONFIG_DIR="/boot"
 EXTLINUX_CONF="/boot/extlinux/extlinux.conf"
 GRUB_CFG="/boot/grub/grub.cfg"

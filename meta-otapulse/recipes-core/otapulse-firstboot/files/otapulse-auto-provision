@@ -26,6 +26,20 @@ error() {
     exit 0
 }
 
+# Per-deployment admin-credential override (optional).
+# Sourced here so a MANUAL run of this script picks up the override too — the
+# systemd unit reads the same file via EnvironmentFile=, but a direct invocation
+# (e.g. during re-onboarding) would otherwise miss it.
+PROVISION_ENV="/etc/otapulse/provision.env"
+if [ -f "$PROVISION_ENV" ]; then
+    log "Loading provisioning overrides from $PROVISION_ENV"
+    set -a
+    # shellcheck disable=SC1090
+    # '|| log' keeps a malformed override file from aborting first-boot onboarding under 'set -e'.
+    . "$PROVISION_ENV" || log "WARNING: failed to source $PROVISION_ENV, ignoring overrides"
+    set +a
+fi
+
 # Check if already provisioned
 if [ -f "$PROVISION_MARKER" ]; then
     log "Device already auto-provisioned, skipping"
@@ -126,8 +140,8 @@ fi
 # Method 2: Try admin-based registration (for test environments)
 # This requires admin credentials to be configured
 if [ -z "$API_KEY" ]; then
-    ADMIN_EMAIL="${OTAPULSE_ADMIN_EMAIL:-krishna.slanger@gmail.com}"
-    ADMIN_PASSWORD="${OTAPULSE_ADMIN_PASSWORD:-test1234}"
+    ADMIN_EMAIL="${OTAPULSE_ADMIN_EMAIL:-admin@socmon.local}"
+    ADMIN_PASSWORD="${OTAPULSE_ADMIN_PASSWORD:-Admin@123}"
 
     log "Attempting admin-based registration..."
 
@@ -173,6 +187,29 @@ print(d.get('org_id', ''))" 2>/dev/null || true)
 
         if [ -n "$DEVICE_UUID" ] || echo "$REG_RESPONSE" | grep -q "already exists"; then
             log "Device registered or already exists"
+
+            # Resolve the device UUID when the device already existed: the POST
+            # above returns no id for an existing device, but the tunnel-credential
+            # mint below needs the UUID. A re-onboard (reflash keeps the machine-id)
+            # is the common case, so look it up by device_id via the search filter.
+            if [ -z "$DEVICE_UUID" ]; then
+                LOOKUP_RESPONSE=$(curl -s --max-time 30 \
+                    -G "${SERVER_URL}/api/devices" \
+                    --data-urlencode "organization_id=${ORG_ID}" \
+                    --data-urlencode "search=${DEVICE_ID}" \
+                    -H "Authorization: Bearer $JWT_TOKEN" 2>/dev/null || echo '{}')
+                DEVICE_UUID=$(echo "$LOOKUP_RESPONSE" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('items', d if isinstance(d, list) else [])
+device_id = '$DEVICE_ID'
+print(next((x.get('id', '') for x in items if x.get('device_id') == device_id), ''))" 2>/dev/null || true)
+                if [ -n "$DEVICE_UUID" ]; then
+                    log "Resolved existing device UUID: $DEVICE_UUID"
+                else
+                    log "Could not resolve device UUID for existing device"
+                fi
+            fi
 
             # Create API key (organization_id required as query parameter)
             KEY_NAME="auto-provision-${DEVICE_ID:0:8}-$(date +%s)"
@@ -225,6 +262,73 @@ EOF
         log "Restarting soc-ota-agent..."
         systemctl restart soc-ota-agent || true
     fi
+
+    # --- Tunnel credential provisioning (TODO-010 / TASK-S29-005) ---
+    TUNNEL_MARKER="/data/otapulse/.tunnel-provisioned"
+    TUNNEL_CRED="/data/frp/credential"
+    TUNNEL_CONF="/etc/otapulse/tunnel.conf"
+
+    # Skip if already provisioned — reboots must not re-mint
+    if [ -f "$TUNNEL_MARKER" ]; then
+        log "Tunnel credential already provisioned, skipping"
+    else
+        # JWT_TOKEN, ORG_ID, DEVICE_UUID are in scope from the registration block above.
+        # If any are missing (registration path was skipped) log and skip silently.
+        if [ -z "$JWT_TOKEN" ] || [ -z "$ORG_ID" ] || [ -z "$DEVICE_UUID" ]; then
+            log "Tunnel provisioning skipped — missing JWT_TOKEN/ORG_ID/DEVICE_UUID"
+        else
+            log "Minting tunnel credential for device $DEVICE_UUID..."
+            ROTATE_RESP=$(curl -s --max-time 30 \
+                -X POST "${SERVER_URL}/api/devices/${DEVICE_UUID}/tunnel-credential/rotate?organization_id=${ORG_ID}" \
+                -H "Authorization: Bearer $JWT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{}" 2>/dev/null || echo '{}')
+            SOTC=$(echo "$ROTATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tunnel_token',''))" 2>/dev/null || true)
+
+            if [ -z "$SOTC" ]; then
+                log "Tunnel provisioning failed — no tunnel_token in response: $ROTATE_RESP"
+                # Do not exit non-zero; systemd must not crash-loop the unit
+            elif ! echo "$SOTC" | grep -q '^sotc_'; then
+                log "Tunnel provisioning failed — tunnel_token has wrong prefix"
+            else
+                # Write /data/frp/credential mode 0600, no trailing newline
+                mkdir -p "$(dirname "$TUNNEL_CRED")"
+                printf '%s' "$SOTC" > "$TUNNEL_CRED"
+                chmod 0600 "$TUNNEL_CRED"
+                chown root:root "$TUNNEL_CRED" 2>/dev/null || true
+                log "Wrote $TUNNEL_CRED (mode 0600)"
+
+                # Patch proxyName in /etc/otapulse/tunnel.conf via JSON round-trip.
+                # proxyName must be the machine-id string (DEVICE_ID) — frpc sends it
+                # as content.user and the backend cross-checks against devices.device_id.
+                if [ -f "$TUNNEL_CONF" ]; then
+                    python3 - "$TUNNEL_CONF" "$DEVICE_ID" <<'PY' || log "tunnel.conf patch failed (non-fatal)"
+import json, sys
+path, device_id = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+cfg["proxyName"] = device_id
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+                    log "Patched proxyName=$DEVICE_ID in $TUNNEL_CONF"
+                else
+                    log "No $TUNNEL_CONF present yet — proxyName patch deferred"
+                fi
+
+                # Write marker only on full success
+                mkdir -p "$(dirname "$TUNNEL_MARKER")"
+                {
+                    echo "device_id=$DEVICE_ID"
+                    echo "device_uuid=$DEVICE_UUID"
+                    echo "provisioned_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+                } > "$TUNNEL_MARKER"
+                log "Tunnel provisioning complete (marker $TUNNEL_MARKER written)"
+            fi
+        fi
+    fi
+    # --- End tunnel credential provisioning ---
 else
     log "Auto-provisioning failed - no API key obtained"
     log "Manual provisioning may be required: soc-ota-provision --server $SERVER_URL --token <token>"
