@@ -90,12 +90,59 @@ func (f *FileBasedBootEnv) ReadEnv(names ...string) (BootVars, error) {
 }
 
 // WriteEnv writes boot environment variables to files.
+//
+// The A/B slot switch on file-based-boot boards (boot.scr reads
+// mender_boot_part from the FAT boot partition) requires a DETERMINISTIC
+// write order.  Writing mender_boot_part / mender_boot_part_hex triggers
+// syncBootSlotToBootPartition(), which mounts the FAT boot partition and
+// writes the slot byte U-Boot reads at boot — that can take several seconds
+// under disk/IO load.  upgrade_available is a fast file write that signals
+// "installed, ready to reboot" to the update orchestrator (and to the
+// e2e_ota test, which reboots as soon as it observes upgrade_available=1).
+//
+// Go randomises map iteration, so the naive `range vars` loop sometimes wrote
+// upgrade_available BEFORE the FAT sync had finished.  A reboot in that window
+// booted the OLD slot, because the FAT still pointed at it; the agent only
+// re-synced the FAT post-boot, too late.  This is a real, load-dependent race
+// that intermittently breaks the slot switch on every file-based-boot board.
+//
+// Fix: always sync the boot partition FIRST (mender_boot_part*) and write
+// upgrade_available LAST, so by the time anything can observe
+// upgrade_available=1 the FAT already points at the new slot.  writeVar is
+// synchronous, so ordering it first guarantees the sync completes first.
 func (f *FileBasedBootEnv) WriteEnv(vars BootVars) error {
 	log.Debugf("FileBasedBootEnv: Writing variables: %v", vars)
 
-	for name, value := range vars {
+	// Priority order: FAT-syncing vars first, the "ready" flag last.
+	writeOrder := []string{
+		"mender_boot_part",
+		"mender_boot_part_hex",
+		"bootcount",
+		"upgrade_available",
+	}
+	written := make(map[string]bool, len(vars))
+	writeOne := func(name, value string) error {
 		if err := f.writeVar(name, value); err != nil {
 			return errors.Wrapf(err, "failed to write %s", name)
+		}
+		written[name] = true
+		return nil
+	}
+
+	for _, name := range writeOrder {
+		if value, ok := vars[name]; ok {
+			if err := writeOne(name, value); err != nil {
+				return err
+			}
+		}
+	}
+	// Forward-compatible: write any keys not covered by the explicit order.
+	for name, value := range vars {
+		if written[name] {
+			continue
+		}
+		if err := writeOne(name, value); err != nil {
+			return err
 		}
 	}
 
