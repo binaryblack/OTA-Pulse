@@ -12,6 +12,8 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 SRC_URI = " \
     file://10-soc-support.sudoers \
     file://10-soc-support.sshd_config \
+    file://08-gateway-authkeys.conf \
+    file://gateway-authorized-key \
 "
 
 S = "${WORKDIR}"
@@ -33,10 +35,16 @@ GROUPADD_PARAM:${PN} = "support"
 USERADD_PARAM:${PN} = "-m -d /home/support -s /bin/sh -g support support"
 
 pkg_postinst:${PN}() {
-    # Best-effort: add 'support' to systemd-journal once both exist on the
-    # target rootfs. Failure (e.g. group not present in a minimal image) is
-    # non-fatal — journalctl for the user's own messages still works.
     if [ -z "$D" ]; then
+        # First-boot only (on-target).
+        # Unlock the 'support' account if the shadow entry is still locked ('!').
+        # The image-build ROOTFS_POSTPROCESS_COMMAND does this at build time, but
+        # this fallback handles devices upgrading via OTA from an older image that
+        # pre-dates the fix and whose shadow file has already been synced to /data.
+        sed -i 's|^support:!:|support:*:|' /etc/shadow 2>/dev/null || true
+
+        # Best-effort: add 'support' to systemd-journal once both exist on the
+        # target. Failure (group absent in a minimal image) is non-fatal.
         getent group systemd-journal >/dev/null 2>&1 && \
             usermod -a -G systemd-journal support 2>/dev/null || true
     fi
@@ -50,11 +58,31 @@ do_install() {
     install -d -m 0755 ${D}${sysconfdir}/ssh/sshd_config.d
     install -m 0644 ${WORKDIR}/10-soc-support.sshd_config \
         ${D}${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf
+
+    # Install the gateway public key into /etc/ssh/authorized_keys/support.
+    # This directory lives on the read-only rootfs partition, so the key survives
+    # every reboot, OTA update, and fresh reflash without any first-boot step.
+    # The sshd drop-in below (08-gateway-authkeys.conf) tells sshd to look here.
+    #
+    # Key rotation: update files/gateway-authorized-key and rebuild/OTA the image.
+    # Root-owned (0644) is intentional: sshd StrictModes checks for world-writability,
+    # not ownership, on system-installed authorized_keys files.
+    install -d -m 0755 ${D}${sysconfdir}/ssh/authorized_keys
+    install -m 0644 ${WORKDIR}/gateway-authorized-key \
+        ${D}${sysconfdir}/ssh/authorized_keys/support
+
+    # Global sshd directive (must live outside any Match block) that adds
+    # /etc/ssh/authorized_keys/%u as a second lookup path alongside ~/.ssh/authorized_keys.
+    # Prefix 08- ensures it is Include-d before the 10-soc-support.conf Match block.
+    install -m 0644 ${WORKDIR}/08-gateway-authkeys.conf \
+        ${D}${sysconfdir}/ssh/sshd_config.d/08-gateway-authkeys.conf
 }
 
 FILES:${PN} = " \
     ${sysconfdir}/sudoers.d/10-soc-support \
     ${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf \
+    ${sysconfdir}/ssh/sshd_config.d/08-gateway-authkeys.conf \
+    ${sysconfdir}/ssh/authorized_keys/support \
 "
 
 # sudoers files have a strict ownership/mode contract; tell QA they're intentional.

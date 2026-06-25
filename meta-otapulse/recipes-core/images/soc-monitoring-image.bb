@@ -157,3 +157,23 @@ IMAGE_INSTALL:append = " \
     soc-ota-tunneld \
     soc-shell-access \
     "
+
+# BUG-113: unlock the 'support' account in the final rootfs image.
+#
+# soc-shell-access creates the user via useradd with no --password option, which
+# leaves the shadow entry as '!' (locked).  PAM's account check rejects pubkey
+# SSH auth for locked accounts, breaking RSSH-101..105.
+#
+# ROOTFS_POSTPROCESS_COMMAND runs AFTER all packages are installed AND after the
+# useradd class has written user entries into the rootfs shadow file, so this sed
+# sees the 'support:!:...' line and replaces it before the image is finalized.
+#
+# '!' (locked) → '*' (disabled password): pubkey auth allowed, password login still
+# impossible (PasswordAuthentication no is enforced by 10-soc-support.conf).
+unlock_support_account() {
+    if grep -q '^support:!:' "${IMAGE_ROOTFS}/etc/shadow" 2>/dev/null; then
+        sed -i 's|^support:!:|support:*:|' "${IMAGE_ROOTFS}/etc/shadow"
+        bbplain "soc-monitoring-image: unlocked 'support' shadow entry (! → *) for gateway pubkey auth"
+    fi
+}
+ROOTFS_POSTPROCESS_COMMAND:append = " unlock_support_account;"
