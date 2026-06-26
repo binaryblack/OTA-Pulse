@@ -18,7 +18,7 @@
     },
     "metrics": {
         "enabled": true,
-        "upload_interval_seconds": 300,
+        "upload_interval_seconds": 60,
         "collection_interval_seconds": 60,
         "max_buffer_size_bytes": 104857600,
         "retry_max_attempts": 5,

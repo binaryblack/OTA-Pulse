@@ -7,15 +7,21 @@ Wants=network-online.target
 
 # TASK-S29-006 — gate startup on the first-boot tunnel-credential mint.
 # otapulse-auto-provision (oneshot) writes /data/otapulse/.tunnel-provisioned
-# only after it has successfully POSTed to /tunnel-credential/rotate,
-# saved /data/frp/credential, and patched proxyName in tunnel.conf.
-# Without this gate, soc-ota-tunneld would crash-loop on the missing
-# credential before auto-provision completes.
+# only after it has successfully POSTed to /tunnel-credential/rotate, saved
+# /data/frp/credential, and patched proxyName in tunnel.conf. Without this gate
+# soc-ota-tunneld would crash-loop on the missing credential before
+# auto-provision completes.
 After=otapulse-auto-provision.service
 Wants=otapulse-auto-provision.service
 ConditionPathExists=/data/otapulse/.tunnel-provisioned
-# Defence-in-depth — also require the credential file itself.
+
+# Don't run (and don't crash-loop) until the per-device tunnel credential has
+# been provisioned to /data/frp/credential.  systemd reports the unit as
+# "condition failed" instead of restart-counter spinning when the file is
+# missing — see BUG-013 for the underlying provisioning gap.  Once the
+# credential is written, `systemctl start soc-ota-tunneld` will pick it up.
 ConditionPathExists=/data/frp/credential
+ConditionFileNotEmpty=/data/frp/credential
 
 [Service]
 Type=simple

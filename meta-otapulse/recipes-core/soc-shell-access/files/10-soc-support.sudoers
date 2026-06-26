@@ -1,0 +1,17 @@
+# OTA-Pulse Remote SSH — sudoers allowlist for the 'support' user.
+# Standard-tier operators land in this user; the only privileged actions they
+# may take are the few listed here. Everything else returns
+# "sudo: a password is required" (the user has no password and is not in any
+# unrestricted sudo group).
+#
+# Keep this list aligned with the F17 spec in /verify-remote-ssh and the
+# allowlist documented in docs/remote-ssh/BOARD-INTEGRATION.md. Changes here
+# are security-sensitive and must go through review.
+
+Defaults:support !lecture
+Defaults:support env_reset
+Defaults:support secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+
+support ALL=(root) NOPASSWD: /bin/systemctl restart chronyd
+support ALL=(root) NOPASSWD: /usr/bin/systemctl restart chronyd
+support ALL=(root) NOPASSWD: /usr/libexec/soc-diag/soc-readlog messages

@@ -29,108 +29,6 @@ error() {
 }
 
 # =============================================================================
-# CRITICAL: Seed rootfs_b with a bootable copy of rootfs_a.
-# =============================================================================
-# Without this, rootfs_b is a freshly-formatted but EMPTY ext4 filesystem.
-# Any slot switch before the first real OTA — whether driven by a buggy
-# bootloader auto-fallback, a stale upgrade_available flag, a manual test,
-# or an interrupted install — will leave the device booting into an empty
-# partition with no /sbin/init, causing an unrecoverable kernel panic.
-# Boards lacking bootloader-level boot-count rollback (notably Qualcomm A/B
-# with XBL/ABL — observed brick on dragon-q6a) cannot recover from this
-# without manual reflash.
-#
-# Seeding mitigates the issue by ensuring rootfs_b contains a bootable
-# system at all times. The seed is a snapshot of rootfs_a taken once at
-# firstboot; it will be overwritten by the first real OTA. After that,
-# every slot transition lands on a known-bootable system.
-#
-# Defined early in the script so it can be invoked from any code path —
-# including the marker-file early-exit, the static-GPT BSP path, and the
-# partitions-already-exist path — without forward-reference errors. The
-# function is idempotent (no-op when /sbin/init already exists on rootfs_b)
-# and self-heals partial seeds from interrupted prior runs.
-#
-# Time cost: ~2–5 min on SD card for a ~2 GB rootfs. One-time, firstboot.
-# =============================================================================
-seed_rootfs_b() {
-    local rb_dev="$1"
-    local mnt="/tmp/.rb_seed_$$"
-
-    [ -b "$rb_dev" ] || return 0  # device doesn't exist — nothing to do
-
-    mkdir -p "$mnt"
-    if ! mount "$rb_dev" "$mnt" 2>/dev/null; then
-        log "WARNING: could not mount $rb_dev to check seed state — skipping seed"
-        rmdir "$mnt" 2>/dev/null || true
-        return 0
-    fi
-
-    # Skip if rootfs_b already has a usable /sbin/init (or /init). That's
-    # the canonical "this rootfs can boot" probe — anything else (empty
-    # fs, lost+found only, half-copied tree) is treated as needing a
-    # fresh seed. Self-heals interrupted seeds from prior firstboot runs.
-    if [ -x "$mnt/sbin/init" ] || [ -x "$mnt/init" ]; then
-        log "rootfs_b already has bootable init — skipping seed"
-        umount "$mnt" 2>/dev/null || true
-        rmdir "$mnt" 2>/dev/null || true
-        return 0
-    fi
-
-    log "Seeding rootfs_b from current rootfs (one-time recovery snapshot)..."
-    local start_ts
-    start_ts=$(date +%s)
-
-    # If rootfs_b has any leftover content from a partial prior seed, wipe
-    # it before copying so we start clean. (lost+found stays.)
-    find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
-
-    # Copy current rootfs into rootfs_b. We use `cp -a` (archive — preserves
-    # attrs and recurses) without `-x` (one-filesystem): the GNU-coreutils
-    # `-x` flag is NOT supported by busybox cp, which is what Yocto/Buildroot
-    # images typically ship. Since we only copy explicit top-level rootfs
-    # dirs (/bin, /etc, /sbin, …) and NOT /proc, /sys, /dev, /run, /tmp,
-    # /data, /mnt — the directories we copy are themselves part of the
-    # rootfs filesystem and do not contain foreign mountpoints in practice.
-    local d
-    local copy_ok=1
-    for d in /bin /boot /etc /home /lib /lib32 /lib64 /libexec /opt /root /sbin /srv /usr /var; do
-        [ -e "$d" ] || continue
-        if ! cp -a "$d" "$mnt/" 2>/dev/null; then
-            log "WARNING: cp -a $d -> $mnt failed (continuing)"
-            copy_ok=0
-        fi
-    done
-
-    # Recreate pseudo-fs / mountpoint stubs so the seed boots cleanly.
-    for d in proc sys dev run tmp data mnt media; do
-        mkdir -p "$mnt/$d" 2>/dev/null || true
-    done
-    chmod 1777 "$mnt/tmp" 2>/dev/null || true
-
-    # Verify the seed has the bootable invariant we promised. If init is
-    # still missing after the copy something went very wrong; remove what
-    # we wrote so the partition stays "obviously empty" rather than
-    # half-bootable (a half-bootable seed could brick on slot switch).
-    if [ ! -x "$mnt/sbin/init" ] && [ ! -x "$mnt/init" ]; then
-        log "WARNING: rootfs_b seed missing /sbin/init after copy — wiping to leave partition empty"
-        find "$mnt" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} + 2>/dev/null || true
-        copy_ok=0
-    fi
-
-    sync
-    umount "$mnt" 2>/dev/null || true
-    rmdir "$mnt" 2>/dev/null || true
-
-    local elapsed=$(( $(date +%s) - start_ts ))
-    if [ "$copy_ok" -eq 1 ]; then
-        log "rootfs_b seed complete in ${elapsed}s"
-    else
-        log "rootfs_b seed FAILED in ${elapsed}s — partition wiped, slot-switch protection NOT in place"
-    fi
-}
-
-# =============================================================================
 # Seed /data/otapulse/device_type so soc-ota-agent can verify HW compatibility
 # of incoming OTA artifacts. Without this file, the agent logs "Unable to
 # verify the existing hardware. Update will continue anyways" on every poll
@@ -332,11 +230,19 @@ setup_data_partition_fallback() {
     mkdir -p /data
     if mount --bind "$fallback_dir" /data; then
         log "Bind-mounted $fallback_dir → /data"
-        # Make it permanent across reboots via fstab
-        if ! grep -q "$fallback_dir /data" /etc/fstab 2>/dev/null; then
-            echo "$fallback_dir /data none bind 0 0" >> /etc/fstab
-            log "Added bind mount to /etc/fstab"
-        fi
+        # Remove any conflicting /data entries from fstab before adding the
+        # bind-mount.  The base-files template ships a PARTLABEL=data line
+        # that will never work on boards without a dedicated data partition
+        # (e.g. Tegra / Jetson with UDA label).  Leaving both lines in fstab
+        # causes systemd to only process the first (failing) entry, so the
+        # bind-mount never activates after reboot.
+        #
+        # Pattern: delete non-comment lines whose mount-point field is
+        # exactly "/data".  The bind-mount is then added as the sole /data
+        # entry, making the setting durable across reboots.
+        sed -i '/^[^#].* \/data /d' /etc/fstab
+        echo "$fallback_dir /data none bind 0 0" >> /etc/fstab
+        log "Updated /etc/fstab: removed stale /data entries, added bind mount"
         return 0
     fi
     return 1
@@ -415,17 +321,6 @@ ensure_persistent_ssh_keys || log "SSH key persistence skipped (data partition n
 
 # Always ensure boot scripts are available
 ensure_persistent_boot_scripts || log "Boot scripts persistence skipped (data partition not ready)"
-
-# Always attempt rootfs_b seeding when rootfs_b exists, BEFORE we honour the
-# partition-setup marker. The seed function is idempotent (no-op when
-# rootfs_b already has /sbin/init) and cheap to invoke. Running it here
-# closes the gap where a prior firstboot pass created and formatted
-# rootfs_b but failed to populate it (e.g. busybox cp lacking GNU flags) —
-# without this call, the partition marker would prevent any later attempt
-# to re-seed even after the underlying bug is fixed.
-if [ -b /dev/disk/by-partlabel/rootfs_b ]; then
-    seed_rootfs_b /dev/disk/by-partlabel/rootfs_b || true
-fi
 
 # Check if already configured
 if [ -f "$MARKER_FILE" ]; then
@@ -701,6 +596,17 @@ fi
 # Get sector size (always works regardless of GPT state)
 SECTOR_SIZE=$(blockdev --getss "$BASE_DEV")
 
+# Detect partition-table type so we use the right tool: sgdisk for GPT, sfdisk
+# for MBR (DOS). Amlogic/ODROID-C4 boots from an MBR medium because the FIP at
+# sector 1 would corrupt a GPT (see odroid-c4.wks). On MBR there are no
+# partition names — identification is via filesystem LABELs aliased to
+# /dev/disk/by-partlabel by 99-otapulse-bsp-aliases.rules. Crucially, sfdisk
+# only rewrites the sector-0 MBR table and never the FIP, so growing the table
+# at firstboot is safe. Default to gpt when blkid can't tell (every other board).
+PTTYPE=$(blkid -o value -s PTTYPE "$BASE_DEV" 2>/dev/null || true)
+[ -z "$PTTYPE" ] && PTTYPE="gpt"
+log "Partition table type: $PTTYPE"
+
 # Get rootfs_a size (in sectors). sgdisk -i may return empty when the primary
 # GPT header CRC is invalid, so fall back to /sys/class/block which the kernel
 # always exports from the in-memory partition table.
@@ -790,15 +696,26 @@ if [ "$PARTITIONS_EXIST" -eq 0 ]; then
     log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
     log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
 
-    log "Creating rootfs_b and data partitions..."
-    sgdisk \
-           -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
-           -c "$ROOTFS_B_PART_NUM:rootfs_b" \
-           -t "$ROOTFS_B_PART_NUM:8300" \
-           -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
-           -c "$DATA_PART_NUM:data" \
-           -t "$DATA_PART_NUM:8300" \
-           "$BASE_DEV"
+    log "Creating rootfs_b and data partitions ($PTTYPE)..."
+    if [ "$PTTYPE" = "dos" ]; then
+        # MBR: append two Linux (type 83) primary partitions with sfdisk. This
+        # only touches the sector-0 partition table — never the FIP at sector 1.
+        # Partition names don't exist on MBR; the ext4 LABELs set when formatting
+        # below drive /dev/disk/by-partlabel via 99-otapulse-bsp-aliases.rules.
+        printf 'start=%s, size=%s, type=83\nstart=%s, type=83\n' \
+            "$ROOTFS_B_START" "$ROOTFS_A_SIZE" "$DATA_START" \
+            | sfdisk --append --force "$BASE_DEV"
+    else
+        # GPT: create named, typed partitions with sgdisk (unchanged path).
+        sgdisk \
+               -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
+               -c "$ROOTFS_B_PART_NUM:rootfs_b" \
+               -t "$ROOTFS_B_PART_NUM:8300" \
+               -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
+               -c "$DATA_PART_NUM:data" \
+               -t "$DATA_PART_NUM:8300" \
+               "$BASE_DEV"
+    fi
 
     # Inform kernel of partition changes
     log "Updating kernel partition table..."
@@ -839,12 +756,6 @@ else
     log "rootfs_b already formatted ($ROOTFS_B_FSTYPE), skipping"
 fi
 
-# Always attempt seeding when we manage the dynamic A/B layout. The
-# function (defined near the top of this script) is idempotent — no-op
-# if rootfs_b already has a usable init — and self-heals partial seeds
-# from interrupted prior runs.
-seed_rootfs_b "$ROOTFS_B_DEV"
-
 DATA_FSTYPE=$(lsblk -no FSTYPE "$DATA_DEV" 2>/dev/null || true)
 if [ -z "$DATA_FSTYPE" ]; then
     log "Formatting data ($DATA_DEV)..."
@@ -853,20 +764,39 @@ else
     log "data already formatted ($DATA_FSTYPE), skipping"
 fi
 
-# Update rootfs_a partition label if needed
 ROOTFS_A_DEV="$ROOT_PART"
-CURRENT_LABEL=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
-if [ "$CURRENT_LABEL" != "rootfs_a" ]; then
-    log "Setting rootfs_a partition label..."
-    sgdisk -c "$ROOT_PART_NUM:rootfs_a" "$BASE_DEV"
-fi
 
-# Set boot partition label
-BOOT_PART_NUM=1
-BOOT_LABEL=$(sgdisk -i "$BOOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
-if [ "$BOOT_LABEL" != "boot" ]; then
-    log "Setting boot partition label..."
-    sgdisk -c "$BOOT_PART_NUM:boot" "$BASE_DEV"
+# GPT partition-NAME maintenance (rootfs_a / boot). Skipped on MBR, which has no
+# partition names — and where running sgdisk -c would convert the disk to GPT
+# and corrupt the FIP. On MBR, identification comes from the filesystem LABELs
+# (set by the WKS and by mkfs above) via 99-otapulse-bsp-aliases.rules.
+if [ "$PTTYPE" != "dos" ]; then
+    # Update rootfs_a partition label if needed
+    CURRENT_LABEL=$(sgdisk -i "$ROOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
+    if [ "$CURRENT_LABEL" != "rootfs_a" ]; then
+        log "Setting rootfs_a partition label..."
+        sgdisk -c "$ROOT_PART_NUM:rootfs_a" "$BASE_DEV"
+    fi
+
+    # Set the boot partition's GPT name — but ONLY on the real FAT boot
+    # partition, found dynamically. DO NOT hardcode partition 1: on RK3588
+    # (Radxa CM5) partition 1 is the raw "uboot" partition that the Rockchip
+    # Miniloader locates by its GPT name "uboot" to find U-Boot. Renaming it to
+    # "boot" makes SPL unable to find U-Boot -> the board fails to boot from eMMC
+    # ("spl: partition error / failed to boot from all boot devices"). The wic
+    # already names the FAT partition "boot", so this is usually a no-op; we only
+    # act if no "boot" GPT name exists yet, and never touch a "uboot" partition.
+    if [ ! -e /dev/disk/by-partlabel/boot ]; then
+        BOOT_DEV=$(lsblk -lnpo NAME,FSTYPE "$BASE_DEV" 2>/dev/null | awk '$2=="vfat"{print $1; exit}')
+        if [ -n "$BOOT_DEV" ]; then
+            BOOT_PART_NUM=$(echo "$BOOT_DEV" | grep -oE '[0-9]+$')
+            BOOT_LABEL=$(sgdisk -i "$BOOT_PART_NUM" "$BASE_DEV" 2>/dev/null | grep "Partition name" | cut -d"'" -f2)
+            if [ "$BOOT_LABEL" != "boot" ] && [ "$BOOT_LABEL" != "uboot" ]; then
+                log "Setting boot partition label on $BOOT_DEV (p$BOOT_PART_NUM)..."
+                sgdisk -c "$BOOT_PART_NUM:boot" "$BASE_DEV"
+            fi
+        fi
+    fi
 fi
 
 # Final partition table update
@@ -887,8 +817,19 @@ touch "$MARKER_FILE"
 
 log "Partition setup complete!"
 log "Final partition layout:"
-sgdisk -p "$BASE_DEV"
-lsblk -o NAME,SIZE,LABEL,PARTLABEL,FSTYPE "$BASE_DEV"
+# Diagnostic only — MUST be non-fatal (script runs under `set -e`). Use the tool
+# that matches the table: `sgdisk -p` on an MBR disk finds "invalid GPT + valid
+# MBR", converts to GPT in memory and prints alarming "may be garbage" warnings;
+# worse, on some gptfdisk versions it can exit non-zero, which under set -e would
+# abort the script HERE — after partitions exist but before /data/ota boot-env is
+# seeded, leaving a half-provisioned device. sfdisk -l lists MBR cleanly and is
+# already a dependency (used for --append above). All guarded with || true.
+if [ "$PTTYPE" = "dos" ]; then
+    sfdisk -l "$BASE_DEV" || true
+else
+    sgdisk -p "$BASE_DEV" || true
+fi
+lsblk -o NAME,SIZE,LABEL,PARTLABEL,FSTYPE "$BASE_DEV" || true
 
 # Mount data partition
 if [ ! -d "/data" ]; then

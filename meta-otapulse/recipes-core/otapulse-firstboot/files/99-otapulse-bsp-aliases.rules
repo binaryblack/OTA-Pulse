@@ -14,3 +14,16 @@
 # meta-tegra Jetson BSP — APP / APP_b → rootfs_a / rootfs_b
 SUBSYSTEM=="block", ENV{ID_PART_ENTRY_NAME}=="APP",   SYMLINK+="disk/by-partlabel/rootfs_a"
 SUBSYSTEM=="block", ENV{ID_PART_ENTRY_NAME}=="APP_b", SYMLINK+="disk/by-partlabel/rootfs_b"
+
+# MBR boot media (Amlogic / ODROID C4) — MBR has no partition names, so derive
+# the by-partlabel symlinks from the filesystem LABEL set by the WKS / firstboot
+# (mkfs -L rootfs_a|rootfs_b|data).  This keeps the rest of OTA-Pulse using
+# /dev/disk/by-partlabel/<name> with no per-board code path.
+#
+# No-op / harmless on GPT boards: there the same partition also carries an
+# identical GPT partition name, so udev's built-in 60-persistent-storage rule
+# already creates the same symlink to the same device — these rules just
+# re-point it to the identical target.
+SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="rootfs_a", SYMLINK+="disk/by-partlabel/rootfs_a"
+SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="rootfs_b", SYMLINK+="disk/by-partlabel/rootfs_b"
+SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="data",     SYMLINK+="disk/by-partlabel/data"

@@ -90,12 +90,59 @@ func (f *FileBasedBootEnv) ReadEnv(names ...string) (BootVars, error) {
 }
 
 // WriteEnv writes boot environment variables to files.
+//
+// The A/B slot switch on file-based-boot boards (boot.scr reads
+// mender_boot_part from the FAT boot partition) requires a DETERMINISTIC
+// write order.  Writing mender_boot_part / mender_boot_part_hex triggers
+// syncBootSlotToBootPartition(), which mounts the FAT boot partition and
+// writes the slot byte U-Boot reads at boot — that can take several seconds
+// under disk/IO load.  upgrade_available is a fast file write that signals
+// "installed, ready to reboot" to the update orchestrator (and to the
+// e2e_ota test, which reboots as soon as it observes upgrade_available=1).
+//
+// Go randomises map iteration, so the naive `range vars` loop sometimes wrote
+// upgrade_available BEFORE the FAT sync had finished.  A reboot in that window
+// booted the OLD slot, because the FAT still pointed at it; the agent only
+// re-synced the FAT post-boot, too late.  This is a real, load-dependent race
+// that intermittently breaks the slot switch on every file-based-boot board.
+//
+// Fix: always sync the boot partition FIRST (mender_boot_part*) and write
+// upgrade_available LAST, so by the time anything can observe
+// upgrade_available=1 the FAT already points at the new slot.  writeVar is
+// synchronous, so ordering it first guarantees the sync completes first.
 func (f *FileBasedBootEnv) WriteEnv(vars BootVars) error {
 	log.Debugf("FileBasedBootEnv: Writing variables: %v", vars)
 
-	for name, value := range vars {
+	// Priority order: FAT-syncing vars first, the "ready" flag last.
+	writeOrder := []string{
+		"mender_boot_part",
+		"mender_boot_part_hex",
+		"bootcount",
+		"upgrade_available",
+	}
+	written := make(map[string]bool, len(vars))
+	writeOne := func(name, value string) error {
 		if err := f.writeVar(name, value); err != nil {
 			return errors.Wrapf(err, "failed to write %s", name)
+		}
+		written[name] = true
+		return nil
+	}
+
+	for _, name := range writeOrder {
+		if value, ok := vars[name]; ok {
+			if err := writeOne(name, value); err != nil {
+				return err
+			}
+		}
+	}
+	// Forward-compatible: write any keys not covered by the explicit order.
+	for name, value := range vars {
+		if written[name] {
+			continue
+		}
+		if err := writeOne(name, value); err != nil {
+			return err
 		}
 	}
 
@@ -292,7 +339,7 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
 		bootDir := filepath.Dir(bootFile)
 		newRootDev := f.getDeviceForPartNum(partNum)
 		if newRootDev != "" {
-			f.updateBootCmdline(bootDir, newRootDev)
+			f.updateDirectBootSlot(bootDir, newRootDev)
 		} else {
 			log.Debugf("FileBasedBootEnv: Could not determine root device for partition %s, skipping cmdline.txt update", partNum)
 		}
@@ -330,9 +377,26 @@ func (f *FileBasedBootEnv) getDeviceForPartNum(partNum string) string {
 	return ""
 }
 
-// updateBootCmdline updates the root= parameter in /boot/cmdline.txt to point to
-// newRootDev. This is required on direct-boot platforms (e.g. RPi4 without U-Boot)
-// where the VideoCore firmware reads cmdline.txt directly.
+// updateDirectBootSlot points the next boot at newRootDev on a direct-boot
+// (no U-Boot) platform by PERMANENTLY rewriting root= in cmdline.txt. This applies to
+// Raspberry Pi (VideoCore) and any other direct-boot board alike: the firmware always
+// reads root= from cmdline.txt, so the switch reliably takes.
+//
+// This replaces the earlier RPi-only VideoCore "tryboot" one-shot (reboot "0 tryboot"
+// + tryboot.txt-as-config). That self-reverting trial proved non-functional on this
+// image — systemd's reboot did not engage tryboot and the device booted back to the
+// original slot every time (BUG-074). The permanent rewrite trades firmware
+// auto-rollback for a switch that actually takes; hardware auto-rollback would need an
+// autoboot.txt tryboot_a_b two-boot-partition layout (a separate boot-integration
+// change). updateBootCmdline keeps a cmdline_prev.txt backup as a manual rollback
+// target, which otapulse-tryboot-commit clears on the first good boot of the new slot.
+func (f *FileBasedBootEnv) updateDirectBootSlot(bootDir, newRootDev string) {
+	f.updateBootCmdline(bootDir, newRootDev)
+}
+
+// updateBootCmdline permanently rewrites the root= parameter in /boot/cmdline.txt to
+// point to newRootDev, after saving the current (old-slot) cmdline to cmdline_prev.txt
+// as a manual rollback target. Used for all direct-boot (no U-Boot) platforms.
 func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
 	cmdlinePath := filepath.Join(bootDir, "cmdline.txt")
 	data, err := os.ReadFile(cmdlinePath)
@@ -353,6 +417,16 @@ func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
 	if !changed {
 		log.Debugf("FileBasedBootEnv: No root= in cmdline.txt at %s, skipping", cmdlinePath)
 		return
+	}
+
+	// Preserve the original (old-slot) cmdline as a manual rollback target, ONCE — do
+	// not clobber a backup written earlier in this same OTA cycle (e.g. by an earlier
+	// SetUpdatedPartition call). otapulse-tryboot-commit removes it on a good boot.
+	prevPath := filepath.Join(bootDir, "cmdline_prev.txt")
+	if _, statErr := os.Stat(prevPath); os.IsNotExist(statErr) {
+		if werr := os.WriteFile(prevPath, data, 0644); werr != nil {
+			log.Warnf("FileBasedBootEnv: Failed to write cmdline_prev.txt rollback backup: %v", werr)
+		}
 	}
 
 	updated := strings.Join(parts, " ") + "\n"

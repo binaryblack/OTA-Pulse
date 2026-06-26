@@ -53,8 +53,11 @@ type PayloadUpdatePerformer interface {
 }
 
 type AllModules struct {
-	// Built-in module.
-	DualRootfs handlers.UpdateStorerProducer
+	// Built-in module. Typed as the local DualRootfsDevice interface (which
+	// embeds handlers.UpdateStorerProducer) so callers can reach the extra
+	// methods such as HandleBootCountFallback. nil when no dual-rootfs device
+	// is configured.
+	DualRootfs DualRootfsDevice
 	// External modules.
 	Modules *ModuleInstallerFactory
 }

@@ -113,9 +113,12 @@ IMAGE_INSTALL += " \
     "
 
 # Extra development tools (remove for production)
+# gdb removed: gdb-14.2 configure.ac pins Autoconf 2.69 but this tree's
+# autoconf-native is 2.72e, so autoreconf fails (Makefile.in never generated)
+# — an upstream/toolchain incompatibility unrelated to the monitoring stack.
+# strace builds fine and is kept. (BUG-040)
 IMAGE_INSTALL:append = " \
     strace \
-    gdb \
     "
 
 # Image size configuration
@@ -147,3 +150,30 @@ TOOLCHAIN_TARGET_TASK += "packagegroup-core-standalone-sdk-target"
 # Generic systemd configuration - suppress common warnings
 # To silence systemd warning about /home/root, add this to your local.conf:
 # ROOT_HOME = "/root"
+
+# Added by /verify-remote-ssh remote-ssh integration (TODO-002)
+IMAGE_INSTALL:append = " \
+    frp \
+    soc-ota-tunneld \
+    soc-shell-access \
+    "
+
+# BUG-113: unlock the 'support' account in the final rootfs image.
+#
+# soc-shell-access creates the user via useradd with no --password option, which
+# leaves the shadow entry as '!' (locked).  PAM's account check rejects pubkey
+# SSH auth for locked accounts, breaking RSSH-101..105.
+#
+# ROOTFS_POSTPROCESS_COMMAND runs AFTER all packages are installed AND after the
+# useradd class has written user entries into the rootfs shadow file, so this sed
+# sees the 'support:!:...' line and replaces it before the image is finalized.
+#
+# '!' (locked) → '*' (disabled password): pubkey auth allowed, password login still
+# impossible (PasswordAuthentication no is enforced by 10-soc-support.conf).
+unlock_support_account() {
+    if grep -q '^support:!:' "${IMAGE_ROOTFS}/etc/shadow" 2>/dev/null; then
+        sed -i 's|^support:!:|support:*:|' "${IMAGE_ROOTFS}/etc/shadow"
+        bbplain "soc-monitoring-image: unlocked 'support' shadow entry (! → *) for gateway pubkey auth"
+    fi
+}
+ROOTFS_POSTPROCESS_COMMAND:append = " unlock_support_account;"
