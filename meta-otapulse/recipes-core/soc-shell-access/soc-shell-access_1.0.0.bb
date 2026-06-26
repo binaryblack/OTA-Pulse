@@ -103,6 +103,8 @@ SRC_URI = " \
     file://soc-readlog \
     file://.keep \
     file://sshd_config.d/10-soc-support.conf \
+    file://gateway-authorized-key \
+    file://08-gateway-authkeys.conf \
 "
 
 S = "${WORKDIR}"
@@ -227,6 +229,43 @@ do_install() {
         ${D}${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf
     chown root:root ${D}${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf
 
+    # ------------------------------------------------------------------
+    # 5. Gateway authorized key
+    #    The OTA-Pulse gateway authenticates to sshd as the `support` user
+    #    using this public key. Without it, sshd enforces publickey-only
+    #    auth but has nothing to match against → WS 1011 SSH connection
+    #    failed on every remote shell session (regression from _1.0.bb).
+    # ------------------------------------------------------------------
+    install -d -m 0755 ${D}${sysconfdir}/ssh/authorized_keys
+    install -m 0644 ${FILESDIR}/gateway-authorized-key \
+        ${D}${sysconfdir}/ssh/authorized_keys/support
+
+    # ------------------------------------------------------------------
+    # 6. sshd drop-in: AuthorizedKeysFile lookup path
+    #    Tells sshd to search /etc/ssh/authorized_keys/%u in addition to
+    #    ~/.ssh/authorized_keys so the gateway key above is found.
+    # ------------------------------------------------------------------
+    install -m 0644 ${FILESDIR}/08-gateway-authkeys.conf \
+        ${D}${sysconfdir}/ssh/sshd_config.d/08-gateway-authkeys.conf
+
+    # ------------------------------------------------------------------
+    # 7. Ensure main sshd_config loads the drop-ins via Include.
+    #    Newer OE-core/poky openssh ships Include at the top of sshd_config
+    #    automatically. Older images (e.g. Jetson's OpenSSH 7.x, based on
+    #    sshd_config,v 1.102 2018) do not. Inject the directive only when
+    #    absent so the drop-ins in sshd_config.d/ are actually read.
+    #    Without this, 08-gateway-authkeys.conf is silently ignored and
+    #    gateway pubkey auth fails with WS 1011 "SSH connection failed".
+    # ------------------------------------------------------------------
+    SSHD_CONF="${D}${sysconfdir}/ssh/sshd_config"
+    if [ -f "$SSHD_CONF" ] && ! grep -q "^Include /etc/ssh/sshd_config.d" "$SSHD_CONF"; then
+        sed -i '/^\# This sshd was compiled with/a Include /etc/ssh/sshd_config.d/*.conf' "$SSHD_CONF"
+        # Fallback: if the anchor comment isn't present, prepend to the file
+        if ! grep -q "^Include /etc/ssh/sshd_config.d" "$SSHD_CONF"; then
+            sed -i '1s/^/Include \/etc\/ssh\/sshd_config.d\/*.conf\n/' "$SSHD_CONF"
+        fi
+    fi
+
     # NOTE: shadow password replacement (step 5 / S16-009 fix) is done in
     # pkg_postinst:${PN} below, not here.  The useradd class creates the
     # support user in the rootfs shadow at do_rootfs time, which runs AFTER
@@ -287,18 +326,22 @@ pkg_postinst:${PN} () {
 FILES:${PN} = " \
     ${sysconfdir}/sudoers.d/10-soc-support \
     ${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf \
+    ${sysconfdir}/ssh/sshd_config.d/08-gateway-authkeys.conf \
+    ${sysconfdir}/ssh/authorized_keys/support \
     ${libexecdir}/soc-diag \
     ${libexecdir}/soc-diag/.keep \
     ${libexecdir}/soc-diag/soc-readlog \
     /home/support \
 "
 
-# CONFFILES: declare both managed config drop-ins as OTA-replaced files so
+# CONFFILES: declare managed config drop-ins as OTA-replaced files so
 # the package manager always overwrites them on update (operator edits do
 # not persist across OTA updates).
 CONFFILES:${PN} = " \
     ${sysconfdir}/sudoers.d/10-soc-support \
     ${sysconfdir}/ssh/sshd_config.d/10-soc-support.conf \
+    ${sysconfdir}/ssh/sshd_config.d/08-gateway-authkeys.conf \
+    ${sysconfdir}/ssh/authorized_keys/support \
 "
 
 # ---------------------------------------------------------------------------
