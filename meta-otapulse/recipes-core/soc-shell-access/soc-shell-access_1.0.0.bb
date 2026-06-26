@@ -248,23 +248,13 @@ do_install() {
     install -m 0644 ${FILESDIR}/08-gateway-authkeys.conf \
         ${D}${sysconfdir}/ssh/sshd_config.d/08-gateway-authkeys.conf
 
-    # ------------------------------------------------------------------
-    # 7. Ensure main sshd_config loads the drop-ins via Include.
-    #    Newer OE-core/poky openssh ships Include at the top of sshd_config
-    #    automatically. Older images (e.g. Jetson's OpenSSH 7.x, based on
-    #    sshd_config,v 1.102 2018) do not. Inject the directive only when
-    #    absent so the drop-ins in sshd_config.d/ are actually read.
-    #    Without this, 08-gateway-authkeys.conf is silently ignored and
-    #    gateway pubkey auth fails with WS 1011 "SSH connection failed".
-    # ------------------------------------------------------------------
-    SSHD_CONF="${D}${sysconfdir}/ssh/sshd_config"
-    if [ -f "$SSHD_CONF" ] && ! grep -q "^Include /etc/ssh/sshd_config.d" "$SSHD_CONF"; then
-        sed -i '/^\# This sshd was compiled with/a Include /etc/ssh/sshd_config.d/*.conf' "$SSHD_CONF"
-        # Fallback: if the anchor comment isn't present, prepend to the file
-        if ! grep -q "^Include /etc/ssh/sshd_config.d" "$SSHD_CONF"; then
-            sed -i '1s/^/Include \/etc\/ssh\/sshd_config.d\/*.conf\n/' "$SSHD_CONF"
-        fi
-    fi
+    # NOTE: sshd_config Include injection (step 7 / BUG-114 fix) is done in
+    # pkg_postinst below, NOT here.  do_install runs in this package's own
+    # staging directory (${D}), which does NOT contain openssh's sshd_config —
+    # that file lives in openssh's separate staging area and is only merged
+    # into a single rootfs at do_rootfs time.  Modifying it here is a no-op.
+    # pkg_postinst runs after do_rootfs has assembled the full image, so
+    # ${D} at that point is the complete rootfs and sshd_config is present.
 
     # NOTE: shadow password replacement (step 5 / S16-009 fix) is done in
     # pkg_postinst:${PN} below, not here.  The useradd class creates the
@@ -317,6 +307,46 @@ pkg_postinst:${PN} () {
                 "$_shadow"
             unset _hash
         fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Step 7 (BUG-114): Ensure main sshd_config loads the drop-ins via Include.
+    #
+    # Newer OE-core/poky openssh ships "Include /etc/ssh/sshd_config.d/*.conf"
+    # at the top of sshd_config automatically.  Older images (e.g. L4T-based
+    # Jetson running OpenSSH 7.x / 8.x, built from sshd_config,v 1.102 2018)
+    # do not.  Without the Include directive, 08-gateway-authkeys.conf is
+    # silently ignored and gateway pubkey auth fails with WS 1011.
+    #
+    # WHY pkg_postinst AND NOT do_install:
+    #   do_install runs in soc-shell-access's own package staging dir (${D}).
+    #   At that point openssh's sshd_config has NOT been merged in — it lives
+    #   in openssh's separate ${D} (WORKDIR/image).  The merge happens at
+    #   do_rootfs time, which runs AFTER all do_install tasks complete.
+    #   pkg_postinst with a non-empty $D runs at do_rootfs time, after all
+    #   packages are installed into the rootfs, so sshd_config IS present.
+    #
+    # The on-device guard (if [ -n "$D" ]) is correct for Mender full-image
+    # OTA: new rootfs images are assembled from scratch on the build host
+    # (pkg_postinst runs there with $D set); the postinst never executes on
+    # the device, so we do not risk modifying a live root-owned system file.
+    # -----------------------------------------------------------------------
+    if [ -n "$D" ]; then
+        _sshd_conf="$D/etc/ssh/sshd_config"
+        if [ -f "$_sshd_conf" ] && ! grep -q "^Include /etc/ssh/sshd_config.d" "$_sshd_conf"; then
+            # Try to insert after the "This sshd was compiled with" comment that
+            # older OpenSSH configs always carry — keeps the file readable.
+            sed --follow-symlinks -i \
+                '/^\# This sshd was compiled with/a Include /etc/ssh/sshd_config.d/*.conf' \
+                "$_sshd_conf"
+            # Fallback: anchor comment absent → prepend to file.
+            if ! grep -q "^Include /etc/ssh/sshd_config.d" "$_sshd_conf"; then
+                sed --follow-symlinks -i \
+                    '1s/^/Include \/etc\/ssh\/sshd_config.d\/*.conf\n/' \
+                    "$_sshd_conf"
+            fi
+        fi
+        unset _sshd_conf
     fi
 }
 
