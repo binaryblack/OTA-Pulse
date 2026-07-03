@@ -29,13 +29,17 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=fa818a259cbed7ce8bc2a22d35a464fc"
 # frp release naming uses GOARCH identifiers (amd64, arm64, arm, etc.).
 # BitBake's TARGET_ARCH uses kernel naming (x86_64, aarch64, arm, ...).
 #
+# IMPORTANT: BitBake translates underscores to hyphens in OVERRIDES via
+# TRANSLATED_TARGET_ARCH (x86_64 → x86-64, aarch64 stays aarch64).
+# Override keys must use the TRANSLATED form (hyphens, not underscores).
+#
 # We define FRP_ARCH here to translate.  Machines with other arches (e.g.
 # mips, riscv64) must add a corresponding line in their machine conf or
 # in a .bbappend before including this recipe, otherwise the fetch will
 # fail with an unsupported-arch error that is easy to diagnose.
 FRP_ARCH:aarch64    = "arm64"
 FRP_ARCH:arm        = "arm"
-FRP_ARCH:x86_64     = "amd64"
+FRP_ARCH:x86-64     = "amd64"
 FRP_ARCH:i586       = "386"
 FRP_ARCH:i686       = "386"
 FRP_ARCH            = "UNSUPPORTED_ARCH_${TARGET_ARCH}"
@@ -49,7 +53,7 @@ SRC_URI = "https://github.com/fatedier/frp/releases/download/v${PV}/frp_${PV}_li
 # official frp_sha256_checksums.txt for v0.69.0).
 FRP_SHA256:aarch64 = "24a4fc82b4c041835103419685ea124c4d6a7dbf83d0425481c5831b4ce4b3a4"
 FRP_SHA256:arm     = "8ee99ad9b09eafe5f77fea7cbd9db15deb056dc2857955477972ccb31a74e708"
-FRP_SHA256:x86_64  = "6b90d1cd28fc661f170c0de90dde03d2c63e4fd7ce0ae2da2ca1c28014b8146e"
+FRP_SHA256:x86-64  = "6b90d1cd28fc661f170c0de90dde03d2c63e4fd7ce0ae2da2ca1c28014b8146e"
 # Unsupported arches get an obviously-invalid value so the fetch fails loudly.
 FRP_SHA256         = "UNSUPPORTED_ARCH_${TARGET_ARCH}_supply_FRP_SHA256_override"
 

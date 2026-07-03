@@ -36,6 +36,8 @@ RDEPENDS:${PN} = " \
     gptfdisk \
     e2fsprogs \
     util-linux \
+    util-linux-sfdisk \
+    util-linux-blkid \
     curl \
     python3-core \
 "

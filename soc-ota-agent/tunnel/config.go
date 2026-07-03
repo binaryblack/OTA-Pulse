@@ -252,11 +252,24 @@ func RenderFrpcTOML(c DaemonConfig, token string) string {
 
 	fmt.Fprintf(&sb, "serverAddr = %q\n", c.ServerAddr)
 	fmt.Fprintf(&sb, "serverPort = %d\n", c.ServerPort)
+	// NOTE: do NOT set a client `user` here. frp prefixes every proxy name with
+	// "<user>." when a user is set, registering this proxy as
+	// "<device_id>.<device_id>" — but the backend session gateway looks the
+	// device tunnel up by the BARE device_id, so a prefixed name reads as
+	// "device not online" (409). The backend's optional Login user cross-check
+	// is skipped when user is empty, so leaving it unset is correct.
+	// Client-level login metadatas. CRITICAL: the frps httpPlugin gates the
+	// *Login* op, and frp only carries the client-level `metadatas` (this
+	// top-level table) in the Login envelope's `metas` — per-proxy
+	// [proxies.metadatas] is sent on NewProxy, NOT Login, so it never reaches
+	// the device-auth handler. The sotc therefore MUST live here. Inline-table
+	// form keeps it inside the root section (a [metadatas] header would have to
+	// precede [[proxies]] to avoid being parsed as a proxy sub-table).
+	fmt.Fprintf(&sb, "metadatas = { sotc_token = %q }\n", token)
 	sb.WriteString("\n")
 
-	// Auth block — empty token so frps auth.method = "none" is satisfied.
-	// The sotc credential is carried in [proxies.metadatas].sotc_token instead,
-	// where the frps httpPlugin device-auth handler reads it from the Login op.
+	// Auth block — empty token so the frps httpPlugin (not a static token check)
+	// authenticates every Login by validating metadatas.sotc_token.
 	sb.WriteString("[auth]\n")
 	sb.WriteString("method = \"token\"\n")
 	sb.WriteString("token = \"\"\n")
@@ -271,10 +284,9 @@ func RenderFrpcTOML(c DaemonConfig, token string) string {
 	if c.RemotePortHint != 0 {
 		fmt.Fprintf(&sb, "remotePort = %d\n", c.RemotePortHint)
 	}
-
-	// [proxies.metadatas] is a TOML sub-table of the current [[proxies]] entry.
-	// It MUST come after all key/value pairs of the [[proxies]] table because a
-	// sub-table header terminates the parent table's key/value section.
+	// Keep the sotc in the proxy metadatas too (harmless; some frps audit paths
+	// read it on NewProxy) — but the authoritative copy for Login auth is the
+	// client-level `metadatas` above.
 	sb.WriteString("[proxies.metadatas]\n")
 	fmt.Fprintf(&sb, "sotc_token = %q\n", token)
 

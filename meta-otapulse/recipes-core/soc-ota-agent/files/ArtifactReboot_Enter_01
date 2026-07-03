@@ -1,57 +1,220 @@
 #!/bin/sh
 # OTAPulse State Script: ArtifactReboot_Enter
-# Syncs mender_boot_part from /data/ota/ to the FAT boot partition.
 #
-# The Mender agent writes boot env to /data/ota/mender_boot_part (file-based
-# fallback when fw_setenv is unavailable). However, boot.scr on platforms like
-# i.MX8MP reads mender_boot_part from the FAT boot partition via U-Boot's
-# 'load mmc' command. This script bridges the gap by copying the value to FAT
-# just before the agent triggers a reboot.
-
-set -e
+# TWO-COPY FILE — keep ALL sections (1/2/3/4) identical in both locations:
+#   (1) otapulse_testagent/framework/state_scripts/ArtifactReboot_Enter_01  [test-repo / artifact re-bake]
+#   (2) multiboard_yocto/sources/OTA-Pulse/meta-otapulse/recipes-core/soc-ota-agent/files/ArtifactReboot_Enter_01  [Yocto image build]
+# Section 1 (RPi4 VideoCore boot) was previously diverged (test-repo kept the dead
+# tryboot one-shot); it is now ALIGNED (both permanent cmdline.txt rewrite) and IS
+# checked by the sync hook — leaving it diverged broke E2E-001 p3->p2 because the
+# test embeds THIS copy into its on-the-fly artifact (BUG-074).
+# After editing either copy run:  scripts/check-state-script-sync.sh
+# The pre-commit hook enforces this automatically.
+#
+# Runs (from the incoming artifact) right after an OTA install, just before the
+# reboot. Two responsibilities, checked in order:
+#
+# 1. RPi4 direct-boot (VideoCore) A/B slot switch: PERMANENTLY point the next boot
+#    at the new slot by rewriting root= in cmdline.txt, then plain-reboot. We mount
+#    the FAT boot partition EXPLICITLY (by label) and derive the target slot from
+#    /data/ota/mender_boot_part — we do NOT rely on /boot being mounted (it is not,
+#    in fstab). The firmware ALWAYS reads root= from cmdline.txt, so this reliably
+#    switches the slot.
+#      - cmdline_prev.txt   saved copy of the original cmdline (old slot) = manual
+#                           rollback target; otapulse-tryboot-commit removes it on
+#                           the first good boot of the new slot.
+#      - cmdline.txt        rewritten root=<new slot>.
+#    NOTE: this replaces the earlier VideoCore "tryboot" one-shot (reboot "0 tryboot"
+#    + tryboot.txt-as-config). That mechanism proved non-functional on this image —
+#    systemd's reboot did not engage tryboot and the device booted back to the
+#    original slot every time (BUG-074). Permanent rewrite trades firmware
+#    auto-rollback for a switch that actually takes; hardware auto-rollback would
+#    require an autoboot.txt tryboot_a_b two-boot-partition layout (separate change).
+#
+# 2. FAT boot-env sync (iMX8MP and any boot.scr board): copy
+#    /data/ota/mender_boot_part to the FAT boot partition so U-Boot's boot.scr
+#    can read the target slot on the next boot.
 
 BOOT_PART_FILE="/data/ota/mender_boot_part"
 
-# Only act if there's a boot part file to sync
-if [ ! -f "$BOOT_PART_FILE" ]; then
-    echo "ArtifactReboot_Enter: No $BOOT_PART_FILE, nothing to sync"
-    exit 0
-fi
+# Locate the FAT "boot" partition by filesystem label (works regardless of /boot
+# being mounted; the firmware reads the same partition for the tryboot one-shot).
+find_fat_boot() {
+    for dev in /dev/disk/by-partlabel/boot /dev/mmcblk*p1 /dev/nvme*n1p1 /dev/sd?1; do
+        [ -b "$dev" ] || continue
+        FSTYPE=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+        LABEL=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+        if [ "$FSTYPE" = "vfat" ] && [ "$LABEL" = "boot" ]; then
+            echo "$dev"; return 0
+        fi
+    done
+    return 1
+}
 
-TARGET_PART=$(cat "$BOOT_PART_FILE")
-
-# Find the FAT boot partition by label
-FAT_DEV=""
-for dev in /dev/mmcblk*p1 /dev/sd?1; do
-    [ -b "$dev" ] || continue
-    FSTYPE=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
-    LABEL=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
-    if [ "$FSTYPE" = "vfat" ] && [ "$LABEL" = "boot" ]; then
-        FAT_DEV="$dev"
-        break
-    fi
-done
-
+FAT_DEV=$(find_fat_boot)
 if [ -z "$FAT_DEV" ]; then
-    echo "ArtifactReboot_Enter: No FAT boot partition found, skipping"
+    echo "ArtifactReboot_Enter: No FAT boot partition found, nothing to do"
     exit 0
 fi
 
-MNT="/tmp/.bootfat_reboot_$$"
+MNT="/tmp/.otapulse_fat_$$"
 mkdir -p "$MNT"
-
-if mount "$FAT_DEV" "$MNT" 2>/dev/null; then
-    if [ -f "$MNT/boot.scr" ]; then
-        printf '%s' "$TARGET_PART" > "$MNT/mender_boot_part"
-        sync
-        echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART"
-    else
-        echo "ArtifactReboot_Enter: No boot.scr on $FAT_DEV, skipping"
-    fi
-    umount "$MNT" 2>/dev/null
-else
+if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
     echo "ArtifactReboot_Enter: Failed to mount $FAT_DEV"
+    rmdir "$MNT" 2>/dev/null || true
+    exit 0
 fi
 
-rmdir "$MNT" 2>/dev/null || true
+cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; }
+
+# ── 1. RPi4 direct-boot (VideoCore) permanent slot switch ───────────────────
+# VideoCore direct-boot platform = config.txt + cmdline.txt on the FAT boot part.
+if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FILE" ]; then
+    TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+    if [ -n "$TARGET_PART" ] && grep -q 'root=' "$MNT/cmdline.txt"; then
+        # Target rootfs device shares the FAT's disk. find_fat_boot may have
+        # returned a /dev/disk/by-* SYMLINK (e.g. .../by-partlabel/boot), so resolve
+        # it to the real node first (/dev/mmcblk0p1), strip the trailing partition
+        # number, and append the target partition number -> /dev/mmcblk0p<N>. This
+        # matches the existing cmdline.txt root= format (root=/dev/mmcblk0pN).
+        FAT_REAL=$(readlink -f "$FAT_DEV" 2>/dev/null || echo "$FAT_DEV")
+        DISK_PREFIX=$(printf '%s' "$FAT_REAL" | sed -E 's/[0-9]+$//')
+        TARGET_DEV="${DISK_PREFIX}${TARGET_PART}"
+
+        # Preserve the ORIGINAL cmdline (old slot) as a manual rollback target, ONCE
+        # (don't clobber a backup from an earlier write in this same OTA cycle).
+        [ -f "$MNT/cmdline_prev.txt" ] || cp -f "$MNT/cmdline.txt" "$MNT/cmdline_prev.txt"
+
+        # Permanently point root= at the new slot. The firmware always honours
+        # cmdline.txt, so the next boot lands on the new slot.
+        CUR=$(cat "$MNT/cmdline.txt")
+        NEW=$(printf '%s' "$CUR" | sed -E "s#root=[^ ]+#root=${TARGET_DEV}#")
+        printf '%s\n' "$NEW" > "$MNT/cmdline.txt.new" && mv -f "$MNT/cmdline.txt.new" "$MNT/cmdline.txt"
+
+        # Remove any stale files from the abandoned tryboot one-shot scheme so the
+        # firmware can't pick them up.
+        rm -f "$MNT/tryboot.txt" "$MNT/cmdline_tryboot.txt"
+        sync
+        echo "ArtifactReboot_Enter: switched cmdline.txt root=${TARGET_DEV} on ${FAT_DEV} (prev saved to cmdline_prev.txt)"
+        cleanup
+        # Plain reboot — the firmware reads the rewritten cmdline.txt → new slot.
+        # nohup+sleep so the agent can log the state transition first.
+        nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &
+        exit 0
+    fi
+fi
+
+# ── 2. FAT boot-env sync (boot.scr platforms: iMX8, BeaglePlay, Rockchip) ───
+if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/boot.scr" ]; then
+    TARGET_PART=$(cat "$BOOT_PART_FILE")
+    printf '%s' "$TARGET_PART" > "$MNT/mender_boot_part"
+
+    # Marker-file slot scheme: some boot.scr variants ignore the numeric
+    # mender_boot_part entirely and instead select Slot B *iff* the marker file
+    # 'mender_boot_slot_b' is PRESENT on this FAT (absent => Slot A). This scheme
+    # is used by vendor U-Boots that lack setexpr.b (Rockchip RK3588 2017.09 — see
+    # README-rockchip-rk3588.md). Writing only the numeric mender_boot_part there
+    # leaves the marker untouched, so the boot.scr always falls through to Slot A
+    # and the A/B switch never takes. Detect the scheme directly from the boot.scr
+    # (it embeds the literal string) so this is correct on marker boards and a
+    # NO-OP on numeric-scheme boards; derive the target slot from the rootfs_b
+    # PARTLABEL so there are no hardcoded partition numbers.
+    if grep -q mender_boot_slot_b "$MNT/boot.scr" 2>/dev/null; then
+        PART_B=""
+        if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+            PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+        fi
+        if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+            printf 'b' > "$MNT/mender_boot_slot_b"
+            rm -f "$MNT/mender_boot_slot_a"
+            echo "ArtifactReboot_Enter: marker scheme -> Slot B (mender_boot_slot_b created)"
+        else
+            rm -f "$MNT/mender_boot_slot_b"
+            printf 'a' > "$MNT/mender_boot_slot_a"
+            echo "ArtifactReboot_Enter: marker scheme -> Slot A (mender_boot_slot_b removed)"
+        fi
+    fi
+    sync
+    echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART"
+else
+    echo "ArtifactReboot_Enter: not an RPi tryboot platform and no boot.scr — nothing to sync"
+fi
+
+# ── 3. extlinux.conf slot switch ─────────────────────────────────────────────
+# Some boards (e.g. Rockchip RK3588 via U-Boot distroboot) boot via extlinux
+# even when boot.scr is present — distroboot picks up extlinux/extlinux.conf
+# FIRST and never executes boot.scr. In that case the static root=PARTLABEL=...
+# in the extlinux.conf 'append' line determines the boot slot; neither the
+# numeric mender_boot_part NOR the mender_boot_slot_b marker is consulted.
+# Detect by presence of extlinux/extlinux.conf and update root=PARTLABEL= there.
+if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
+    TARGET_PART=$(cat "$BOOT_PART_FILE")
+    PART_B=""
+    if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+        PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+    fi
+    if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+        TARGET_LABEL="rootfs_b"
+    else
+        TARGET_LABEL="rootfs_a"
+    fi
+    sed -i "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${TARGET_LABEL}/g" \
+        "$MNT/extlinux/extlinux.conf"
+    sync
+    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL}"
+fi
+
+# ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────
+# UEFI + systemd-boot Automatic Boot Assessment: loader/entries/ holds
+# slot-a+N.conf and/or slot-b+N.conf. The +N suffix is the remaining boot-count;
+# systemd-boot selects the entry with the highest positive count. To switch slots:
+# exhaust the current slot entry (rename to +0 — systemd-boot skips +0 entries)
+# and restore/create the target slot entry with +3 tries. otapulse-boot-confirm
+# resets the winning entry to +3 on every successful boot (no extra work here).
+if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
+    TARGET_PART=$(cat "$BOOT_PART_FILE")
+    PART_B=""
+    if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+        PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+    fi
+    if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+        TARGET_SLOT="b"; CURRENT_SLOT="a"
+        TARGET_LABEL="rootfs_b"; CURRENT_LABEL="rootfs_a"
+    else
+        TARGET_SLOT="a"; CURRENT_SLOT="b"
+        TARGET_LABEL="rootfs_a"; CURRENT_LABEL="rootfs_b"
+    fi
+    ENTRIES="$MNT/loader/entries"
+    # sort -r picks slot-a+3.conf before slot-a+0.conf (higher count first)
+    CURRENT_CONF=$(find "$ENTRIES" -maxdepth 1 -name "slot-${CURRENT_SLOT}+*.conf" 2>/dev/null \
+                   | sort -r | head -1)
+    TARGET_CONF=$(find "$ENTRIES" -maxdepth 1 -name "slot-${TARGET_SLOT}+*.conf" 2>/dev/null \
+                  | sort -r | head -1)
+    if [ -n "$CURRENT_CONF" ]; then
+        # Exhaust current slot: rename to +0 (systemd-boot will not select a +0 entry)
+        CURRENT_0="$ENTRIES/slot-${CURRENT_SLOT}+0.conf"
+        [ "$CURRENT_CONF" != "$CURRENT_0" ] && mv "$CURRENT_CONF" "$CURRENT_0"
+        TARGET_3="$ENTRIES/slot-${TARGET_SLOT}+3.conf"
+        if [ -n "$TARGET_CONF" ]; then
+            # Target entry already exists (e.g. +0 left from an earlier reverse OTA) — restore to +3
+            [ "$TARGET_CONF" != "$TARGET_3" ] && mv "$TARGET_CONF" "$TARGET_3"
+        else
+            # No target entry yet — generate from the current template, swapping root=PARTLABEL=
+            sed "s/root=PARTLABEL=${CURRENT_LABEL}/root=PARTLABEL=${TARGET_LABEL}/g" \
+                "$CURRENT_0" > "$TARGET_3"
+        fi
+        sync
+        # systemd-boot honours loader.conf's `default` pin OVER the ABA try-counts,
+        # so the entry rename alone is not enough — repoint default to the target slot.
+        if [ -f "$MNT/loader/loader.conf" ]; then
+            sed -i "s/^default .*/default slot-${TARGET_SLOT}*/" "$MNT/loader/loader.conf"
+            sync
+        fi
+        echo "ArtifactReboot_Enter: EFI ABA -> slot-${TARGET_SLOT}+3.conf (root=PARTLABEL=${TARGET_LABEL})"
+    else
+        echo "ArtifactReboot_Enter: EFI ABA: no slot-${CURRENT_SLOT}+*.conf in loader/entries — skip"
+    fi
+fi
+
+cleanup
 exit 0

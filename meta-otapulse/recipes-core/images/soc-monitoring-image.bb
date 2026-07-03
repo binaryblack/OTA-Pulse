@@ -113,9 +113,12 @@ IMAGE_INSTALL += " \
     "
 
 # Extra development tools (remove for production)
+# gdb removed: gdb-14.2 configure.ac pins Autoconf 2.69 but this tree's
+# autoconf-native is 2.72e, so autoreconf fails (Makefile.in never generated)
+# — an upstream/toolchain incompatibility unrelated to the monitoring stack.
+# strace builds fine and is kept. (BUG-040)
 IMAGE_INSTALL:append = " \
     strace \
-    gdb \
     "
 
 # Image size configuration
@@ -147,3 +150,18 @@ TOOLCHAIN_TARGET_TASK += "packagegroup-core-standalone-sdk-target"
 # Generic systemd configuration - suppress common warnings
 # To silence systemd warning about /home/root, add this to your local.conf:
 # ROOT_HOME = "/root"
+
+# Added by /verify-remote-ssh remote-ssh integration (TODO-002)
+IMAGE_INSTALL:append = " \
+    frp \
+    soc-ota-tunneld \
+    soc-shell-access \
+    "
+
+# BUG-113 note: earlier soc-shell-access recipes (pre-S16-009) left the
+# 'support' shadow entry as the locked sentinel '!', which broke pubkey SSH
+# auth (RSSH-101..105) and required a ROOTFS_POSTPROCESS_COMMAND sed here to
+# unlock it post-install. soc-shell-access_1.0.0.bb's own pkg_postinst now
+# writes a real SHA-512crypt hash for 'support' at do_rootfs time (S16-009),
+# so the shadow entry is never a locked sentinel and no image-level fixup
+# is needed.

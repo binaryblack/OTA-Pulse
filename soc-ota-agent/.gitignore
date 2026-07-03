@@ -35,3 +35,4 @@ mender
 oe-logs
 oe-workdir
 otapulse
+soc-ota-tunneld

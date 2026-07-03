@@ -19,7 +19,11 @@ RestartSec=30
 WatchdogSec=0
 
 # Hardening - use 'full' instead of 'strict' to allow /data writes
-ProtectSystem=full
+# BUG-095: ProtectSystem=full|true|strict remount /boot read-only and
+# ReadWritePaths/BindPaths cannot carve a separate FS mount back to rw, so the
+# agent's boot-slot write (A/B switch) got EROFS and the device always booted the
+# old slot. Disable it; the agent runs as root and must write /boot + partitions.
+ProtectSystem=false
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=no

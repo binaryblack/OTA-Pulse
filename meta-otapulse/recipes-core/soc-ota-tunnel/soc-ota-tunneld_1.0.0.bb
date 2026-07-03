@@ -53,6 +53,12 @@ TUNNEL_SERVER_PORT ?= "7000"
 
 S = "${EXTERNALSRC}"
 
+# Prevent base_do_configure from running 'make clean' when the configure task
+# hash changes.  Both soc-ota-agent and soc-ota-tunneld share the same
+# EXTERNALSRC tree, so a 'make clean' here would delete the 'otapulse' binary
+# that soc-ota-agent just compiled, causing its do_install to fail.
+CLEANBROKEN = "1"
+
 # Force CGO off — pure-Go static binary regardless of host CGO_ENABLED.
 export CGO_ENABLED = "0"
 export GO111MODULE = "on"
@@ -72,10 +78,13 @@ do_compile() {
     # Static build — no CGO, no external linker needed.
     export CGO_ENABLED="0"
 
-    # Remove build system paths from binary for reproducibility.
-    export GO_BUILD_FLAGS="-trimpath -mod=vendor"
-
-    oe_runmake build-tunneld
+    # BUG-006 workaround: oe_runmake-based build silently produces no binary
+    # under Yocto's env. Run go build directly + verify output.
+    set -x
+    rm -f ${S}/soc-ota-tunneld
+    go build -trimpath -mod=vendor -ldflags "-s -w" -o ${S}/soc-ota-tunneld ./cmd/soc-ota-tunneld
+    test -x ${S}/soc-ota-tunneld
+    set +x
 }
 
 do_install() {

@@ -18,8 +18,17 @@ RestartSec=30
 # The agent has its own timeout handling for network operations
 WatchdogSec=0
 
-# Hardening - use 'full' instead of 'strict' to allow /data writes
-ProtectSystem=full
+# Hardening.
+# BUG-095: ProtectSystem=full|true|strict all remount the FAT /boot partition
+# read-only, and ReadWritePaths=/boot / BindPaths=/boot CANNOT carve a SEPARATE
+# filesystem mount back to read-write (verified on systemd 255 — the protected
+# read-only remount shadows the rw bind). The agent must write the boot-slot file
+# (/boot/mender_boot_part) and, on direct-boot boards, cmdline.txt to /boot for the
+# A/B slot switch; under ProtectSystem the write got EROFS and silently no-op'd, so
+# the device always booted the OLD slot and rolled back. Disable ProtectSystem so
+# /boot is writable. The agent already runs as User=root and legitimately needs to
+# write the boot/rootfs partitions, so this is not a meaningful additional exposure.
+ProtectSystem=false
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=no
