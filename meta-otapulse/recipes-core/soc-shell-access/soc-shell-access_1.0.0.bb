@@ -138,7 +138,16 @@ USERADD_PACKAGES = "${PN}"
 #   --password *      : INITIAL placeholder — do_install replaces this with a
 #                       real SHA-512 hash at build time (see below).  We cannot
 #                       pass the final hash here because it is generated at
-#                       install time from openssl rand.
+#                       install time from openssl rand.  Quoted ('*') because
+#                       useradd_base.bbclass's perform_useradd() re-parses
+#                       USERADD_PARAM via a second `eval` pass; an unquoted `*`
+#                       is glob-expanded there against whatever files happen to
+#                       exist in bitbake's cwd at that moment, injecting extra
+#                       positional args after the `support` LOGIN argument and
+#                       making useradd fail non-deterministically (BUG-151).
+#                       The literal quote characters survive both eval passes
+#                       and suppress the expansion while the placeholder value
+#                       useradd/pkg_postinst see is still the literal `*`.
 #
 # PASSWORD DESIGN (S16-009 fix):
 #   The device sshd is compiled WITHOUT PAM (no /etc/pam.d/sshd → UsePAM no).
@@ -156,7 +165,7 @@ USERADD_PACKAGES = "${PN}"
 #   PasswordAuthentication for support, so the unknown password cannot be used
 #   over SSH regardless.
 #   Result: passwd -S support shows status "P" (password set), NOT "L" (locked).
-USERADD_PARAM:${PN} = "--system --shell /bin/sh --home-dir /home/support --create-home --no-user-group --gid support --password * support"
+USERADD_PARAM:${PN} = "--system --shell /bin/sh --home-dir /home/support --create-home --no-user-group --gid support --password '*' support"
 
 # Create the primary group for the support user with a stable GID.
 # Using 'support' as the group name; GID is auto-assigned in system range.

@@ -108,9 +108,9 @@ python do_generate_mender_artifact() {
 
     # Determine output filename
     if signing_key and os.path.isfile(signing_key):
-        mender_out = os.path.join(deploy_dir, "%s-%s-signed.mender" % (image_basename, machine))
+        mender_out = os.path.join(deploy_dir, "%s-%s-signed.otapulse" % (image_basename, machine))
     else:
-        mender_out = os.path.join(deploy_dir, "%s-%s.mender" % (image_basename, machine))
+        mender_out = os.path.join(deploy_dir, "%s-%s.otapulse" % (image_basename, machine))
 
     # Build the command
     cmd = [mender_artifact_bin, 'write', 'rootfs-image',
@@ -261,7 +261,7 @@ python do_generate_mender_artifact_unsigned() {
     if not rootfs_image:
         return
 
-    mender_out = os.path.join(deploy_dir, "%s-%s-unsigned.mender" % (image_basename, machine))
+    mender_out = os.path.join(deploy_dir, "%s-%s-unsigned.otapulse" % (image_basename, machine))
 
     cmd = [mender_artifact_bin, 'write', 'rootfs-image',
            '--file', rootfs_image,
