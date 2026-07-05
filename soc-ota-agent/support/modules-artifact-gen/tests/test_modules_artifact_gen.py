@@ -125,7 +125,9 @@ class TestModulesArtifactGen:
             },
         ],
     )
-    def test_single_file_update_module_gen(self, single_file_artifact_gen_path, tc):
+    def test_single_file_update_module_gen(
+        self, single_file_artifact_gen_path, artifact_read_bin, tc
+    ):
         """Test the single-file update module generator"""
 
         file_tree = tempfile.mkdtemp()
@@ -157,8 +159,8 @@ class TestModulesArtifactGen:
             else:
                 subprocess.check_call(cmd, shell=True)
 
-            # Read back with mender-artifact
-            cmd = "mender-artifact read %s" % artifact_file
+            # Read back with the OTA artifact tool
+            cmd = "%s read %s" % (artifact_read_bin, artifact_file)
             logger.info("Executing: %s ", cmd)
             output = subprocess.check_output(cmd, shell=True).decode().strip()
 

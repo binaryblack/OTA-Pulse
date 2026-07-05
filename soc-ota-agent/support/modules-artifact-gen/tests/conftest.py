@@ -26,11 +26,30 @@ def single_file_artifact_gen_path(request):
     return os.path.join(MODULES_ARTIFACT_GEN_PATH, "single-file-artifact-gen")
 
 
+@pytest.fixture(scope="session")
+def artifact_read_bin(request):
+    """Resolve the OTA artifact tool used to read back generated artifacts.
+
+    Prefers the otapulse-artifact wrapper (pass-through to the real
+    mender-artifact), falls back to mender-artifact directly.
+    """
+    return (
+        distutils.spawn.find_executable("otapulse-artifact")
+        and "otapulse-artifact"
+        or "mender-artifact"
+    )
+
+
 def pytest_configure(config):
     verify_sane_test_environment()
 
 
 def verify_sane_test_environment():
-    # check if required tools are in PATH, add any other checks here
-    if distutils.spawn.find_executable("mender-artifact") is None:
-        raise SystemExit("mender-artifact not found in PATH")
+    # check if required tools are in PATH, add any other checks here.
+    # Prefer the otapulse-artifact wrapper (pass-through to the real
+    # mender-artifact), fall back to mender-artifact directly.
+    if (
+        distutils.spawn.find_executable("otapulse-artifact") is None
+        and distutils.spawn.find_executable("mender-artifact") is None
+    ):
+        raise SystemExit("OTA artifact tool not found in PATH (looked for otapulse-artifact, mender-artifact)")

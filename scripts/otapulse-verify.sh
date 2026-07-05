@@ -81,10 +81,18 @@ detect_machine() {
         | tr -d ' "'
 }
 
-# Locate the mender-artifact binary.
-# Checks the Buildroot host-tools convention first, then common system paths.
+# Locate the OTA artifact tool binary: prefer the otapulse-artifact
+# wrapper (pass-through to the real mender-artifact), fall back to
+# mender-artifact directly. Checks the Buildroot host-tools convention
+# first, then common system paths.
 find_mender_artifact_bin() {
     local candidates=(
+        "${BUILD_DIR}/host/bin/otapulse-artifact"
+        "${BUILD_DIR}/../host/bin/otapulse-artifact"
+        "/usr/local/bin/otapulse-artifact"
+        "/usr/bin/otapulse-artifact"
+        "${HOME}/.local/bin/otapulse-artifact"
+        "${HOME}/bin/otapulse-artifact"
         "${BUILD_DIR}/host/bin/mender-artifact"
         "${BUILD_DIR}/../host/bin/mender-artifact"
         "/usr/local/bin/mender-artifact"
@@ -96,7 +104,7 @@ find_mender_artifact_bin() {
         [[ -x "$c" ]] && { echo "$c"; return 0; }
     done
     # Fall back to PATH
-    command -v mender-artifact 2>/dev/null || true
+    command -v otapulse-artifact 2>/dev/null || command -v mender-artifact 2>/dev/null || true
 }
 
 # Check whether a path exists inside an ext4 image using debugfs.
@@ -232,8 +240,8 @@ if [[ "${#MENDER_FILES[@]}" -eq 0 ]]; then
     info "  Ensure 'mender-artifact' class is inherited and ext4 is in IMAGE_FSTYPES"
 else
     MENDER_BIN=$(find_mender_artifact_bin)
-    [[ -n "$MENDER_BIN" ]] && info "mender-artifact tool: ${MENDER_BIN}" \
-                             || info "mender-artifact tool: not found (validation skipped)"
+    [[ -n "$MENDER_BIN" ]] && info "OTA artifact tool: ${MENDER_BIN}" \
+                             || info "OTA artifact tool: not found (validation skipped)"
 
     for mender_file in "${MENDER_FILES[@]}"; do
         [[ -z "$mender_file" ]] && continue
@@ -250,9 +258,9 @@ else
         else
             # Validate integrity
             if "$MENDER_BIN" validate "$mender_file" &>/dev/null; then
-                pass "mender-artifact validate: OK"
+                pass "OTA artifact tool validate: OK"
             else
-                fail "mender-artifact validate FAILED for $(basename "$mender_file")"
+                fail "OTA artifact tool validate FAILED for $(basename "$mender_file")"
             fi
 
             # Extract metadata
@@ -477,16 +485,16 @@ else
     warn "No .mender artifacts found — cannot assess signing status"
 fi
 
-# Cross-check using mender-artifact read if available
+# Cross-check using the OTA artifact tool's `read` if available
 MENDER_BIN=$(find_mender_artifact_bin)
 if [[ -n "$MENDER_BIN" ]] && [[ "${#MENDER_FILES[@]}" -gt 0 ]]; then
     first_mender="${MENDER_FILES[0]}"
     if [[ -n "$first_mender" ]] && [[ -f "$first_mender" ]]; then
         sig_out=$("$MENDER_BIN" read "$first_mender" 2>/dev/null || true)
         if echo "$sig_out" | grep -qiE "(signature|signed)"; then
-            pass "mender-artifact read confirms signature present"
+            pass "OTA artifact tool read confirms signature present"
         else
-            warn "mender-artifact read: no signature detected"
+            warn "OTA artifact tool read: no signature detected"
             info "  Artifact will be rejected by devices with SOC_OTA_SIGNATURE_VERIFICATION=1"
         fi
     fi

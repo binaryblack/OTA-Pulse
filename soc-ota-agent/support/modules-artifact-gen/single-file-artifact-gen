@@ -39,7 +39,13 @@ check_dependency() {
   fi
 }
 
-if ! check_dependency mender-artifact; then
+# Prefer the otapulse-artifact wrapper (pass-through to the real
+# mender-artifact), fall back to mender-artifact directly.
+if which otapulse-artifact > /dev/null 2>&1; then
+  mender_artifact_bin="otapulse-artifact"
+elif check_dependency mender-artifact; then
+  mender_artifact_bin="mender-artifact"
+else
   echo "Please follow the instructions here to install mender-artifact and then try again: https://docs.mender.io/downloads#mender-artifact" 1>&2
   exit 1
 fi
@@ -178,7 +184,7 @@ else
   stat -c %a "${file}" > $permissions_file
 fi
 
-mender-artifact write module-image \
+"$mender_artifact_bin" write module-image \
   -T single-file \
   $device_types \
   -o "$output_path" \
@@ -192,6 +198,6 @@ mender-artifact write module-image \
 rm -rf $tmpdir
 
 echo "Artifact $output_path generated successfully:"
-mender-artifact read $output_path
+"$mender_artifact_bin" read $output_path
 
 exit 0

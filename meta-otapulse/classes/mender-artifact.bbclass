@@ -52,9 +52,14 @@ python do_generate_mender_artifact() {
     signing_key = d.getVar('SOC_OTA_SIGNING_KEY')
     signing_cert = d.getVar('SOC_OTA_SIGNING_CERT')
 
-    # Find mender-artifact binary in common locations
+    # Find the OTA artifact tool binary in common locations: prefer the
+    # otapulse-artifact wrapper (pass-through to the real mender-artifact),
+    # fall back to mender-artifact directly.
     mender_artifact_bin = None
-    for path in ['/usr/bin/mender-artifact', '/usr/local/bin/mender-artifact',
+    for path in ['/usr/bin/otapulse-artifact', '/usr/local/bin/otapulse-artifact',
+                 os.path.expanduser('~/bin/otapulse-artifact'),
+                 os.path.expanduser('~/.local/bin/otapulse-artifact'),
+                 '/usr/bin/mender-artifact', '/usr/local/bin/mender-artifact',
                  os.path.expanduser('~/bin/mender-artifact'),
                  os.path.expanduser('~/.local/bin/mender-artifact')]:
         if os.path.isfile(path) and os.access(path, os.X_OK):
@@ -62,7 +67,7 @@ python do_generate_mender_artifact() {
             break
 
     if not mender_artifact_bin:
-        bb.warn("mender-artifact not found in /usr/bin, /usr/local/bin, ~/bin, or ~/.local/bin")
+        bb.warn("OTA artifact tool (otapulse-artifact/mender-artifact) not found in /usr/bin, /usr/local/bin, ~/bin, or ~/.local/bin")
         bb.warn("Skipping Mender artifact generation")
         return
 
@@ -177,7 +182,7 @@ python do_generate_mender_artifact() {
             bb.note("To verify on device, ensure corresponding public key is deployed")
 
     except subprocess.CalledProcessError as e:
-        bb.error("mender-artifact failed with exit code %d" % e.returncode)
+        bb.error("OTA artifact tool failed with exit code %d" % e.returncode)
         bb.error("Command: %s" % ' '.join(cmd))
         if e.stdout:
             bb.error("stdout: %s" % e.stdout)
@@ -207,9 +212,14 @@ python do_generate_mender_artifact_unsigned() {
     device_type = d.getVar('MENDER_DEVICE_TYPE')
     compression = d.getVar('MENDER_ARTIFACT_COMPRESSION') or 'gzip'
 
-    # Find mender-artifact binary
+    # Find the OTA artifact tool binary: prefer the otapulse-artifact
+    # wrapper (pass-through to the real mender-artifact), fall back to
+    # mender-artifact directly.
     mender_artifact_bin = None
-    for path in ['/usr/bin/mender-artifact', '/usr/local/bin/mender-artifact',
+    for path in ['/usr/bin/otapulse-artifact', '/usr/local/bin/otapulse-artifact',
+                 os.path.expanduser('~/bin/otapulse-artifact'),
+                 os.path.expanduser('~/.local/bin/otapulse-artifact'),
+                 '/usr/bin/mender-artifact', '/usr/local/bin/mender-artifact',
                  os.path.expanduser('~/bin/mender-artifact'),
                  os.path.expanduser('~/.local/bin/mender-artifact')]:
         if os.path.isfile(path) and os.access(path, os.X_OK):
