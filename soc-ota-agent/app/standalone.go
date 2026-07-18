@@ -115,8 +115,15 @@ func doStandaloneInstallStatesDownload(art io.ReadCloser,
 		// No doStandaloneFailureStates here, since we have not done anything yet.
 		return nil, err
 	}
+	verifyKeys, err := device.Config.GetVerificationKeys()
+	if err != nil {
+		log.Errorf("Loading artifact verification keys failed: %s", err.Error())
+		callErrorScript("Download", stateExec)
+		_ = doStandaloneFailureStates(device, &standaloneData{}, stateExec, false, false, true)
+		return nil, err
+	}
 	installer, installers, err := installer.ReadHeaders(art, dt,
-		device.Config.GetVerificationKeys(),
+		verifyKeys,
 		device.StateScriptPath, &device.InstallerFactories)
 	standaloneData := &standaloneData{
 		installers: installers,

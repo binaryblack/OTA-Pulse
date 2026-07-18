@@ -39,6 +39,12 @@ type MenderConfigFromFile struct {
 	// each key will try to verify the artifact until one succeeds.
 	// Only one of ArtifactVerifyKey/ArtifactVerifyKeys can be specified.
 	ArtifactVerifyKeys []string `json:",omitempty"`
+	// RequireArtifactVerification, when true, makes it a hard install
+	// failure for GetVerificationKeys to resolve zero usable keys (whether
+	// because none are configured or because every configured key failed
+	// to load). Prevents a device from silently falling back to unsigned
+	// artifact installation (GAP-OTA-003).
+	RequireArtifactVerification bool `json:",omitempty"`
 
 	// HTTPS client parameters
 	HttpsClient client.HttpsClient `json:",omitempty"`
@@ -376,18 +382,28 @@ type VerificationKey struct {
 	Data []byte
 }
 
-// GetVerificationKeys reads all verification keys.
-func (c *MenderConfig) GetVerificationKeys() []*VerificationKey {
+// GetVerificationKeys reads all verification keys. A ReadFile error on any
+// CONFIGURED key is treated as fatal (returned, not logged-and-skipped): a
+// mis-set key path must never silently downgrade the device to accepting
+// unsigned artifacts (GAP-OTA-003). When RequireArtifactVerification is set,
+// resolving zero keys (none configured, or all configured keys unreadable)
+// is also a hard error.
+func (c *MenderConfig) GetVerificationKeys() ([]*VerificationKey, error) {
 	if len(c.ArtifactVerifyKeys) == 0 {
-		return nil
+		if c.RequireArtifactVerification {
+			return nil, errors.New(
+				"config: RequireArtifactVerification is set but no " +
+					"ArtifactVerifyKey(s) are configured")
+		}
+		return nil, nil
 	}
 
 	var out []*VerificationKey
 	for _, keyPath := range c.ArtifactVerifyKeys {
 		key, err := ioutil.ReadFile(keyPath)
 		if err != nil {
-			log.Infof("config: error reading artifact verify key from %v", keyPath)
-			continue
+			log.Errorf("config: error reading configured artifact verify key from %v: %v", keyPath, err)
+			return nil, errors.Wrapf(err, "config: error reading configured artifact verify key from %v", keyPath)
 		}
 		out = append(out, &VerificationKey{
 			Path: keyPath,
@@ -395,5 +411,11 @@ func (c *MenderConfig) GetVerificationKeys() []*VerificationKey {
 		})
 	}
 
-	return out
+	if len(out) == 0 && c.RequireArtifactVerification {
+		return nil, errors.New(
+			"config: RequireArtifactVerification is set but no usable " +
+				"artifact verify keys were loaded")
+	}
+
+	return out, nil
 }
