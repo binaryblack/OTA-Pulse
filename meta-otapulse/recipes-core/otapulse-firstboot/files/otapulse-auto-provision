@@ -138,10 +138,14 @@ if echo "$RESPONSE" | grep -q '"api_key"'; then
 fi
 
 # Method 2: Try admin-based registration (for test environments)
-# This requires admin credentials to be configured
+# This requires admin credentials to be configured via the operator-supplied
+# PROVISION_ENV override — no default credentials are shipped (GAP-OTA-015).
 if [ -z "$API_KEY" ]; then
-    ADMIN_EMAIL="${OTAPULSE_ADMIN_EMAIL:-admin@socmon.local}"
-    ADMIN_PASSWORD="${OTAPULSE_ADMIN_PASSWORD:-Admin@123}"
+  if [ -z "$OTAPULSE_ADMIN_EMAIL" ] || [ -z "$OTAPULSE_ADMIN_PASSWORD" ]; then
+    log "ERROR: OTAPULSE_ADMIN_EMAIL/OTAPULSE_ADMIN_PASSWORD not set — no default admin credentials are shipped. Supply them via $PROVISION_ENV to enable admin-based registration. Skipping."
+  else
+    ADMIN_EMAIL="$OTAPULSE_ADMIN_EMAIL"
+    ADMIN_PASSWORD="$OTAPULSE_ADMIN_PASSWORD"
 
     log "Attempting admin-based registration..."
 
@@ -236,6 +240,7 @@ print(next((x.get('id', '') for x in items if x.get('device_id') == device_id), 
     else
         log "JWT login failed - check admin credentials"
     fi
+  fi
 fi
 
 # Save credentials if we got an API key

@@ -16,12 +16,13 @@ StandardError=journal+console
 TimeoutStartSec=180
 
 # Admin credentials used by auto-provision to mint the device API key + sotc
-# tunnel credential on first boot. DEFAULT = the LAN server admin so flashed
-# boards self-provision against 192.168.0.123 out of the box. Override for a
-# staging image via a systemd drop-in or bbappend (do NOT bake real prod creds):
-#   /etc/systemd/system/otapulse-auto-provision.service.d/10-creds.conf
-Environment="OTAPULSE_ADMIN_EMAIL=admin@socmon.local"
-Environment="OTAPULSE_ADMIN_PASSWORD=Admin@123"
+# tunnel credential on first boot. No default credentials are shipped (GAP-OTA-015)
+# — the operator must supply OTAPULSE_ADMIN_EMAIL/OTAPULSE_ADMIN_PASSWORD via
+# /etc/otapulse/provision.env (mode 0600, not tracked in this repo). The '-'
+# prefix makes the file optional so a board with no override still boots;
+# otapulse-auto-provision itself logs a loud, explicit error and skips
+# admin-based registration if the variables are unset.
+EnvironmentFile=-/etc/otapulse/provision.env
 
 [Install]
 WantedBy=multi-user.target
