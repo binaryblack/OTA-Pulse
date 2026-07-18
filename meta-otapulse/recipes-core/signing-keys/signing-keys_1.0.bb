@@ -21,6 +21,11 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 # When set, these keys are used instead of the default example keys
 SOC_OTA_VERIFICATION_KEYS ?= ""
 
+# Whether the image enables artifact signature verification (see soc-ota-agent_1.0.0.bb
+# and otapulse-sanity.bbclass). GAP-OTA-016: this recipe must never let a
+# SOC_OTA_SIGNATURE_VERIFICATION=1 build fall back to example keys silently.
+SOC_OTA_SIGNATURE_VERIFICATION ?= "0"
+
 # SRC_URI is conditional:
 # - If custom keys are specified, only include README (keys come from custom paths)
 # - If no custom keys, include example placeholder keys from files/ directory
@@ -40,6 +45,23 @@ python do_install() {
     workdir = d.getVar('WORKDIR')
     signing_keys_dir = d.getVar('SIGNING_KEYS_DIR')
     custom_keys = d.getVar('SOC_OTA_VERIFICATION_KEYS') or ""
+    sig_verify = (d.getVar('SOC_OTA_SIGNATURE_VERIFICATION') or '0').strip()
+
+    # GAP-OTA-016: a signature-verifying build must never fall back to the
+    # example keypair (anyone can pull it from the project source). Fail the
+    # build outright instead of quietly trusting it — this check lives here
+    # (not just in otapulse-sanity.bbclass, see TASK-S38-011) so it can't be
+    # bypassed by OTAPULSE_SANITY_LEVEL=warn or a sanity 'signing' skip.
+    if sig_verify == '1' and not custom_keys.strip():
+        bb.fatal(
+            "signing-keys: SOC_OTA_SIGNATURE_VERIFICATION=1 but "
+            "SOC_OTA_VERIFICATION_KEYS is not set. Refusing to fall back to "
+            "the example keypair shipped in this recipe's files/ directory — "
+            "it is publicly available in the project source and must never "
+            "be trusted as a production verification key.\n"
+            "Set the path to your real public verification key:\n"
+            "  SOC_OTA_VERIFICATION_KEYS = \"/path/to/production-rsa-public.pem\""
+        )
 
     # Full paths
     dest_base = os.path.join(d_dir, signing_keys_dir.lstrip('/'))
@@ -72,19 +94,21 @@ python do_install() {
             else:
                 bb.warn("Custom verification key not found: %s" % key_path)
     else:
-        # Install example placeholder keys (for development/testing only)
-        # WARNING: Replace with production keys for actual deployment!
+        # Install example placeholder keys (for development/testing only).
+        # SOC_OTA_SIGNATURE_VERIFICATION=1 already bb.fatal'd above, so
+        # reaching this branch means verification is off — these keys are
+        # inert. GAP-OTA-016: install them under their real example- name;
+        # NEVER alias them to production-*, which is the exact filename
+        # soc-ota-agent's default SOC_OTA_VERIFY_KEY_FILES trusts.
         bb.warn("Installing EXAMPLE placeholder keys - NOT FOR PRODUCTION USE!")
         bb.warn("Set SOC_OTA_VERIFICATION_KEYS in local.conf for production builds")
         for key_file in ['example-rsa-public.pem', 'example-ecdsa-public.pem']:
             src_path = os.path.join(workdir, key_file)
             if os.path.exists(src_path):
-                # Install with 'production-' prefix for compatibility with soc-ota-agent
-                dest_name = key_file.replace('example-', 'production-')
-                dest_path = os.path.join(dest_active, dest_name)
+                dest_path = os.path.join(dest_active, key_file)
                 shutil.copy2(src_path, dest_path)
                 os.chmod(dest_path, 0o444)
-                bb.note("Installed example key as: %s" % dest_name)
+                bb.note("Installed example key as: %s" % key_file)
 }
 
 FILES:${PN} = " \
