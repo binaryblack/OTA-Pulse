@@ -56,7 +56,11 @@ SRC_URI = " \
     file://ArtifactReboot_Enter_01 \
 "
 
-# Signature verification configuration
+# Signature verification configuration.
+# Default "0" here only sets the agent's runtime config value. At build time,
+# otapulse-sanity.bbclass's 'signing' check (GAP-OTA-002) makes an image build
+# FAIL when this is "0", unless OTAPULSE_ALLOW_UNSIGNED="1" is set as an
+# explicit dev escape hatch — a stock image must not silently ship unsigned.
 SOC_OTA_SIGNATURE_VERIFICATION ?= "0"
 SOC_OTA_SIGNING_KEYS_DIR ?= "/etc/soc-monitoring/signing-keys"
 # Verification keys to include (space-separated list of key filenames)
