@@ -62,6 +62,12 @@ SOC_OTA_SIGNING_KEYS_DIR ?= "/etc/soc-monitoring/signing-keys"
 # Verification keys to include (space-separated list of key filenames)
 # Example: "production-rsa-public.pem production-ecdsa-public.pem"
 SOC_OTA_VERIFY_KEY_FILES ?= "production-rsa-public.pem"
+
+# TLS verification is independent of artifact signature verification (GAP-OTA-001) -
+# defaults ON regardless of SOC_OTA_SIGNATURE_VERIFICATION. Only set to "1" for an
+# explicit self-signed dev setup where the OTA server's TLS cert isn't in the device's
+# trust store.
+SOC_OTA_TLS_SKIP_VERIFY ?= "0"
 # OTA server URL - MUST be set in your platform-specific layer or local.conf
 OTA_SERVER_URL ?= "http://192.168.0.123:8000"
 
@@ -163,7 +169,6 @@ do_install() {
     # Determine signature verification settings
     if [ "${SIG_VERIFY}" = "1" ]; then
         # Signature verification enabled - include ArtifactVerifyKeys line
-        SKIP_VERIFY="false"
         # Build JSON array of verification key paths
         VERIFY_KEY_FILES="${SOC_OTA_VERIFY_KEY_FILES}"
         KEYS_JSON=""
@@ -176,8 +181,19 @@ do_install() {
         VERIFY_KEYS_LINE=",\n\n    \"ArtifactVerifyKeys\": [${KEYS_JSON}]"
     else
         # Signature verification disabled - no ArtifactVerifyKeys line
-        SKIP_VERIFY="true"
         VERIFY_KEYS_LINE=""
+    fi
+
+    # TLS server-certificate verification (GAP-OTA-001): independent of artifact
+    # signature verification above. Defaults to verifying the OTA server's TLS cert
+    # regardless of SIG_VERIFY; only an explicit SOC_OTA_TLS_SKIP_VERIFY = "1" (dev
+    # self-signed setups) disables it.
+    TLS_SKIP_VERIFY="${SOC_OTA_TLS_SKIP_VERIFY}"
+    if [ "${TLS_SKIP_VERIFY}" = "1" ]; then
+        SKIP_VERIFY="true"
+        bbwarn "OTA TLS certificate verification is DISABLED (SOC_OTA_TLS_SKIP_VERIFY=1) - dev/self-signed use only"
+    else
+        SKIP_VERIFY="false"
     fi
 
     # Tenant token for device authentication
@@ -297,7 +313,7 @@ do_create_runtime_spdx[noexec] = "1"
 # Track config variables in do_install hash so sstate is invalidated when they change.
 # Without this, BitBake cannot detect shell variable changes in do_install and will
 # reuse a stale cached package even when OTA_SERVER_URL or credentials change.
-do_install[vardeps] += "OTA_SERVER_URL OTAPULSE_TENANT_TOKEN SOC_OTA_SIGNATURE_VERIFICATION SOC_OTA_VERIFY_KEY_FILES SOC_OTA_SIGNING_KEYS_DIR"
+do_install[vardeps] += "OTA_SERVER_URL OTAPULSE_TENANT_TOKEN SOC_OTA_SIGNATURE_VERIFICATION SOC_OTA_VERIFY_KEY_FILES SOC_OTA_SIGNING_KEYS_DIR SOC_OTA_TLS_SKIP_VERIFY"
 
 # Ensure SPDX tasks don't fail even when SPDX generation is enabled globally
 # This is needed for compatibility with builds that have INHERIT += "create-spdx"
