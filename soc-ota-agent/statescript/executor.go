@@ -388,20 +388,22 @@ func (l Launcher) ExecuteAll(state, action string, ignoreError bool,
 			if err = reportScriptStatus(report, subStatus); err != nil {
 				log.Errorf("statescript: Can not send start status to server: %s", err.Error())
 			}
-
-			defer func() {
-				if err = reportScriptStatus(report,
-					fmt.Sprintf("finished executing script: %s", s.Name())); err != nil {
-					log.Errorf(
-						"statescript: Can not send finished status to server: %s",
-						err.Error(),
-					)
-				}
-			}()
 		}
 
-		if err = executeScript(s, dir, l, timeout, ignoreError); err != nil {
-			return err
+		execErr := executeScript(s, dir, l, timeout, ignoreError)
+
+		if report != nil {
+			if err = reportScriptStatus(report,
+				fmt.Sprintf("finished executing script: %s", s.Name())); err != nil {
+				log.Errorf(
+					"statescript: Can not send finished status to server: %s",
+					err.Error(),
+				)
+			}
+		}
+
+		if execErr != nil {
+			return execErr
 		}
 	}
 	return nil
