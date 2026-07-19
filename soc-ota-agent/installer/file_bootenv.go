@@ -35,6 +35,18 @@ const (
 	DefaultBootCountFile      = "/data/ota/boot_count"
 	DefaultUpgradeAvailFile   = "/data/ota/upgrade_available"
 	DefaultMenderBootPartFile = "/data/ota/mender_boot_part"
+
+	// directBootPrevCmdline is the old-slot cmdline.txt backup written on the FAT
+	// boot partition by updateBootCmdline during a direct-boot (no U-Boot env) A/B
+	// slot switch. It is the rollback target consumed by the pre-agent
+	// otapulse-boot-health.service (GAP-OTA-006): after DefaultMaxBootRetries
+	// failed boots the script restores it over cmdline.txt and reboots onto the
+	// known-good slot. On a good boot it is cleared by ClearDirectBootBackup (see
+	// CommitUpdate). The per-boot retry counter itself lives in
+	// DefaultBootCountFile (/data/ota/boot_count) — the SAME file the shell script
+	// increments and HandleBootCountFallback reads — so there is no separate FAT
+	// counter file.
+	directBootPrevCmdline = "cmdline_prev.txt"
 )
 
 // FileBasedBootEnv implements BootEnvReadWriter using files instead of U-Boot environment.
@@ -398,8 +410,16 @@ func (f *FileBasedBootEnv) getDeviceForPartNum(partNum string) string {
 // original slot every time (BUG-074). The permanent rewrite trades firmware
 // auto-rollback for a switch that actually takes; hardware auto-rollback would need an
 // autoboot.txt tryboot_a_b two-boot-partition layout (a separate boot-integration
-// change). updateBootCmdline keeps a cmdline_prev.txt backup as a manual rollback
-// target, which otapulse-tryboot-commit clears on the first good boot of the new slot.
+// change). updateBootCmdline keeps a cmdline_prev.txt backup as the rollback
+// target. That backup is now consumed by the pre-agent
+// otapulse-boot-health.service (installed by meta-otapulse/recipes-core/
+// otapulse-firstboot): it counts boot attempts and, once boot_count reaches
+// DefaultMaxBootRetries with upgrade_available still set, restores
+// cmdline_prev.txt over cmdline.txt and reboots onto the known-good slot —
+// closing GAP-OTA-006, where a slot that never runs the agent (panic / broken
+// rootfs / crash-loop) would otherwise be a permanent soft-brick. On a GOOD
+// boot the backup is cleared by CommitUpdate (see dual_rootfs_device.go) and,
+// defensively, by otapulse-boot-health on any later upgrade_available=0 boot.
 func (f *FileBasedBootEnv) updateDirectBootSlot(bootDir, newRootDev string) {
 	f.updateBootCmdline(bootDir, newRootDev)
 }
@@ -429,10 +449,15 @@ func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
 		return
 	}
 
-	// Preserve the original (old-slot) cmdline as a manual rollback target, ONCE — do
+	// Preserve the original (old-slot) cmdline as the rollback target, ONCE — do
 	// not clobber a backup written earlier in this same OTA cycle (e.g. by an earlier
-	// SetUpdatedPartition call). otapulse-tryboot-commit removes it on a good boot.
-	prevPath := filepath.Join(bootDir, "cmdline_prev.txt")
+	// SetUpdatedPartition call). This backup is consumed by the pre-agent
+	// otapulse-boot-health.service, which restores it over cmdline.txt after
+	// DefaultMaxBootRetries failed boots (revert-on-max-retries). On a good boot it
+	// is instead removed by CommitUpdate (clearDirectBootBackup) once
+	// upgrade_available is cleared, so a stale backup from this OTA cycle cannot
+	// mislead the NEXT cycle's revert into restoring an already-current slot.
+	prevPath := filepath.Join(bootDir, directBootPrevCmdline)
 	if _, statErr := os.Stat(prevPath); os.IsNotExist(statErr) {
 		if werr := os.WriteFile(prevPath, data, 0644); werr != nil {
 			log.Warnf("FileBasedBootEnv: Failed to write cmdline_prev.txt rollback backup: %v", werr)
@@ -446,6 +471,101 @@ func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
 	}
 	syscall.Sync()
 	log.Infof("FileBasedBootEnv: Updated %s: root → %s", cmdlinePath, newRootDev)
+}
+
+// ClearDirectBootBackup removes the cmdline_prev.txt rollback backup on
+// direct-boot (no working U-Boot env) boards. It is a no-op on U-Boot boards.
+//
+// Called from CommitUpdate after a confirmed-good boot: at that point the new
+// slot is accepted, so its cmdline_prev.txt backup is stale. Leaving it in place
+// would defeat the NEXT OTA cycle's revert — updateBootCmdline only writes a
+// fresh backup when none exists (to avoid clobbering an in-cycle backup), so a
+// leftover from this cycle would make otapulse-boot-health restore an
+// already-current slot instead of the real previous one. Removing it here keeps
+// the pre-agent revert path (GAP-OTA-006) correct across successive OTAs.
+//
+// Best-effort and hardware-independent: the FAT boot partition is located by the
+// same mount-point / by-label probing used by syncBootSlotToBootPartition; a
+// failure to find or mount it is logged and ignored (otapulse-boot-health also
+// drops the stale backup on any later upgrade_available=0 boot).
+func (f *FileBasedBootEnv) ClearDirectBootBackup() {
+	if uBootEnvWorks() {
+		// U-Boot board: no cmdline.txt scheme, nothing to clean up.
+		return
+	}
+
+	bootDir, mountedAt := f.findBootDir()
+	if bootDir == "" {
+		log.Debug("FileBasedBootEnv: ClearDirectBootBackup: no boot partition found, skipping")
+		return
+	}
+	if mountedAt != "" {
+		defer func() {
+			if cmd := f.Commander.Command("umount", mountedAt); cmd != nil {
+				_ = cmd.Run()
+			}
+		}()
+	}
+
+	prevPath := filepath.Join(bootDir, directBootPrevCmdline)
+	if _, err := os.Stat(prevPath); err != nil {
+		// Nothing to remove (common on the very first commit) — not an error.
+		return
+	}
+	if err := os.Remove(prevPath); err != nil {
+		log.Warnf("FileBasedBootEnv: ClearDirectBootBackup: failed to remove %s: %v", prevPath, err)
+		return
+	}
+	syscall.Sync()
+	log.Infof("FileBasedBootEnv: ClearDirectBootBackup: removed stale %s after good boot", prevPath)
+}
+
+// findBootDir returns the directory of the mounted FAT boot partition, mounting
+// it under /mnt/boot if necessary. The second return value is the mount point we
+// created (non-empty only when this call performed the mount, so the caller can
+// unmount it). Mirrors the boot-partition discovery in syncBootSlotToBootPartition.
+func (f *FileBasedBootEnv) findBootDir() (bootDir string, mountedAt string) {
+	bootMountPoints := []string{"/mnt/boot", "/boot/firmware", "/boot"}
+
+	mountData, _ := os.ReadFile("/proc/self/mounts")
+	mountLines := strings.Split(string(mountData), "\n")
+
+	for _, mount := range bootMountPoints {
+		if _, err := os.Stat(mount); err != nil {
+			continue
+		}
+		for _, line := range mountLines {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[1] == mount && fields[2] == "vfat" {
+				return mount, ""
+			}
+		}
+	}
+
+	// Not mounted — try to mount a known boot device (by-label first).
+	bootDevices := []string{
+		"/dev/disk/by-partlabel/boot",
+		"/dev/disk/by-label/boot",
+		"/dev/disk/by-label/BOOT",
+		"/dev/mmcblk1p1",
+		"/dev/mmcblk0p1",
+		"/dev/sda1",
+	}
+	for _, dev := range bootDevices {
+		if _, err := os.Stat(dev); err != nil {
+			continue
+		}
+		mountPoint := "/mnt/boot"
+		if err := os.MkdirAll(mountPoint, 0755); err != nil {
+			continue
+		}
+		if cmd := f.Commander.Command("mount", dev, mountPoint); cmd != nil {
+			if err := cmd.Run(); err == nil {
+				return mountPoint, mountPoint
+			}
+		}
+	}
+	return "", ""
 }
 
 // slotToPartitionNumber converts slot letter (a/b) to partition number.

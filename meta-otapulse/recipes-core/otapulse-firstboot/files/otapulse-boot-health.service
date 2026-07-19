@@ -1,0 +1,33 @@
+[Unit]
+Description=OTAPulse Pre-Agent Boot Health (direct-boot brick prevention)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# GAP-OTA-006: revert-or-accept a pending OTA slot switch on direct-boot boards
+# (VideoCore/cmdline.txt) BEFORE the OTA agent starts, so a slot that never gets
+# the agent running (kernel panic, broken rootfs, sshd/network down, agent
+# crash-loop) still auto-reverts after MAX_BOOT_RETRIES instead of hard-bricking.
+# Runs after filesystems and udev (so the FAT boot partition is discoverable by
+# label), and BEFORE soc-ota-agent so it works even if the agent never comes up.
+#
+# CRITICAL: ordered After=otapulse-partition-setup.service. On BSPs without a real
+# data partition, partition-setup BIND-MOUNTS /data (rootfs-backed) — and that is
+# the /data the agent later writes /data/ota/upgrade_available to. If this script
+# ran before that bind-mount it would read a DIFFERENT (underlay) /data, never see
+# upgrade_available=1, and silently never revert. otapulse-machine-id.service
+# orders itself after partition-setup for the same /data-visibility reason.
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service otapulse-partition-setup.service
+Wants=systemd-udev-settle.service
+Before=soc-ota-agent.service memfaultd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/otapulse-boot-health
+StandardOutput=journal+console
+StandardError=journal+console
+# Must be fast and non-blocking — completes in well under a second in the normal
+# case. Do NOT copy partition-setup's 900s timeout; this must never hold up boot.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

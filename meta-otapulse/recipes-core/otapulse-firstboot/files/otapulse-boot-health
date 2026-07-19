@@ -1,0 +1,191 @@
+#!/bin/sh
+# OTAPulse State Script: otapulse-boot-health
+#
+# Pre-agent brick-prevention for DIRECT-BOOT boards (GAP-OTA-006).
+#
+# Problem this closes:
+#   On direct-boot boards (no U-Boot env — e.g. Raspberry Pi VideoCore firmware
+#   reads root= straight from cmdline.txt), an OTA slot switch PERMANENTLY
+#   rewrites cmdline.txt's root= to the new slot (see file_bootenv.go
+#   updateBootCmdline + ArtifactReboot_Enter_01 section 1) and keeps only a
+#   manual cmdline_prev.txt backup. The only in-agent fallback,
+#   HandleBootCountFallback() in dual_rootfs_device.go, runs once inside the Go
+#   agent's own daemon.Run() at startup — so if the NEW slot never gets the OTA
+#   agent running (kernel panic, broken rootfs, sshd/network down, agent
+#   crash-loop) that fallback never fires and the device is permanently stuck on
+#   a bad slot: a hard brick from a software point of view (no automatic revert).
+#   Additionally, nothing ever INCREMENTS boot_count on file-based boards, so the
+#   in-agent fallback could never trigger anyway.
+#
+# What this does (runs from systemd BEFORE soc-ota-agent.service, so it works
+# even when the agent never starts):
+#   1. If this is not a direct-boot board (no FAT boot partition carrying
+#      cmdline.txt) -> no-op, exit 0.
+#   2. If no upgrade is pending (upgrade_available != 1) -> exit 0 (defensively
+#      reset boot_count to 0 and drop any stale cmdline_prev.txt — pure hygiene).
+#   3. Otherwise increment boot_count and persist it.
+#   4. If boot_count >= MAX_BOOT_RETRIES: revert to the previous slot by restoring
+#      cmdline_prev.txt over cmdline.txt, clear upgrade_available + boot_count,
+#      then reboot onto the known-good slot.
+#   5. Otherwise exit 0 and let the boot continue (the agent, if it comes up,
+#      will CommitUpdate and clear the flags).
+#
+# Hardware/architecture independent: the FAT boot partition is located by GPT/FS
+# label (never a hardcoded /dev node), the same way as ArtifactReboot_Enter_01.
+
+set -eu
+
+LOG_TAG="otapulse-boot-health"
+
+OTA_DIR="/data/ota"
+UPGRADE_AVAIL_FILE="$OTA_DIR/upgrade_available"
+BOOT_COUNT_FILE="$OTA_DIR/boot_count"
+
+# MAX_BOOT_RETRIES mirrors DefaultMaxBootRetries in
+# installer/dual_rootfs_device.go (currently 3). There is no clean way to share
+# a single constant across Go and /bin/sh here — KEEP THESE TWO IN SYNC BY HAND.
+MAX_BOOT_RETRIES=3
+
+MNT=""
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    logger -t "$LOG_TAG" "$1" 2>/dev/null || true
+}
+
+cleanup() {
+    [ -n "$MNT" ] || return 0
+    umount "$MNT" 2>/dev/null || true
+    rmdir "$MNT" 2>/dev/null || true
+    MNT=""
+}
+
+# Locate the FAT "boot" partition by filesystem label (works regardless of /boot
+# being mounted). Mirrors find_fat_boot() in
+# meta-otapulse/recipes-core/soc-ota-agent/files/ArtifactReboot_Enter_01.
+find_fat_boot() {
+    for dev in /dev/disk/by-partlabel/boot /dev/mmcblk*p1 /dev/nvme*n1p1 /dev/sd?1; do
+        [ -b "$dev" ] || continue
+        fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null || true)
+        label=$(blkid -s LABEL -o value "$dev" 2>/dev/null || true)
+        if [ "$fstype" = "vfat" ] && [ "$label" = "boot" ]; then
+            echo "$dev"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Read an OTA state file, echoing a default when it is missing/empty.
+read_ota() {
+    _file="$1"
+    _default="$2"
+    if [ -r "$_file" ]; then
+        _val=$(tr -dc '0-9' < "$_file" 2>/dev/null || true)
+        if [ -n "$_val" ]; then
+            echo "$_val"
+            return 0
+        fi
+    fi
+    echo "$_default"
+}
+
+write_ota() {
+    _file="$1"
+    _value="$2"
+    mkdir -p "$OTA_DIR" 2>/dev/null || true
+    printf '%s\n' "$_value" > "$_file" 2>/dev/null || return 1
+    return 0
+}
+
+# ── 1. Direct-boot board detection ──────────────────────────────────────────
+FAT_DEV=$(find_fat_boot || true)
+if [ -z "$FAT_DEV" ]; then
+    log "No FAT boot partition found — not a direct-boot board, nothing to do"
+    exit 0
+fi
+
+MNT="/tmp/.otapulse_health_$$"
+mkdir -p "$MNT"
+if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
+    log "Failed to mount $FAT_DEV — nothing to do"
+    rmdir "$MNT" 2>/dev/null || true
+    MNT=""
+    exit 0
+fi
+trap cleanup EXIT INT TERM
+
+# Only VideoCore-style direct-boot boards carry cmdline.txt on the FAT boot
+# partition. Anything else (U-Boot boot.scr / extlinux / EFI) is handled by the
+# in-agent fallback and the bootloader itself — this script is a no-op there.
+if [ ! -f "$MNT/cmdline.txt" ]; then
+    log "No cmdline.txt on $FAT_DEV — not a direct-boot board, nothing to do"
+    cleanup
+    exit 0
+fi
+
+# ── 2. Is an upgrade pending? ───────────────────────────────────────────────
+UPGRADE_AVAIL=$(read_ota "$UPGRADE_AVAIL_FILE" "0")
+if [ "$UPGRADE_AVAIL" != "1" ]; then
+    # No pending upgrade. Defensive hygiene: reset a stray non-zero boot_count
+    # and drop any stale cmdline_prev.txt (a good boot's backup that CommitUpdate
+    # may not have reached). Leaving a stale backup around would make the NEXT
+    # OTA's revert restore the WRONG (already-current) slot.
+    BOOT_COUNT=$(read_ota "$BOOT_COUNT_FILE" "0")
+    if [ "$BOOT_COUNT" != "0" ]; then
+        write_ota "$BOOT_COUNT_FILE" "0" && log "No pending upgrade — reset boot_count to 0"
+    fi
+    if [ -f "$MNT/cmdline_prev.txt" ]; then
+        rm -f "$MNT/cmdline_prev.txt"
+        sync
+        log "No pending upgrade — removed stale cmdline_prev.txt"
+    fi
+    cleanup
+    exit 0
+fi
+
+# ── 3. Upgrade pending: count this boot attempt ─────────────────────────────
+# NOTE: persistence of the incremented count is best-effort (|| true). The
+# revert decision below keys off the IN-MEMORY BOOT_COUNT, so a transient /data
+# write failure must NOT abort the script before the safety revert can run —
+# under `set -e` an unguarded failing write here would do exactly that.
+BOOT_COUNT=$(read_ota "$BOOT_COUNT_FILE" "0")
+BOOT_COUNT=$((BOOT_COUNT + 1))
+write_ota "$BOOT_COUNT_FILE" "$BOOT_COUNT" || log "WARNING: failed to persist boot_count=$BOOT_COUNT (continuing on in-memory value)"
+sync
+log "Pending upgrade: boot attempt $BOOT_COUNT/$MAX_BOOT_RETRIES"
+
+# ── 4. Max retries exceeded -> revert to the previous slot ──────────────────
+if [ "$BOOT_COUNT" -ge "$MAX_BOOT_RETRIES" ]; then
+    log "boot_count=$BOOT_COUNT >= $MAX_BOOT_RETRIES — reverting to previous slot"
+
+    if [ -f "$MNT/cmdline_prev.txt" ]; then
+        cp -f "$MNT/cmdline_prev.txt" "$MNT/cmdline.txt"
+        rm -f "$MNT/cmdline_prev.txt"
+        # Remove any leftovers from the abandoned tryboot one-shot scheme.
+        rm -f "$MNT/tryboot.txt" "$MNT/cmdline_tryboot.txt"
+        sync
+        log "Restored cmdline.txt from cmdline_prev.txt (rollback to known-good slot)"
+    else
+        log "WARNING: no cmdline_prev.txt to restore — clearing flags anyway to stop the boot loop"
+    fi
+
+    # Clear the pending-upgrade state so we do not loop on the reverted slot.
+    # Best-effort (|| true): cmdline.txt is ALREADY reverted to the known-good
+    # slot above, so even if these flag writes fail we must still reboot onto it
+    # rather than let `set -e` abort before the reboot.
+    write_ota "$UPGRADE_AVAIL_FILE" "0" || log "WARNING: failed to clear upgrade_available"
+    write_ota "$BOOT_COUNT_FILE" "0" || log "WARNING: failed to clear boot_count"
+    sync
+
+    log "Rebooting onto the previous slot"
+    cleanup
+    # Standalone pre-agent context — no agent state-transition logging to
+    # preserve, so an immediate plain reboot is fine.
+    reboot
+    exit 0
+fi
+
+# ── 5. Still within the retry budget — let the boot continue ────────────────
+cleanup
+exit 0

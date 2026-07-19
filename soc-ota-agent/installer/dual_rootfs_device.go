@@ -370,15 +370,31 @@ const (
 	// DefaultMaxBootRetries is the boot-count threshold at or above which
 	// the fallback mechanism must fire and clear the upgrade_available flag.
 	// Mirrors U-Boot boot_limit=3.
+	//
+	// SINGLE SOURCE OF TRUTH for the retry budget. The pre-agent shell fallback
+	// otapulse-boot-health (meta-otapulse/recipes-core/otapulse-firstboot/files/
+	// otapulse-boot-health) hardcodes the same value as MAX_BOOT_RETRIES because
+	// there is no clean way to share a Go constant with a /bin/sh script here.
+	// KEEP THE TWO NUMERICALLY IN SYNC if you change this.
 	DefaultMaxBootRetries = 3
 )
 
 // HandleBootCountFallback checks the boot environment for a max-retry-exceeded
 // condition (upgrade_available=1 and bootcount >= DefaultMaxBootRetries) and,
-// if found, clears both flags.  This provides the userspace fallback that the
-// bootloader normally handles at reboot time — the agent runs this check once
-// at startup so that the brick-prevention test (BP-004) can observe the fallback
-// signal without requiring a full device reboot.
+// if found, clears both flags.  This is the in-agent userspace fallback; the
+// agent runs it once at startup (daemon.Run), and the brick-prevention test
+// (BP-004) observes the cleared flags without needing a full device reboot.
+//
+// Division of responsibility across boot styles:
+//   - U-Boot-env boards: U-Boot's own bootlimit performs the REAL revert at
+//     reboot time; this Go-side check just clears the software flags after a
+//     successful post-revert boot.
+//   - Direct-boot (cmdline.txt) boards: the actual revert-or-accept action now
+//     happens PRE-AGENT in otapulse-boot-health.service, which restores
+//     cmdline_prev.txt after DefaultMaxBootRetries and reboots — so it works
+//     even when the agent never starts (GAP-OTA-006). By the time the agent
+//     runs, that script has already cleared the flags, making this Go-side
+//     check a harmless secondary/defensive clear (a no-op in the common case).
 //
 // Hardware and architecture independent: works through the BootEnvReadWriter
 // interface regardless of whether U-Boot env or file-based env is in use.
@@ -451,7 +467,19 @@ func (d *dualRootfsDeviceImpl) CommitUpdate() error {
 	if hasUpdate {
 		log.Info("Committing update")
 		// For now set only appropriate boot flags
-		return d.WriteEnv(BootVars{"upgrade_available": "0"})
+		if err := d.WriteEnv(BootVars{"upgrade_available": "0"}); err != nil {
+			return err
+		}
+		// Direct-boot (cmdline.txt) boards keep a cmdline_prev.txt rollback backup
+		// that the pre-agent otapulse-boot-health.service uses to revert after
+		// DefaultMaxBootRetries failed boots (GAP-OTA-006). Now that this boot is
+		// committed the backup is stale; drop it so the NEXT OTA cycle writes a
+		// fresh one and its revert targets the correct previous slot. No-op on
+		// U-Boot boards and when the backup is absent.
+		if cleaner, ok := d.BootEnvReadWriter.(interface{ ClearDirectBootBackup() }); ok {
+			cleaner.ClearDirectBootBackup()
+		}
+		return nil
 	}
 	return errors.New(verifyRebootError)
 }

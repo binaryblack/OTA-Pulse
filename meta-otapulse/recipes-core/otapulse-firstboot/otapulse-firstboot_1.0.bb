@@ -20,6 +20,8 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 SRC_URI = " \
     file://otapulse-partition-setup \
     file://otapulse-partition-setup.service \
+    file://otapulse-boot-health \
+    file://otapulse-boot-health.service \
     file://otapulse-auto-provision \
     file://otapulse-auto-provision.service \
     file://otapulse-machine-id \
@@ -44,13 +46,16 @@ RDEPENDS:${PN} = " \
 
 inherit systemd
 
-SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service otapulse-auto-provision.service otapulse-machine-id.service"
+SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service otapulse-boot-health.service otapulse-auto-provision.service otapulse-machine-id.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 do_install() {
     # Install partition setup script
     install -d ${D}${bindir}
     install -m 0755 ${WORKDIR}/otapulse-partition-setup ${D}${bindir}/otapulse-partition-setup
+
+    # Install pre-agent boot-health script (direct-boot brick prevention)
+    install -m 0755 ${WORKDIR}/otapulse-boot-health ${D}${bindir}/otapulse-boot-health
 
     # Install auto-provisioning script
     install -m 0755 ${WORKDIR}/otapulse-auto-provision ${D}${bindir}/otapulse-auto-provision
@@ -64,6 +69,7 @@ do_install() {
     # Install systemd services
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/otapulse-partition-setup.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${WORKDIR}/otapulse-boot-health.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/otapulse-auto-provision.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/otapulse-machine-id.service ${D}${systemd_system_unitdir}/
 
@@ -80,10 +86,12 @@ do_install() {
 
 FILES:${PN} = " \
     ${bindir}/otapulse-partition-setup \
+    ${bindir}/otapulse-boot-health \
     ${bindir}/otapulse-auto-provision \
     ${bindir}/otapulse-machine-id \
     ${bindir}/switch-boot-slot.sh \
     ${systemd_system_unitdir}/otapulse-partition-setup.service \
+    ${systemd_system_unitdir}/otapulse-boot-health.service \
     ${systemd_system_unitdir}/otapulse-auto-provision.service \
     ${systemd_system_unitdir}/otapulse-machine-id.service \
     ${nonarch_base_libdir}/udev/rules.d/99-otapulse-bsp-aliases.rules \
