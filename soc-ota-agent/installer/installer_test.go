@@ -218,6 +218,16 @@ func (d *fDevice) NewUpdateStorer(updateType *string, payload int) (handlers.Upd
 	return d, nil
 }
 
+func (d *fDevice) GetActive() (string, error) {
+	return "", nil
+}
+
+func (d *fDevice) GetInactive() (string, error) {
+	return "", nil
+}
+
+func (d *fDevice) HandleBootCountFallback() {}
+
 const (
 	PublicRSAKey = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDSTLzZ9hQq3yBB+dMDVbKem6ia
