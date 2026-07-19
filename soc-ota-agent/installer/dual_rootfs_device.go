@@ -280,11 +280,25 @@ func (d *dualRootfsDeviceImpl) InstallUpdate() error {
 	log.Debug("Marking inactive partition as a boot candidate successful.")
 
 	// Call switch-boot-slot.sh to update bootloader configuration
-	// This handles PARTUUID swapping for Rockchip and other boot methods
+	// This handles PARTUUID swapping for Rockchip and other boot methods.
+	//
+	// switchBootSlot returns nil (no error) when the script is simply not
+	// present on this board (e.g. systems that use U-Boot env directly and
+	// never ship this script) - that case is intentionally optional and is
+	// gated by the os.Stat existence check inside switchBootSlot itself.
+	//
+	// If the script IS present but fails to execute successfully, this
+	// board relies on it for the slot switch to actually happen, and the
+	// switch has definitely NOT occurred. Swallowing that error here would
+	// leave upgrade_available=1 set while the boot slot was never switched,
+	// causing the device to reboot expecting an update that never landed.
+	// So: clear upgrade_available and fail the install.
 	if err := d.switchBootSlot(inactivePartition); err != nil {
-		log.Warnf("Failed to switch boot slot via script: %v", err)
-		// Don't fail the install - the boot env files are set, and some
-		// systems may not need the script (e.g., if using U-Boot env directly)
+		log.Errorf("switchBootSlot failed for partition %s: %v — clearing upgrade_available", inactivePartition, err)
+		if clearErr := d.WriteEnv(BootVars{"upgrade_available": "0"}); clearErr != nil {
+			log.Errorf("Failed to clear upgrade_available after switchBootSlot failure: %v", clearErr)
+		}
+		return errors.Wrap(err, "failed to switch boot slot via switch-boot-slot.sh")
 	}
 
 	return nil
