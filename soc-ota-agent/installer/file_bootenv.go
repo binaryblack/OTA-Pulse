@@ -233,8 +233,16 @@ func (f *FileBasedBootEnv) writeMenderBootPart(partNum string) error {
 	}
 
 	// Sync boot slot to boot partition for U-Boot access
-	// This is critical for platforms where U-Boot reads from FAT32 boot partition
-	f.syncBootSlotToBootPartition(partNum)
+	// This is critical for platforms where U-Boot reads from FAT32 boot partition.
+	// A silent failure here would leave the FAT boot-partition byte (or
+	// cmdline.txt on direct-boot boards) stale while WriteEnv still went on to
+	// write upgrade_available=1 right after, making the caller believe the
+	// slot switch succeeded when the device would actually reboot into the
+	// OLD slot. Propagate the failure so WriteEnv aborts before
+	// upgrade_available is written (BUG-106 follow-up, GAP-OTA-004).
+	if err := f.syncBootSlotToBootPartition(partNum); err != nil {
+		return errors.Wrap(err, "failed to sync boot slot to boot partition")
+	}
 
 	return nil
 }
@@ -242,7 +250,7 @@ func (f *FileBasedBootEnv) writeMenderBootPart(partNum string) error {
 // syncBootSlotToBootPartition copies the mender_boot_part file to the boot partition
 // so that U-Boot can read it during boot. U-Boot cannot read from ext4 data partition.
 // Supports multiple platforms: i.MX, Raspberry Pi, Rockchip, generic ARM boards.
-func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
+func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
 	// Common boot partition mount points across different platforms
 	// /boot/firmware - Raspberry Pi (Ubuntu/Debian)
 	// /boot - Generic Linux, some Yocto builds
@@ -307,13 +315,13 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
 
 	if bootFile == "" {
 		log.Warn("FileBasedBootEnv: Could not find or mount boot partition for boot slot sync")
-		return
+		return errors.New("could not find or mount boot partition for boot slot sync")
 	}
 
 	// Write to boot partition
 	if err := os.WriteFile(bootFile, []byte(partNum+"\n"), 0644); err != nil {
 		log.Warnf("FileBasedBootEnv: Failed to sync boot slot to boot partition: %v", err)
-		return
+		return errors.Wrapf(err, "failed to write boot slot to %s", bootFile)
 	}
 
 	// Sync filesystem
@@ -344,6 +352,8 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) {
 			log.Debugf("FileBasedBootEnv: Could not determine root device for partition %s, skipping cmdline.txt update", partNum)
 		}
 	}
+
+	return nil
 }
 
 // uBootEnvWorks reports whether a WORKING U-Boot environment is present: the
