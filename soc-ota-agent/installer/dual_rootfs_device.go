@@ -340,7 +340,20 @@ func (d *dualRootfsDeviceImpl) switchBootSlot(partitionNumber string) error {
 
 	log.Infof("Executing: %s %s", switchBootSlotScript, slot)
 
+	// switch-boot-slot.sh's own board-agnostic partition auto-detection can
+	// fall back to a stale hardcoded default (e.g. /dev/mmcblk0pN) when its
+	// ROOTFS_A_PARTITION/ROOTFS_B_PARTITION env vars aren't set, which is
+	// wrong on any board whose rootfs disk enumerates differently (BUG:
+	// Radxa CM5 e2e_ota slot-switch failure — this device is /dev/mmcblk1,
+	// not mmcblk0). d.rootfsPartA/d.rootfsPartB are already the correct,
+	// board-detected paths for the CURRENT device (see how partANum/partBNum
+	// above are derived from them) — pass them through explicitly instead of
+	// letting the script re-derive or default them independently.
 	cmd := exec.Command(switchBootSlotScript, slot)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("ROOTFS_A_PARTITION=%s", d.rootfsPartA),
+		fmt.Sprintf("ROOTFS_B_PARTITION=%s", d.rootfsPartB),
+	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Errorf("switch-boot-slot.sh failed with error: %v, output: %s", err, string(output))
