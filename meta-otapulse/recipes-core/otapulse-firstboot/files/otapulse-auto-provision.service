@@ -4,8 +4,15 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 # Run after network is available, partitions are set up, and machine-id is restored
 After=network-online.target otapulse-partition-setup.service otapulse-machine-id.service
 Wants=network-online.target
-# Don't run if already provisioned
-ConditionPathExists=!/data/otapulse/.auto-provisioned
+# NOTE: this unit intentionally has NO ConditionPathExists on
+# /data/otapulse/.auto-provisioned. otapulse-auto-provision must run on
+# EVERY boot (including after an OTA) so it can re-align the Remote SSH
+# tunnel's proxyName/credential with the device's current identity even when
+# main provisioning is already done — /etc/otapulse/tunnel.conf ships on the
+# rootfs (wiped by every OTA) while the provisioning markers live on /data
+# (survive OTA), so a marker-gated unit would never run the realignment
+# again. The script itself does the fast, local-only "already aligned, skip"
+# check so a healthy re-run stays cheap and makes no network calls.
 
 [Service]
 Type=oneshot

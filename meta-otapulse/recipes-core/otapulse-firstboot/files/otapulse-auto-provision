@@ -3,10 +3,22 @@
 # Automatically registers the device and obtains API credentials on first boot
 #
 # This script:
-# 1. Detects device identity (machine-id based)
+# 1. Detects device identity (preferring the identity soc-ota-agent itself
+#    resolves to, then a persisted /data copy of that identity for the boot
+#    right after an OTA before it's restored, falling back to machine-id for
+#    genuinely fresh devices)
 # 2. Registers with the OTA server
 # 3. Obtains an API key for device authentication
 # 4. Saves credentials to persistent config location
+# 5. Mints/realigns the Remote SSH tunnel credential, and keeps tunnel.conf's
+#    proxyName set to the device's CURRENT identity so it stays UNIQUE across
+#    the fleet (two boards sharing a hostname would otherwise collide on
+#    frps), on every run — not just the first one (see the tunnel-realignment
+#    section below). NOTE: proxyName is NOT relied on to match any backend
+#    device row's device_id — memfaultd's heartbeat (which authenticates via
+#    API key, not proxyName) is what keeps the canonical row's tunnel_id
+#    aligned with the actual frps proxy name; see meta-otapulse/recipes-core/
+#    memfault/files/memfaultd send_heartbeat().
 
 set -e
 
@@ -14,6 +26,33 @@ LOG_TAG="otapulse-provision"
 PROVISION_MARKER="/data/otapulse/.auto-provisioned"
 CONFIG_DIR="/data/otapulse"
 CONFIG_FILE="${CONFIG_DIR}/otapulse.conf"
+
+# Main (rootfs) otapulse.conf — authoritative for the running soc-ota-agent's
+# identity. soc-ota-agent/conf/config.go LoadConfig() loads the /data fallback
+# copy FIRST and this main copy SECOND, so a SoCDeviceID set here always wins.
+# Used as the frps proxyName below for per-device UNIQUENESS on the shared
+# frps server — not for backend row matching. On live boards SoCDeviceID is
+# frequently a backend-row UUID rather than a dev-XXXX canonical device_id,
+# so it must never be assumed to equal any row's device_id; that's fine here
+# because proxyName's only job is uniqueness, and the actual tunnel_id ↔
+# canonical-row alignment happens via memfaultd's heartbeat (self-aligning,
+# see memfaultd send_heartbeat()), not via this value.
+MAIN_CONFIG_FILE="/etc/otapulse/otapulse.conf"
+
+# Persisted copy of whatever identity we last resolved from MAIN_CONFIG_FILE's
+# SoCDeviceID. Lives on /data so it survives OTA, unlike MAIN_CONFIG_FILE
+# itself. Needed because the TETS-ARE test harness restores SoCDeviceID via
+# SSH only AFTER boot (_restore_agent_config_after_ota) — without this, the
+# very first run after an OTA would see an empty SoCDeviceID, fall back to
+# machine-id, wrongly conclude the tunnel identity is stale, and re-mint
+# against the machine-id row — only to flip back once the harness restores
+# the config on the next run. This file is NOT the agent's own config (that
+# precedence is untouched) — it only feeds get_device_id()'s own fallback.
+IDENTITY_FILE="/data/otapulse/identity"
+
+TUNNEL_MARKER="/data/otapulse/.tunnel-provisioned"
+TUNNEL_CRED="/data/frp/credential"
+TUNNEL_CONF="/etc/otapulse/tunnel.conf"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
@@ -40,20 +79,233 @@ if [ -f "$PROVISION_ENV" ]; then
     set +a
 fi
 
-# Check if already provisioned
-if [ -f "$PROVISION_MARKER" ]; then
-    log "Device already auto-provisioned, skipping"
+# Read a single JSON field from a file, or print "" if the file/field is
+# missing or the file is not valid JSON. Never fails the caller under set -e.
+read_json_field() {
+    python3 -c "
+import json
+try:
+    with open('$1') as f:
+        print(json.load(f).get('$2', ''))
+except Exception:
+    print('')
+" 2>/dev/null || true
+}
+
+# Resolve $DEVICE_ID to its backend device UUID via the already-authenticated
+# admin session (JWT_TOKEN/ORG_ID/SERVER_URL must already be set by the
+# caller). Echoes the resolved UUID, or "" on failure; never fails under
+# set -e. Used both by first-time "device already exists" resolution and by
+# the tunnel self-heal resolution — identical lookup either way.
+#
+# Tries the search filter first (matches the device_id/mac_address/
+# serial_number COLUMNS). On live boards SoCDeviceID (and therefore
+# $DEVICE_ID) is frequently a backend-row UUID rather than a dev-XXXX id or a
+# MAC — that UUID does not equal any row's device_id/mac_address/
+# serial_number column, so the search is a guaranteed miss for those boards.
+# When $DEVICE_ID itself is UUID-shaped and the search missed, fall back to a
+# direct GET by id: a UUID-shaped device_id, even though it isn't literally
+# any row's device_id COLUMN value, still very often IS that row's actual
+# primary key (e.g. the id the device was originally registered/returned
+# under) — trying it directly resolves the case the search filter cannot.
+resolve_device_uuid() {
+    local search_response uuid direct_response direct_http_code direct_body
+    search_response=$(curl -s --max-time 30 \
+        -G "${SERVER_URL}/api/devices" \
+        --data-urlencode "organization_id=${ORG_ID}" \
+        --data-urlencode "search=${DEVICE_ID}" \
+        -H "Authorization: Bearer $JWT_TOKEN" 2>/dev/null || echo '{}')
+    uuid=$(echo "$search_response" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('items', d if isinstance(d, list) else [])
+device_id = '$DEVICE_ID'
+print(next((x.get('id', '') for x in items if x.get('device_id') == device_id), ''))" 2>/dev/null || true)
+
+    if [ -z "$uuid" ] && echo "$DEVICE_ID" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+        direct_response=$(curl -s --max-time 30 \
+            -G "${SERVER_URL}/api/devices/${DEVICE_ID}" \
+            --data-urlencode "organization_id=${ORG_ID}" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
+            -w '\n%{http_code}' 2>/dev/null || printf '{}\n000')
+        direct_http_code=$(printf '%s' "$direct_response" | tail -n1)
+        direct_body=$(printf '%s' "$direct_response" | sed '$d')
+        if [ "$direct_http_code" = "200" ]; then
+            uuid=$(printf '%s' "$direct_body" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+        fi
+    fi
+
+    echo "$uuid"
+}
+
+# Get device identity
+get_device_id() {
+    # 1. Prefer the identity soc-ota-agent itself resolves to at runtime: the
+    #    main config's SoCDeviceID overrides the /data fallback copy (see
+    #    soc-ota-agent/conf/config.go), so it is the id the agent actually
+    #    authenticates/heartbeats as once one has been assigned (e.g. by the
+    #    dashboard at onboarding).
+    if [ -f "$MAIN_CONFIG_FILE" ]; then
+        agent_device_id=$(read_json_field "$MAIN_CONFIG_FILE" SoCDeviceID)
+        if [ -n "$agent_device_id" ]; then
+            # Persist to /data so this identity is still resolvable on a boot
+            # where MAIN_CONFIG_FILE hasn't carried it yet (see IDENTITY_FILE
+            # comment above). Best-effort: never fail identity resolution
+            # over a failed write here.
+            mkdir -p "$(dirname "$IDENTITY_FILE")" 2>/dev/null || true
+            echo "$agent_device_id" > "$IDENTITY_FILE" 2>/dev/null || true
+            chmod 0644 "$IDENTITY_FILE" 2>/dev/null || true
+            echo "$agent_device_id"
+            return 0
+        fi
+    fi
+
+    # 2. Main config has no assigned identity right now (e.g. this is the
+    #    first boot right after an OTA, before the identity gets restored
+    #    into it) — fall back to the last identity we persisted to /data
+    #    rather than machine-id, so this boot doesn't wrongly conclude the
+    #    tunnel/device identity changed.
+    if [ -f "$IDENTITY_FILE" ]; then
+        persisted_id=$(head -n1 "$IDENTITY_FILE" 2>/dev/null | tr -d '\r\n')
+        if [ -n "$persisted_id" ]; then
+            echo "$persisted_id"
+            return 0
+        fi
+    fi
+
+    # 3. Use machine-id as the base for device ID
+    if [ -f /etc/machine-id ]; then
+        cat /etc/machine-id
+        return 0
+    fi
+
+    # 4. Fallback: Try MAC address
+    for iface in eth0 end0 mlan0 wlan0; do
+        if [ -f "/sys/class/net/$iface/address" ]; then
+            cat "/sys/class/net/$iface/address" | tr -d ':' | tr '[:upper:]' '[:lower:]'
+            return 0
+        fi
+    done
+
+    # 5. Last resort: generate random ID
+    head -c 16 /dev/urandom | md5sum | cut -d' ' -f1
+}
+
+DEVICE_ID=$(get_device_id)
+log "Device ID: $DEVICE_ID"
+
+# --- Work-needed detection --------------------------------------------------
+# Split "main provisioning" (registration + API key) from "tunnel alignment"
+# (proxyName + sotc credential matching the CURRENT $DEVICE_ID) so a healthy,
+# already-aligned board is a true no-op — this MUST be re-checked on every
+# run (including after an OTA), not just skipped once a marker exists.
+MAIN_PROVISION_DONE=0
+[ -f "$PROVISION_MARKER" ] && MAIN_PROVISION_DONE=1
+
+CURRENT_PROXY_NAME=""
+[ -f "$TUNNEL_CONF" ] && CURRENT_PROXY_NAME=$(read_json_field "$TUNNEL_CONF" proxyName)
+
+MARKER_DEVICE_ID=""
+if [ -f "$TUNNEL_MARKER" ]; then
+    MARKER_DEVICE_ID=$(grep '^device_id=' "$TUNNEL_MARKER" 2>/dev/null | cut -d= -f2-)
+fi
+
+NEED_PROXY_PATCH=0
+if [ -f "$TUNNEL_CONF" ] && [ "$CURRENT_PROXY_NAME" != "$DEVICE_ID" ]; then
+    NEED_PROXY_PATCH=1
+fi
+
+NEED_TUNNEL_REMINT=0
+if [ -f "$TUNNEL_MARKER" ] && [ "$MARKER_DEVICE_ID" != "$DEVICE_ID" ]; then
+    # The sotc credential on file was minted against a DIFFERENT $DEVICE_ID
+    # than the one this run resolves (e.g. this device's identity changed, or
+    # a prior run picked a transient fallback value) — the credential was
+    # looked up/minted via that old identity's DEVICE_UUID, so re-resolve and
+    # re-mint against the current one rather than just patching proxyName.
+    NEED_TUNNEL_REMINT=1
+elif [ ! -f "$TUNNEL_MARKER" ] && [ -f "$TUNNEL_CRED" ]; then
+    # Credential file exists but the marker doesn't (partial/older
+    # provisioning run) — treat as needing a mint pass so we end up with a
+    # consistent, trustworthy marker.
+    NEED_TUNNEL_REMINT=1
+elif [ -f "$TUNNEL_CONF" ] && [ ! -f "$TUNNEL_CRED" ]; then
+    # Tunnel-capable image (tunnel.conf is baked in) but no credential has
+    # ever been minted — e.g. the device was main-provisioned on a
+    # pre-remote-SSH image and then OTA'd onto one with tunnel bits added.
+    # Without this, the fast local-only proxyName-patch path below would
+    # patch proxyName and exit, and soc-ota-tunneld's
+    # ConditionPathExists=/data/frp/credential would keep the tunnel down
+    # forever. Gated on TUNNEL_CONF existing so a non-remote-SSH image never
+    # attempts a pointless mint.
+    NEED_TUNNEL_REMINT=1
+fi
+
+if [ "$MAIN_PROVISION_DONE" -eq 1 ] && [ "$NEED_PROXY_PATCH" -eq 0 ] && [ "$NEED_TUNNEL_REMINT" -eq 0 ]; then
+    log "Device already provisioned and tunnel identity aligned ($DEVICE_ID), skipping"
     exit 0
 fi
 
+# Fast path: main provisioning already complete and only a local proxyName
+# patch is needed (no re-mint) — a pure local file edit, no network round-trip
+# and no credential churn.
+if [ "$MAIN_PROVISION_DONE" -eq 1 ] && [ "$NEED_TUNNEL_REMINT" -eq 0 ] && [ "$NEED_PROXY_PATCH" -eq 1 ]; then
+    log "Realigning tunnel.conf proxyName ('$CURRENT_PROXY_NAME' -> '$DEVICE_ID')"
+    python3 - "$TUNNEL_CONF" "$DEVICE_ID" <<'PY' || log "tunnel.conf patch failed (non-fatal)"
+import json, sys
+path, device_id = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+cfg["proxyName"] = device_id
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+    log "Patched proxyName=$DEVICE_ID in $TUNNEL_CONF"
+
+    # soc-ota-tunneld reads tunnel.conf once at process start. On a fresh boot
+    # After=otapulse-auto-provision.service already orders it to start AFTER
+    # this patch lands, so no restart is needed there. But if this script is
+    # re-run manually (or via a periodic realignment timer) while the daemon
+    # is already up, it must be restarted to pick up the corrected name.
+    #
+    # --no-block is REQUIRED here, not cosmetic: soc-ota-tunneld.service has
+    # After=/Wants=otapulse-auto-provision.service, so a BLOCKING
+    # 'systemctl restart/start soc-ota-tunneld' issued from inside this
+    # still-running unit's own ExecStart deadlocks — systemd won't start
+    # soc-ota-tunneld's job until this unit's job is done, but this unit's job
+    # is synchronously waiting on that same restart/start call to return.
+    # Confirmed live on RPi4 2026-07-22: the call hung until
+    # TimeoutStartSec=180 killed this unit (Result=timeout), at which point
+    # the queued soc-ota-tunneld job was finally released and started fine —
+    # i.e. the tunnel itself recovers, but this unit wrongly reports failure.
+    # --no-block fires the request and returns immediately, avoiding the wait
+    # entirely; we don't need to block on it here.
+    if systemctl is-active --quiet soc-ota-tunneld 2>/dev/null; then
+        log "Restarting soc-ota-tunneld to pick up corrected proxyName..."
+        systemctl --no-block restart soc-ota-tunneld || true
+    else
+        # Not running — e.g. its ConditionPathExists on the credential file
+        # previously failed. 'restart' would be a no-op here; 'start' lets
+        # systemd re-evaluate the (now possibly satisfied) conditions.
+        log "soc-ota-tunneld is not active — attempting to start it..."
+        systemctl --no-block start soc-ota-tunneld || true
+    fi
+
+    exit 0
+fi
+
+# From here on, either main provisioning still needs to happen
+# (MAIN_PROVISION_DONE=0) or the tunnel credential needs a self-heal re-mint
+# (NEED_TUNNEL_REMINT=1) — both require network + (for remint) admin auth.
+
 # Get server URL from main config
 SERVER_URL=""
-if [ -f /etc/otapulse/otapulse.conf ]; then
-    SERVER_URL=$(python3 -c "import json; f=open('/etc/otapulse/otapulse.conf'); d=json.load(f); print(d.get('ServerURL',''))" 2>/dev/null || true)
+if [ -f "$MAIN_CONFIG_FILE" ]; then
+    SERVER_URL=$(read_json_field "$MAIN_CONFIG_FILE" ServerURL)
 fi
 
 if [ -z "$SERVER_URL" ]; then
-    log "No ServerURL configured in /etc/otapulse/otapulse.conf, skipping auto-provision"
+    log "No ServerURL configured in $MAIN_CONFIG_FILE, skipping auto-provision"
     exit 0
 fi
 
@@ -79,29 +331,6 @@ if [ $WAITED -ge $NETWORK_TIMEOUT ]; then
     exit 0
 fi
 
-# Get device identity
-get_device_id() {
-    # Use machine-id as the base for device ID
-    if [ -f /etc/machine-id ]; then
-        cat /etc/machine-id
-        return 0
-    fi
-
-    # Fallback: Try MAC address
-    for iface in eth0 end0 mlan0 wlan0; do
-        if [ -f "/sys/class/net/$iface/address" ]; then
-            cat "/sys/class/net/$iface/address" | tr -d ':' | tr '[:upper:]' '[:lower:]'
-            return 0
-        fi
-    done
-
-    # Last resort: generate random ID
-    head -c 16 /dev/urandom | md5sum | cut -d' ' -f1
-}
-
-DEVICE_ID=$(get_device_id)
-log "Device ID: $DEVICE_ID"
-
 # Get hardware/device type
 HARDWARE_VERSION="unknown"
 if [ -f /etc/otapulse/device_type ]; then
@@ -119,195 +348,244 @@ log "Firmware version: $FIRMWARE_VERSION"
 # Create config directory on persistent storage
 mkdir -p "$CONFIG_DIR"
 
-# Try to register/authenticate with server
-# The server should support auto-registration for new devices
-log "Attempting device registration..."
+JWT_TOKEN=""
+ORG_ID=""
+DEVICE_UUID=""
+API_KEY=""
 
-# Method 1: Try to use existing device auth (if device was pre-registered)
-# This calls the check endpoint which doesn't need auth
-RESPONSE=$(curl -s --max-time 30 \
-    -H "X-Device-ID: $DEVICE_ID" \
-    "${SERVER_URL}/api/devices/v1/check" 2>/dev/null || echo '{"error": "request failed"}')
+if [ "$MAIN_PROVISION_DONE" -eq 0 ]; then
+    # === Full first-time provisioning: registration + API key =============
+    log "Attempting device registration..."
 
-if echo "$RESPONSE" | grep -q '"api_key"'; then
-    # Server returned an API key (auto-registration succeeded)
-    API_KEY=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_key',''))" 2>/dev/null || true)
-    if [ -n "$API_KEY" ]; then
-        log "Received API key from server"
+    # Method 1: Try to use existing device auth (if device was pre-registered)
+    # This calls the check endpoint which doesn't need auth
+    RESPONSE=$(curl -s --max-time 30 \
+        -H "X-Device-ID: $DEVICE_ID" \
+        "${SERVER_URL}/api/devices/v1/check" 2>/dev/null || echo '{"error": "request failed"}')
+
+    if echo "$RESPONSE" | grep -q '"api_key"'; then
+        # Server returned an API key (auto-registration succeeded)
+        API_KEY=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_key',''))" 2>/dev/null || true)
+        if [ -n "$API_KEY" ]; then
+            log "Received API key from server"
+        fi
     fi
-fi
 
-# Method 2: Try admin-based registration (for test environments)
-# This requires admin credentials to be configured via the operator-supplied
-# PROVISION_ENV override — no default credentials are shipped (GAP-OTA-015).
-if [ -z "$API_KEY" ]; then
-  if [ -z "$OTAPULSE_ADMIN_EMAIL" ] || [ -z "$OTAPULSE_ADMIN_PASSWORD" ]; then
-    log "ERROR: OTAPULSE_ADMIN_EMAIL/OTAPULSE_ADMIN_PASSWORD not set — no default admin credentials are shipped. Supply them via $PROVISION_ENV to enable admin-based registration. Skipping."
-  else
-    ADMIN_EMAIL="$OTAPULSE_ADMIN_EMAIL"
-    ADMIN_PASSWORD="$OTAPULSE_ADMIN_PASSWORD"
+    # Method 2: Try admin-based registration (for test environments)
+    # This requires admin credentials to be configured via the operator-supplied
+    # PROVISION_ENV override — no default credentials are shipped (GAP-OTA-015).
+    if [ -z "$API_KEY" ]; then
+      if [ -z "$OTAPULSE_ADMIN_EMAIL" ] || [ -z "$OTAPULSE_ADMIN_PASSWORD" ]; then
+        log "ERROR: OTAPULSE_ADMIN_EMAIL/OTAPULSE_ADMIN_PASSWORD not set — no default admin credentials are shipped. Supply them via $PROVISION_ENV to enable admin-based registration. Skipping."
+      else
+        ADMIN_EMAIL="$OTAPULSE_ADMIN_EMAIL"
+        ADMIN_PASSWORD="$OTAPULSE_ADMIN_PASSWORD"
 
-    log "Attempting admin-based registration..."
+        log "Attempting admin-based registration..."
 
-    # Get JWT token
-    JWT_RESPONSE=$(curl -sf --max-time 30 \
-        -X POST "${SERVER_URL}/api/auth/login" \
-        -H "Content-Type: application/json" \
-        -d "{\"email\": \"$ADMIN_EMAIL\", \"password\": \"$ADMIN_PASSWORD\"}" 2>/dev/null || echo '{}')
+        # Get JWT token
+        JWT_RESPONSE=$(curl -sf --max-time 30 \
+            -X POST "${SERVER_URL}/api/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\": \"$ADMIN_EMAIL\", \"password\": \"$ADMIN_PASSWORD\"}" 2>/dev/null || echo '{}')
 
-    JWT_TOKEN=$(echo "$JWT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || true)
+        JWT_TOKEN=$(echo "$JWT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || true)
 
-    if [ -n "$JWT_TOKEN" ]; then
-        log "Got JWT token, registering device..."
+        if [ -n "$JWT_TOKEN" ]; then
+            log "Got JWT token, registering device..."
 
-        # Extract organization_id from JWT payload (required by server API)
-        ORG_ID=$(echo "$JWT_TOKEN" | cut -d. -f2 | python3 -c "
+            # Extract organization_id from JWT payload (required by server API)
+            ORG_ID=$(echo "$JWT_TOKEN" | cut -d. -f2 | python3 -c "
 import sys, base64, json
 payload = sys.stdin.read().strip()
 payload += '=' * (4 - len(payload) % 4)
 d = json.loads(base64.urlsafe_b64decode(payload))
 print(d.get('org_id', ''))" 2>/dev/null || true)
 
-        if [ -z "$ORG_ID" ]; then
-            log "Failed to extract organization_id from JWT"
-        else
-            log "Organization ID: $ORG_ID"
-        fi
-
-        # Register device (organization_id required as query parameter)
-        # Use -s (not -sf) to capture response body even on HTTP errors
-        REG_RESPONSE=$(curl -s --max-time 30 \
-            -X POST "${SERVER_URL}/api/devices?organization_id=${ORG_ID}" \
-            -H "Authorization: Bearer $JWT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{
-                \"device_id\": \"$DEVICE_ID\",
-                \"name\": \"Device-${DEVICE_ID:0:8}\",
-                \"hardware_version\": \"$HARDWARE_VERSION\",
-                \"firmware_version\": \"$FIRMWARE_VERSION\"
-            }" 2>/dev/null || echo '{}')
-
-        DEVICE_UUID=$(echo "$REG_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
-
-        if [ -n "$DEVICE_UUID" ] || echo "$REG_RESPONSE" | grep -q "already exists"; then
-            log "Device registered or already exists"
-
-            # Resolve the device UUID when the device already existed: the POST
-            # above returns no id for an existing device, but the tunnel-credential
-            # mint below needs the UUID. A re-onboard (reflash keeps the machine-id)
-            # is the common case, so look it up by device_id via the search filter.
-            if [ -z "$DEVICE_UUID" ]; then
-                LOOKUP_RESPONSE=$(curl -s --max-time 30 \
-                    -G "${SERVER_URL}/api/devices" \
-                    --data-urlencode "organization_id=${ORG_ID}" \
-                    --data-urlencode "search=${DEVICE_ID}" \
-                    -H "Authorization: Bearer $JWT_TOKEN" 2>/dev/null || echo '{}')
-                DEVICE_UUID=$(echo "$LOOKUP_RESPONSE" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-items = d.get('items', d if isinstance(d, list) else [])
-device_id = '$DEVICE_ID'
-print(next((x.get('id', '') for x in items if x.get('device_id') == device_id), ''))" 2>/dev/null || true)
-                if [ -n "$DEVICE_UUID" ]; then
-                    log "Resolved existing device UUID: $DEVICE_UUID"
-                else
-                    log "Could not resolve device UUID for existing device"
-                fi
+            if [ -z "$ORG_ID" ]; then
+                log "Failed to extract organization_id from JWT"
+            else
+                log "Organization ID: $ORG_ID"
             fi
 
-            # Create API key (organization_id required as query parameter)
-            KEY_NAME="auto-provision-${DEVICE_ID:0:8}-$(date +%s)"
-            KEY_RESPONSE=$(curl -s --max-time 30 \
-                -X POST "${SERVER_URL}/api/api-keys?organization_id=${ORG_ID}" \
+            # Register device (organization_id required as query parameter)
+            # Use -s (not -sf) to capture response body even on HTTP errors
+            REG_RESPONSE=$(curl -s --max-time 30 \
+                -X POST "${SERVER_URL}/api/devices?organization_id=${ORG_ID}" \
                 -H "Authorization: Bearer $JWT_TOKEN" \
                 -H "Content-Type: application/json" \
                 -d "{
-                    \"name\": \"$KEY_NAME\",
-                    \"description\": \"Auto-provisioned key for $DEVICE_ID\",
-                    \"scopes\": [\"devices:write\", \"metrics:write\", \"ota:read\", \"coredumps:write\"]
+                    \"device_id\": \"$DEVICE_ID\",
+                    \"name\": \"Device-${DEVICE_ID:0:8}\",
+                    \"hardware_version\": \"$HARDWARE_VERSION\",
+                    \"firmware_version\": \"$FIRMWARE_VERSION\"
                 }" 2>/dev/null || echo '{}')
 
-            API_KEY=$(echo "$KEY_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key',''))" 2>/dev/null || true)
+            DEVICE_UUID=$(echo "$REG_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
 
-            if [ -n "$API_KEY" ]; then
-                log "Created API key successfully"
+            if [ -n "$DEVICE_UUID" ] || echo "$REG_RESPONSE" | grep -q "already exists"; then
+                log "Device registered or already exists"
+
+                # Resolve the device UUID when the device already existed: the POST
+                # above returns no id for an existing device, but the tunnel-credential
+                # mint below needs the UUID. A re-onboard (reflash keeps the machine-id)
+                # is the common case, so look it up (search filter, then direct GET by
+                # id if $DEVICE_ID is UUID-shaped — see resolve_device_uuid()).
+                if [ -z "$DEVICE_UUID" ]; then
+                    DEVICE_UUID=$(resolve_device_uuid)
+                    if [ -n "$DEVICE_UUID" ]; then
+                        log "Resolved existing device UUID: $DEVICE_UUID"
+                    else
+                        log "Could not resolve device UUID for existing device"
+                    fi
+                fi
+
+                # Create API key (organization_id required as query parameter)
+                KEY_NAME="auto-provision-${DEVICE_ID:0:8}-$(date +%s)"
+                KEY_RESPONSE=$(curl -s --max-time 30 \
+                    -X POST "${SERVER_URL}/api/api-keys?organization_id=${ORG_ID}" \
+                    -H "Authorization: Bearer $JWT_TOKEN" \
+                    -H "Content-Type: application/json" \
+                    -d "{
+                        \"name\": \"$KEY_NAME\",
+                        \"description\": \"Auto-provisioned key for $DEVICE_ID\",
+                        \"scopes\": [\"devices:write\", \"metrics:write\", \"ota:read\", \"coredumps:write\"]
+                    }" 2>/dev/null || echo '{}')
+
+                API_KEY=$(echo "$KEY_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key',''))" 2>/dev/null || true)
+
+                if [ -n "$API_KEY" ]; then
+                    log "Created API key successfully"
+                else
+                    log "Failed to create API key: $KEY_RESPONSE"
+                fi
             else
-                log "Failed to create API key: $KEY_RESPONSE"
+                log "Device registration failed: $REG_RESPONSE"
             fi
         else
-            log "Device registration failed: $REG_RESPONSE"
+            log "JWT login failed - check admin credentials"
         fi
-    else
-        log "JWT login failed - check admin credentials"
+      fi
     fi
-  fi
-fi
 
-# Save credentials if we got an API key
-if [ -n "$API_KEY" ]; then
-    log "Saving credentials to $CONFIG_FILE"
+    # Save credentials if we got an API key
+    if [ -n "$API_KEY" ]; then
+        log "Saving credentials to $CONFIG_FILE"
 
-    cat > "$CONFIG_FILE" << EOF
+        cat > "$CONFIG_FILE" << EOF
 {
     "SoCAPIKey": "$API_KEY",
     "SoCDeviceID": "$DEVICE_ID"
 }
 EOF
-    chmod 0600 "$CONFIG_FILE"
+        chmod 0600 "$CONFIG_FILE"
 
-    # Create marker file
-    mkdir -p "$(dirname $PROVISION_MARKER)"
-    echo "provisioned=$(date '+%Y-%m-%dT%H:%M:%S')" > "$PROVISION_MARKER"
-    echo "device_id=$DEVICE_ID" >> "$PROVISION_MARKER"
+        # Create marker file
+        mkdir -p "$(dirname $PROVISION_MARKER)"
+        echo "provisioned=$(date '+%Y-%m-%dT%H:%M:%S')" > "$PROVISION_MARKER"
+        echo "device_id=$DEVICE_ID" >> "$PROVISION_MARKER"
 
-    log "Auto-provisioning complete!"
+        log "Auto-provisioning complete!"
 
-    # Restart OTA agent to pick up new credentials
-    if systemctl is-enabled soc-ota-agent >/dev/null 2>&1; then
-        log "Restarting soc-ota-agent..."
-        systemctl restart soc-ota-agent || true
-    fi
-
-    # --- Tunnel credential provisioning (TODO-010 / TASK-S29-005) ---
-    TUNNEL_MARKER="/data/otapulse/.tunnel-provisioned"
-    TUNNEL_CRED="/data/frp/credential"
-    TUNNEL_CONF="/etc/otapulse/tunnel.conf"
-
-    # Skip if already provisioned — reboots must not re-mint
-    if [ -f "$TUNNEL_MARKER" ]; then
-        log "Tunnel credential already provisioned, skipping"
+        # Restart OTA agent to pick up new credentials
+        if systemctl is-enabled soc-ota-agent >/dev/null 2>&1; then
+            log "Restarting soc-ota-agent..."
+            systemctl restart soc-ota-agent || true
+        fi
     else
-        # JWT_TOKEN, ORG_ID, DEVICE_UUID are in scope from the registration block above.
-        # If any are missing (registration path was skipped) log and skip silently.
-        if [ -z "$JWT_TOKEN" ] || [ -z "$ORG_ID" ] || [ -z "$DEVICE_UUID" ]; then
-            log "Tunnel provisioning skipped — missing JWT_TOKEN/ORG_ID/DEVICE_UUID"
-        else
-            log "Minting tunnel credential for device $DEVICE_UUID..."
-            ROTATE_RESP=$(curl -s --max-time 30 \
-                -X POST "${SERVER_URL}/api/devices/${DEVICE_UUID}/tunnel-credential/rotate?organization_id=${ORG_ID}" \
-                -H "Authorization: Bearer $JWT_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{}" 2>/dev/null || echo '{}')
-            SOTC=$(echo "$ROTATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tunnel_token',''))" 2>/dev/null || true)
+        log "Auto-provisioning failed - no API key obtained"
+        log "Manual provisioning may be required: soc-ota-provision --server $SERVER_URL --token <token>"
+    fi
+else
+    # === Tunnel self-heal only: resolve identity via admin auth ===========
+    # Main provisioning already happened; the device already has its API key.
+    # Do NOT touch device registration or mint a new API key here — only
+    # resolve JWT_TOKEN/ORG_ID/DEVICE_UUID for the CURRENT $DEVICE_ID (used
+    # only to look up the device's DEVICE_UUID for the rotate call below) so
+    # the tunnel-realignment section can re-mint the sotc credential.
+    log "Tunnel credential is stale for current identity ($DEVICE_ID) — resolving for self-heal"
 
-            if [ -z "$SOTC" ]; then
-                log "Tunnel provisioning failed — no tunnel_token in response: $ROTATE_RESP"
-                # Do not exit non-zero; systemd must not crash-loop the unit
-            elif ! echo "$SOTC" | grep -q '^sotc_'; then
-                log "Tunnel provisioning failed — tunnel_token has wrong prefix"
+    if [ -z "$OTAPULSE_ADMIN_EMAIL" ] || [ -z "$OTAPULSE_ADMIN_PASSWORD" ]; then
+        log "ERROR: OTAPULSE_ADMIN_EMAIL/OTAPULSE_ADMIN_PASSWORD not set — cannot self-heal tunnel credential without admin auth. Supply them via $PROVISION_ENV. Skipping."
+    else
+        JWT_RESPONSE=$(curl -sf --max-time 30 \
+            -X POST "${SERVER_URL}/api/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\": \"$OTAPULSE_ADMIN_EMAIL\", \"password\": \"$OTAPULSE_ADMIN_PASSWORD\"}" 2>/dev/null || echo '{}')
+
+        JWT_TOKEN=$(echo "$JWT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || true)
+
+        if [ -n "$JWT_TOKEN" ]; then
+            ORG_ID=$(echo "$JWT_TOKEN" | cut -d. -f2 | python3 -c "
+import sys, base64, json
+payload = sys.stdin.read().strip()
+payload += '=' * (4 - len(payload) % 4)
+d = json.loads(base64.urlsafe_b64decode(payload))
+print(d.get('org_id', ''))" 2>/dev/null || true)
+
+            if [ -z "$ORG_ID" ]; then
+                log "Failed to extract organization_id from JWT — tunnel self-heal deferred"
             else
-                # Write /data/frp/credential mode 0600, no trailing newline
-                mkdir -p "$(dirname "$TUNNEL_CRED")"
-                printf '%s' "$SOTC" > "$TUNNEL_CRED"
-                chmod 0600 "$TUNNEL_CRED"
-                chown root:root "$TUNNEL_CRED" 2>/dev/null || true
-                log "Wrote $TUNNEL_CRED (mode 0600)"
+                # Search filter, then direct GET by id if $DEVICE_ID is
+                # UUID-shaped — see resolve_device_uuid().
+                DEVICE_UUID=$(resolve_device_uuid)
+                if [ -n "$DEVICE_UUID" ]; then
+                    log "Resolved device UUID for tunnel self-heal: $DEVICE_UUID"
+                else
+                    log "Could not resolve device UUID for $DEVICE_ID — tunnel self-heal deferred"
+                fi
+            fi
+        else
+            log "JWT login failed - check admin credentials - tunnel self-heal deferred"
+        fi
+    fi
+fi
 
-                # Patch proxyName in /etc/otapulse/tunnel.conf via JSON round-trip.
-                # proxyName must be the machine-id string (DEVICE_ID) — frpc sends it
-                # as content.user and the backend cross-checks against devices.device_id.
-                if [ -f "$TUNNEL_CONF" ]; then
-                    python3 - "$TUNNEL_CONF" "$DEVICE_ID" <<'PY' || log "tunnel.conf patch failed (non-fatal)"
+# --- Tunnel credential provisioning / realignment (TODO-010 / TASK-S29-005) ---
+# Reached only when there was tunnel work to do: either first-time
+# provisioning (MAIN_PROVISION_DONE=0) or a self-heal re-mint
+# (NEED_TUNNEL_REMINT=1) — the "nothing to do" case already exited via the
+# fast-path checks above. Proceeds only if JWT_TOKEN/ORG_ID/DEVICE_UUID were
+# actually resolved (by either the first-time registration flow or the
+# self-heal resolution flow above).
+if [ -z "$JWT_TOKEN" ] || [ -z "$ORG_ID" ] || [ -z "$DEVICE_UUID" ]; then
+    log "Tunnel provisioning skipped — missing JWT_TOKEN/ORG_ID/DEVICE_UUID"
+else
+    log "Minting tunnel credential for device $DEVICE_UUID..."
+    ROTATE_RESP=$(curl -s --max-time 30 \
+        -X POST "${SERVER_URL}/api/devices/${DEVICE_UUID}/tunnel-credential/rotate?organization_id=${ORG_ID}" \
+        -H "Authorization: Bearer $JWT_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{}" 2>/dev/null || echo '{}')
+    SOTC=$(echo "$ROTATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tunnel_token',''))" 2>/dev/null || true)
+
+    if [ -z "$SOTC" ]; then
+        log "Tunnel provisioning failed — no tunnel_token in response: $ROTATE_RESP"
+        # Do not exit non-zero; systemd must not crash-loop the unit
+    elif ! echo "$SOTC" | grep -q '^sotc_'; then
+        log "Tunnel provisioning failed — tunnel_token has wrong prefix"
+    else
+        # Write /data/frp/credential mode 0600, no trailing newline
+        mkdir -p "$(dirname "$TUNNEL_CRED")"
+        printf '%s' "$SOTC" > "$TUNNEL_CRED"
+        chmod 0600 "$TUNNEL_CRED"
+        chown root:root "$TUNNEL_CRED" 2>/dev/null || true
+        log "Wrote $TUNNEL_CRED (mode 0600)"
+
+        # Patch proxyName in /etc/otapulse/tunnel.conf via JSON round-trip.
+        # proxyName is set to the device's CURRENT identity ($DEVICE_ID)
+        # purely so it's a stable, per-device-UNIQUE name on the shared frps
+        # server (two boards must never collide on the same proxy name).
+        # It is NOT relied on to match any backend row's device_id — on live
+        # boards $DEVICE_ID (sourced from SoCDeviceID) is frequently a
+        # backend-row UUID, not a dev-XXXX canonical id. Routing the
+        # canonical row's tunnel_id correctly is handled independently by
+        # memfaultd's heartbeat, which reports the actual rendered frpc proxy
+        # name and is applied by the backend to whichever row the heartbeat's
+        # own API-key auth resolves to (self-aligning; see memfaultd
+        # send_heartbeat()).
+        if [ -f "$TUNNEL_CONF" ]; then
+            python3 - "$TUNNEL_CONF" "$DEVICE_ID" <<'PY' || log "tunnel.conf patch failed (non-fatal)"
 import json, sys
 path, device_id = sys.argv[1], sys.argv[2]
 with open(path) as f:
@@ -317,26 +595,47 @@ with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 PY
-                    log "Patched proxyName=$DEVICE_ID in $TUNNEL_CONF"
-                else
-                    log "No $TUNNEL_CONF present yet — proxyName patch deferred"
-                fi
+            log "Patched proxyName=$DEVICE_ID in $TUNNEL_CONF"
+        else
+            log "No $TUNNEL_CONF present yet — proxyName patch deferred"
+        fi
 
-                # Write marker only on full success
-                mkdir -p "$(dirname "$TUNNEL_MARKER")"
-                {
-                    echo "device_id=$DEVICE_ID"
-                    echo "device_uuid=$DEVICE_UUID"
-                    echo "provisioned_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-                } > "$TUNNEL_MARKER"
-                log "Tunnel provisioning complete (marker $TUNNEL_MARKER written)"
-            fi
+        # Write marker only on full success
+        mkdir -p "$(dirname "$TUNNEL_MARKER")"
+        {
+            echo "device_id=$DEVICE_ID"
+            echo "device_uuid=$DEVICE_UUID"
+            echo "provisioned_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        } > "$TUNNEL_MARKER"
+        log "Tunnel provisioning complete (marker $TUNNEL_MARKER written)"
+
+        # If soc-ota-tunneld is already running (self-heal on an already-booted
+        # board, not a fresh boot) it must be restarted to pick up the new
+        # credential + proxyName — it only reads both at process start.
+        #
+        # --no-block is REQUIRED (see the identical comment at the other
+        # restart/start site above): soc-ota-tunneld.service's
+        # After=/Wants=otapulse-auto-provision.service means a BLOCKING
+        # restart/start called from inside this unit's own still-running
+        # ExecStart deadlocks against systemd's job ordering until
+        # TimeoutStartSec kills this unit — confirmed live on RPi4
+        # 2026-07-22 (unit reported Result=timeout/failed even though the
+        # tunnel itself recovered once the kill released the queued job).
+        if systemctl is-active --quiet soc-ota-tunneld 2>/dev/null; then
+            log "Restarting soc-ota-tunneld to pick up re-minted credential..."
+            systemctl --no-block restart soc-ota-tunneld || true
+        else
+            # Not running — e.g. this is exactly the DEFECT-1 upgrade-path
+            # case where the credential never existed until just now, so
+            # ConditionPathExists=/data/frp/credential previously failed and
+            # the unit was never started this boot. 'start' re-evaluates
+            # conditions instead of no-op'ing like 'restart' would on an
+            # inactive unit.
+            log "soc-ota-tunneld is not active — attempting to start it now that the credential exists..."
+            systemctl --no-block start soc-ota-tunneld || true
         fi
     fi
-    # --- End tunnel credential provisioning ---
-else
-    log "Auto-provisioning failed - no API key obtained"
-    log "Manual provisioning may be required: soc-ota-provision --server $SERVER_URL --token <token>"
 fi
+# --- End tunnel credential provisioning ---
 
 exit 0

@@ -454,16 +454,32 @@ send_heartbeat() {
     # false-negative (tunnel_status permanently stuck at "unknown" after every
     # reboot until manual SQL).
     #
-    # tunnel_id routing: the backend session router uses tunnel_id when set and
-    # falls back to device_id otherwise.  device_id IS the frps proxy name
-    # (machine-id, enforced by the frps auth plugin).  We only populate tunnel_id
-    # when proxyName is explicitly set in tunnel.conf (i.e., after auto-provision),
-    # so we never persist an incorrect routing key.  When proxyName is empty,
-    # omitting tunnel_id lets the backend's own device_id fallback route correctly.
+    # tunnel_id routing: this heartbeat itself authenticates via API key /
+    # X-Device-ID and is applied by the backend to whichever device row that
+    # resolves to (the canonical row, per the MONE2E-001 tiered device
+    # matching) — so tunnel_id is self-aligning regardless of what proxyName
+    # or SoCDeviceID happen to be on this device. What matters is that
+    # tunnel_id is the EXACT proxy name frps sees on the wire, since the
+    # session gateway looks tunnels up by that string (device.tunnel_id
+    # falling back to device.device_id). NOTE: proxyName in tunnel.conf is
+    # NOT guaranteed to equal any backend row's device_id (on live boards it
+    # is frequently a backend-row UUID, not a dev-XXXX id) — its only job is
+    # frps proxy-name uniqueness, not routing correctness. Routing
+    # correctness comes from reading the name frpc actually rendered/sent,
+    # not from re-deriving it from tunnel.conf.
     local tunnel_json=""
     if systemctl is-active --quiet soc-ota-tunneld 2>/dev/null; then
         local proxy_name="" tunnel_id_field=""
-        if [ -f "/etc/otapulse/tunnel.conf" ]; then
+        if [ -f "/data/frp/frpc.toml" ]; then
+            # Rendered frpc config is authoritative — this is the literal
+            # `name` frpc registers with frps on NewProxy, taken from the
+            # first [[proxies]] entry.
+            proxy_name=$(sed -n 's/^name *= *"\(.*\)".*/\1/p' /data/frp/frpc.toml 2>/dev/null | head -1)
+        fi
+        if [ -z "${proxy_name}" ] && [ -f "/etc/otapulse/tunnel.conf" ]; then
+            # Fallback: rendered config missing (e.g. daemon hasn't rendered
+            # yet this boot) — tunnel.conf's proxyName is what it will render
+            # to once it does.
             proxy_name=$(jq -r '.proxyName // ""' /etc/otapulse/tunnel.conf 2>/dev/null || true)
         fi
         if [ -n "${proxy_name}" ]; then
