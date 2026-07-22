@@ -45,7 +45,25 @@ try_partuuid_swap() {
         log "sgdisk not available"
         return 1
     fi
-    
+
+    # Boot-effectiveness gate (BUG-157 follow-up): swapping PARTUUIDs only
+    # switches the boot slot on boards whose kernel actually roots by the
+    # fixed 614e0000-prefix PARTUUID scheme. On boards that root by
+    # PARTLABEL / LABEL / device path (e.g. extlinux distroboot with
+    # root=PARTLABEL=rootfs_a, or boot.scr numeric-slot boards), the sgdisk
+    # calls below succeed operationally but change NOTHING about which slot
+    # boots — a false success here would short-circuit main()'s method
+    # chain, skip the genuinely effective method for the board, and strand
+    # the device on the old slot with the agent believing the switch took.
+    # (Historically this method always failed on such boards only because
+    # the default /dev/mmcblk0pN paths didn't exist; once the agent passes
+    # real ROOTFS_*_PARTITION paths, this gate is what keeps it honest.)
+    # Probe the RUNNING cmdline — hardware-independent, no board names.
+    if ! grep -q 'root=PARTUUID=614e0000' /proc/cmdline 2>/dev/null; then
+        log "cmdline does not root by the 614e0000 PARTUUID scheme, skipping PARTUUID swap"
+        return 1
+    fi
+
     local target_partition other_partition
     local target_num other_num
     local base_device
@@ -137,34 +155,114 @@ try_fw_setenv() {
 }
 
 # Method 3: Update extlinux.conf
+# extlinux.conf is the FIRST config U-Boot distroboot consults when present,
+# so on extlinux boards (e.g. Radxa CM5) its root= line is the sole
+# authority on which slot boots. Two robustness requirements learned on
+# real hardware (BUG-157 follow-up):
+#   1. The conf lives on the FAT boot partition and /boot is NOT reliably
+#      mounted at install time — locate + mount the FAT by label ourselves
+#      when the fstab path is absent.
+#   2. Configs written as root=PARTLABEL=rootfs_a|b were untouched by the
+#      old PARTUUID/dev-path-only seds, which then reported success while
+#      changing nothing. Rewrite ANY root= form, prefer the target's
+#      PARTLABEL (stable across sgdisk PARTUUID churn), and VERIFY the
+#      rewrite actually landed before claiming success.
 try_extlinux() {
-    if [ ! -f "$EXTLINUX_CONF" ]; then
-        log "extlinux.conf not found"
-        return 1
+    local conf="$EXTLINUX_CONF"
+    local mnt=""
+
+    if [ ! -f "$conf" ]; then
+        # /boot path absent — find the FAT boot partition by label and mount it.
+        local fat_dev=""
+        if [ -e /dev/disk/by-label/boot ]; then
+            fat_dev=$(readlink -f /dev/disk/by-label/boot)
+        else
+            for dev in /dev/mmcblk*p[1-4] /dev/sd?[1-4]; do
+                [ -b "$dev" ] || continue
+                if [ "$(blkid -s TYPE -o value "$dev" 2>/dev/null)" = "vfat" ] && \
+                   [ "$(blkid -s LABEL -o value "$dev" 2>/dev/null)" = "boot" ]; then
+                    fat_dev="$dev"
+                    break
+                fi
+            done
+        fi
+        if [ -z "$fat_dev" ]; then
+            log "extlinux.conf not found"
+            return 1
+        fi
+        mnt="/tmp/.extlinux_$$"
+        mkdir -p "$mnt"
+        if ! mount "$fat_dev" "$mnt" 2>/dev/null; then
+            log "extlinux.conf not found (cannot mount $fat_dev)"
+            rmdir "$mnt" 2>/dev/null || true
+            return 1
+        fi
+        conf="$mnt/extlinux/extlinux.conf"
+        if [ ! -f "$conf" ]; then
+            log "extlinux.conf not found"
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+            return 1
+        fi
     fi
-    
-    local target_partition target_partuuid
+
+    local target_partition
     if [ "$SLOT" = "A" ]; then
         target_partition="$ROOTFS_A"
     else
         target_partition="$ROOTFS_B"
     fi
-    
+
+    # Prefer the target's PARTLABEL (matches root=PARTLABEL=rootfs_a|b
+    # configs and survives PARTUUID churn); fall back to PARTUUID, then to
+    # the raw device path.
+    local new_root="" partlabel target_partuuid
+    partlabel=$(blkid -s PARTLABEL -o value "$target_partition" 2>/dev/null)
     target_partuuid=$(get_partuuid "$target_partition")
-    if [ -z "$target_partuuid" ]; then
-        log "Failed to get PARTUUID"
+    if [ -n "$partlabel" ]; then
+        new_root="PARTLABEL=$partlabel"
+    elif [ -n "$target_partuuid" ]; then
+        new_root="PARTUUID=$target_partuuid"
+    else
+        new_root="$target_partition"
+    fi
+
+    if ! grep -q 'root=' "$conf"; then
+        log "extlinux.conf has no root= parameter"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
         return 1
     fi
-    
-    log "Updating extlinux.conf for PARTUUID=$target_partuuid"
-    
+
+    log "Updating extlinux.conf root=$new_root"
+
     # Backup original
-    cp "$EXTLINUX_CONF" "${EXTLINUX_CONF}.bak"
-    
-    # Update root= in APPEND line
-    sed -i "s|root=PARTUUID=[^ ]*|root=PARTUUID=$target_partuuid|g" "$EXTLINUX_CONF"
-    sed -i "s|root=/dev/[^ ]*|root=PARTUUID=$target_partuuid|g" "$EXTLINUX_CONF"
-    
+    cp "$conf" "${conf}.bak"
+
+    # Rewrite any root= form (PARTUUID=, PARTLABEL=, LABEL=, /dev/...)
+    sed -i "s|root=[^ ]*|root=$new_root|g" "$conf"
+
+    # Verify the rewrite landed — a sed that matched nothing must not be
+    # reported as success (that false success is what stranded slot
+    # switches on PARTLABEL boards).
+    if ! grep -q "root=$new_root" "$conf"; then
+        log "extlinux.conf rewrite did not take, restoring backup"
+        cp "${conf}.bak" "$conf"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    sync
+
+    if [ -n "$mnt" ]; then
+        umount "$mnt" 2>/dev/null
+        rmdir "$mnt" 2>/dev/null || true
+    fi
+
     log "Updated extlinux.conf"
     return 0
 }
@@ -218,7 +316,14 @@ try_fat_boot_part() {
         target_part=$(get_partition_number "$ROOTFS_B")
     fi
 
-    # Find FAT boot partition by label
+    # Find FAT boot partition by label.
+    # WARNING: the p1-only glob below is LOAD-BEARING — do NOT widen it to
+    # p[1-4]. Boards whose FAT lives on p2+ (e.g. Radxa CM5) carry a
+    # boot.scr there too, but their bootloader consults extlinux.conf, not
+    # boot.scr; widening this glob would make this method false-succeed on
+    # such boards and short-circuit main()'s chain before the genuinely
+    # effective try_extlinux runs. boot.scr-numeric boards (iMX8MP,
+    # BeaglePlay) all keep their FAT on p1.
     for dev in /dev/mmcblk*p1 /dev/sd?1; do
         [ -b "$dev" ] || continue
         local fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
