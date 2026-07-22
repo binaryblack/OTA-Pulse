@@ -364,6 +364,140 @@ try_fat_boot_part() {
     return 0
 }
 
+# Method 7: systemd-boot EFI Automatic Boot Assessment (loader/entries)
+# EFI ABA boards (e.g. Dragon Q6A) keep slot-a+N.conf / slot-b+N.conf under
+# loader/entries on the ESP; the +N suffix is the remaining try-count
+# (+0 = exhausted/skipped) and loader.conf's `default slot-X*` GLOB pins the
+# choice (a bare name is fnmatch-dead — systemd #38813). Switching slots =
+# ensure the target entry exists at +3, re-pin the default, exhaust the
+# current entry. That ordering is deliberately brick-safe: a crash at any
+# midpoint leaves the default pointing at an entry that exists with a
+# positive count. Idempotent with the ArtifactReboot_Enter state script's
+# Section 4 and with otapulse-sboot-bridge, which manage the same files.
+# Self-gating: does nothing unless slot-*.conf ABA entries are present.
+try_systemd_boot_aba() {
+    local esp="" mnt=""
+
+    # Prefer the mounted /boot; else locate + mount the ESP by label.
+    if [ -d "$BOOT_CONFIG_DIR/loader/entries" ]; then
+        esp="$BOOT_CONFIG_DIR"
+    else
+        local fat_dev=""
+        if [ -e /dev/disk/by-label/boot ]; then
+            fat_dev=$(readlink -f /dev/disk/by-label/boot)
+        else
+            for dev in /dev/mmcblk*p[1-4] /dev/sd?[1-4]; do
+                [ -b "$dev" ] || continue
+                if [ "$(blkid -s TYPE -o value "$dev" 2>/dev/null)" = "vfat" ] && \
+                   [ "$(blkid -s LABEL -o value "$dev" 2>/dev/null)" = "boot" ]; then
+                    fat_dev="$dev"
+                    break
+                fi
+            done
+        fi
+        if [ -z "$fat_dev" ]; then
+            log "no systemd-boot ESP found"
+            return 1
+        fi
+        mnt="/tmp/.sdboot_$$"
+        mkdir -p "$mnt"
+        if ! mount "$fat_dev" "$mnt" 2>/dev/null; then
+            log "no systemd-boot ESP found (cannot mount $fat_dev)"
+            rmdir "$mnt" 2>/dev/null || true
+            return 1
+        fi
+        if [ ! -d "$mnt/loader/entries" ]; then
+            log "no systemd-boot loader/entries"
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+            return 1
+        fi
+        esp="$mnt"
+    fi
+
+    local tgt cur
+    if [ "$SLOT" = "A" ]; then
+        tgt="a"; cur="b"
+    else
+        tgt="b"; cur="a"
+    fi
+
+    local entries="$esp/loader/entries"
+    # sort -r picks the highest try-count first (slot-a+3.conf before +0)
+    local current_conf target_conf
+    current_conf=$(find "$entries" -maxdepth 1 -name "slot-${cur}+*.conf" 2>/dev/null | sort -r | head -1)
+    target_conf=$(find "$entries" -maxdepth 1 -name "slot-${tgt}+*.conf" 2>/dev/null | sort -r | head -1)
+
+    if [ -z "$current_conf" ] && [ -z "$target_conf" ]; then
+        # No ABA slot entries at all — not an ABA board, let other methods try.
+        log "no slot-*.conf ABA entries"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
+    fi
+
+    # Step 1: ensure the target entry exists with +3 tries.
+    local target_3="$entries/slot-${tgt}+3.conf"
+    if [ -n "$target_conf" ]; then
+        [ "$target_conf" != "$target_3" ] && mv "$target_conf" "$target_3"
+    elif [ -n "$current_conf" ]; then
+        # Generate from the current entry, swapping the rootfs PARTLABEL.
+        sed "s/root=PARTLABEL=rootfs_${cur}/root=PARTLABEL=rootfs_${tgt}/g" \
+            "$current_conf" > "$target_3"
+    fi
+    if [ ! -f "$target_3" ]; then
+        log "failed to materialise slot-${tgt}+3.conf"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    sync
+
+    # Step 2: re-pin the default (GLOB form — a bare name matches nothing).
+    if [ -f "$esp/loader/loader.conf" ]; then
+        sed -i "s/^default .*/default slot-${tgt}*/" "$esp/loader/loader.conf"
+    fi
+
+    # Step 3: exhaust the current slot's entry (+0 = never auto-selected).
+    if [ -n "$current_conf" ] && [ -f "$current_conf" ]; then
+        local current_0="$entries/slot-${cur}+0.conf"
+        [ "$current_conf" != "$current_0" ] && mv "$current_conf" "$current_0"
+    fi
+    sync
+
+    # Verify: target entry present at +3 and (if loader.conf exists) the
+    # default glob now points at the target slot.
+    if [ ! -f "$target_3" ]; then
+        log "systemd-boot ABA switch verification failed"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    if [ -f "$esp/loader/loader.conf" ] && \
+       ! grep -q "^default slot-${tgt}\*" "$esp/loader/loader.conf"; then
+        log "systemd-boot ABA default re-pin verification failed"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
+    fi
+
+    if [ -n "$mnt" ]; then
+        umount "$mnt" 2>/dev/null
+        rmdir "$mnt" 2>/dev/null || true
+    fi
+
+    log "systemd-boot ABA: slot-${tgt}+3.conf active, default slot-${tgt}*, slot-${cur} exhausted"
+    return 0
+}
+
 # Method 6: Store boot slot preference (for bootloader that reads it)
 store_boot_slot() {
     mkdir -p "$(dirname "$BOOT_SLOT_FILE")"
@@ -396,10 +530,16 @@ main() {
     local success=false
     
     # Try methods in order of preference
-    # PARTUUID swapping is most reliable for Rockchip platforms
+    # PARTUUID swapping is most reliable for Rockchip platforms.
+    # try_systemd_boot_aba sits BEFORE try_fw_setenv deliberately: EFI ABA
+    # boards self-identify via loader/entries, and letting them fall through
+    # to fw_setenv would attempt a blind raw-offset env write that
+    # systemd-boot never reads (false success / corruption hazard).
     if try_partuuid_swap; then
         success=true
     elif try_fat_boot_part; then
+        success=true
+    elif try_systemd_boot_aba; then
         success=true
     elif try_fw_setenv; then
         success=true
