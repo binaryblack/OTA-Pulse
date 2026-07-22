@@ -328,9 +328,9 @@ pkg_postinst:${PN} () {
     # silently ignored and gateway pubkey auth fails with WS 1011.
     #
     # WHY pkg_postinst AND NOT do_install:
-    #   do_install runs in soc-shell-access's own package staging dir (${D}).
+    #   do_install runs in soc-shell-access's own package staging dir ($D).
     #   At that point openssh's sshd_config has NOT been merged in — it lives
-    #   in openssh's separate ${D} (WORKDIR/image).  The merge happens at
+    #   in openssh's separate $D (WORKDIR/image).  The merge happens at
     #   do_rootfs time, which runs AFTER all do_install tasks complete.
     #   pkg_postinst with a non-empty $D runs at do_rootfs time, after all
     #   packages are installed into the rootfs, so sshd_config IS present.
