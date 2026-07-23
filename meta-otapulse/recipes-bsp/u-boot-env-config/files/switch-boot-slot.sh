@@ -15,7 +15,35 @@ GRUB_CFG="/boot/grub/grub.cfg"
 UENV_TXT="/boot/uEnv.txt"
 BOOT_SLOT_FILE="/data/boot_slot"
 
-# Partition mapping - can be overridden by environment
+# Partition mapping - can be overridden by environment.
+#
+# BUG (FRDM E2E-001, 2026-07-23): an older agent invoked this script WITHOUT
+# ROOTFS_A_PARTITION/ROOTFS_B_PARTITION set. The hardcoded fallback below used
+# to be /dev/mmcblk0p3 / /dev/mmcblk0p4 unconditionally, which is wrong for
+# every board that doesn't happen to use those exact nodes (e.g. the FRDM's
+# eMMC is mmcblk2, rootfs_a=mmcblk2p2, rootfs_b=mmcblk2p3). Method 5 then
+# wrote the WRONG partition number ("4") into the FAT mender_boot_part file,
+# U-Boot's boot.scr rejected it as an unrecognised slot, and the switch
+# silently failed. Boards are provisioned fleet-wide with GPT partlabels
+# rootfs_a/rootfs_b, so prefer resolving the real device nodes from those
+# labels; only fall back to the old static guess (loudly) if partlabels are
+# unavailable on this board.
+if [ -z "${ROOTFS_A_PARTITION:-}" ] && [ -e /dev/disk/by-partlabel/rootfs_a ]; then
+    ROOTFS_A_PARTITION="$(readlink -f /dev/disk/by-partlabel/rootfs_a)"
+fi
+if [ -z "${ROOTFS_B_PARTITION:-}" ] && [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+    ROOTFS_B_PARTITION="$(readlink -f /dev/disk/by-partlabel/rootfs_b)"
+fi
+
+if [ -z "${ROOTFS_A_PARTITION:-}" ]; then
+    logger -t switch-boot-slot "WARNING: ROOTFS_A_PARTITION not set and no rootfs_a partlabel found; falling back to /dev/mmcblk0p3 (may be WRONG for this board)" 2>/dev/null || true
+    echo "[switch-boot-slot] WARNING: ROOTFS_A_PARTITION not set and no rootfs_a partlabel found; falling back to /dev/mmcblk0p3 (may be WRONG for this board)" >&2
+fi
+if [ -z "${ROOTFS_B_PARTITION:-}" ]; then
+    logger -t switch-boot-slot "WARNING: ROOTFS_B_PARTITION not set and no rootfs_b partlabel found; falling back to /dev/mmcblk0p4 (may be WRONG for this board)" 2>/dev/null || true
+    echo "[switch-boot-slot] WARNING: ROOTFS_B_PARTITION not set and no rootfs_b partlabel found; falling back to /dev/mmcblk0p4 (may be WRONG for this board)" >&2
+fi
+
 ROOTFS_A="${ROOTFS_A_PARTITION:-/dev/mmcblk0p3}"
 ROOTFS_B="${ROOTFS_B_PARTITION:-/dev/mmcblk0p4}"
 
