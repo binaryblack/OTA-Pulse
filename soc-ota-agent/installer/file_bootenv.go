@@ -66,12 +66,18 @@ type FileBasedBootEnv struct {
 	menderBootPartFile string
 	rootfsPartA        string
 	rootfsPartB        string
+
+	// detectFn returns the partition number of the currently-booted rootfs.
+	// It defaults to detectCurrentPartitionNumber (reads /proc/self/mounts) and
+	// exists as a field only so unit tests can inject a fake for
+	// ReconcileToBootedSlot.
+	detectFn func() (string, error)
 }
 
 // NewFileBasedBootEnv creates a new file-based boot environment handler.
 // This is an alternative to U-Boot environment that works with any bootloader.
 func NewFileBasedBootEnv(cmd system.Commander, rootfsPartA, rootfsPartB string) *FileBasedBootEnv {
-	return &FileBasedBootEnv{
+	f := &FileBasedBootEnv{
 		Commander:          cmd,
 		slotFile:           DefaultSlotFile,
 		bootCountFile:      DefaultBootCountFile,
@@ -80,6 +86,8 @@ func NewFileBasedBootEnv(cmd system.Commander, rootfsPartA, rootfsPartB string) 
 		rootfsPartA:        rootfsPartA,
 		rootfsPartB:        rootfsPartB,
 	}
+	f.detectFn = f.detectCurrentPartitionNumber
+	return f
 }
 
 // ReadEnv reads boot environment variables from files.
@@ -518,6 +526,74 @@ func (f *FileBasedBootEnv) ClearDirectBootBackup() {
 	}
 	syscall.Sync()
 	log.Infof("FileBasedBootEnv: ClearDirectBootBackup: removed stale %s after good boot", prevPath)
+}
+
+// ReconcileToBootedSlot brings the agent's own /data/ota bookkeeping
+// (mender_boot_part + current_slot) back in line with the slot the device is
+// ACTUALLY running, on systemd-boot / loader.conf boards where the boot slot is
+// owned by /boot (loader.conf + /boot/mender_boot_part), not by /data/ota.
+//
+// After a successful OTA slot switch on such boards, /boot and the live mount
+// agree on the new slot, but /data/ota can stay pinned to the old slot forever
+// because nothing ever reconciles it. That stale record only affects the
+// agent's self-reported slot in the common case, but partitions.go's active
+// partition fallback and dual_rootfs_device.go's Rollback can consult it on
+// some paths, so realigning it once per boot removes that (rare) risk (BUG-110).
+//
+// SAFETY: this must NEVER run mid-OTA. When upgrade_available=1, mender_boot_part
+// intentionally points at the pending TARGET slot (not the running one), and
+// rewriting /data/ota to the running slot would corrupt the in-flight update.
+// The upgrade_available gate below is therefore the first, unconditional check.
+//
+// It writes ONLY the two /data/ota files directly (writeFile), never
+// writeMenderBootPart — the latter triggers a FAT sync / cmdline.txt rewrite
+// that is boot-authoritative on direct-boot boards and must not be touched by a
+// bookkeeping reconcile.
+func (f *FileBasedBootEnv) ReconcileToBootedSlot() {
+	// Step 1 — SAFETY GATE (must be first and unconditional): never touch
+	// /data/ota while an OTA is pending. mender_boot_part points at the target
+	// slot in that window; reconciling to the running slot would corrupt it.
+	ua, _ := f.readFile(f.upgradeAvailFile, "0")
+	if ua == "1" {
+		log.Debug("FileBasedBootEnv: ReconcileToBootedSlot: upgrade_available=1, OTA pending — skipping reconcile")
+		return
+	}
+
+	// Step 2 — detect the actually-booted partition number. Never write on a
+	// detection failure.
+	actualPart, err := f.detectFn()
+	if err != nil {
+		log.Warnf("FileBasedBootEnv: ReconcileToBootedSlot: could not detect current partition: %v", err)
+		return
+	}
+
+	// Step 3 — map it to a slot label. Empty means the running partition is not
+	// part of the configured A/B pair; never write a slot outside that pair.
+	slot := f.partitionNumberToSlot(actualPart)
+	if slot == "" {
+		log.Warnf("FileBasedBootEnv: ReconcileToBootedSlot: running partition %q does not match configured rootfs A/B pair — skipping reconcile", actualPart)
+		return
+	}
+
+	// Step 4 — no-op fast path: if /data/ota already agrees with reality (the
+	// common case on every normal boot), do nothing and touch nothing.
+	curPart, _ := f.readFile(f.menderBootPartFile, "")
+	curSlot, _ := f.readFile(f.slotFile, "")
+	if curPart == actualPart && curSlot == slot {
+		return
+	}
+
+	// Step 5 — realign the bookkeeping. Write ONLY the two /data/ota files;
+	// deliberately avoid writeMenderBootPart (no FAT sync / cmdline.txt rewrite).
+	log.Infof("FileBasedBootEnv: ReconcileToBootedSlot: realigning /data/ota to booted slot: mender_boot_part %q→%q, current_slot %q→%q",
+		curPart, actualPart, curSlot, slot)
+	if werr := f.writeFile(f.menderBootPartFile, actualPart); werr != nil {
+		log.Warnf("FileBasedBootEnv: ReconcileToBootedSlot: failed to write mender_boot_part: %v", werr)
+		return
+	}
+	if werr := f.writeFile(f.slotFile, slot); werr != nil {
+		log.Warnf("FileBasedBootEnv: ReconcileToBootedSlot: failed to write current_slot: %v", werr)
+	}
 }
 
 // findBootDir returns the directory of the mounted FAT boot partition, mounting

@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -166,4 +167,103 @@ func TestUpdateBootCmdline_RewritesOnlyRootAndBacksUpOnce(t *testing.T) {
 	updatedAgain, err := os.ReadFile(cmdlinePath)
 	require.NoError(t, err)
 	assert.Contains(t, strings.Fields(string(updatedAgain)), "root=/dev/mmcblk0p2")
+}
+
+// --- BUG-110: ReconcileToBootedSlot /data/ota realignment ------------------
+//
+// On systemd-boot / loader.conf boards the boot slot is owned by /boot, so the
+// agent's own /data/ota bookkeeping can lag the actually-booted slot forever
+// after a switch. ReconcileToBootedSlot realigns it once per boot, but MUST NOT
+// run while an OTA is pending (upgrade_available=1), because mender_boot_part
+// then points at the pending target slot, not the running one.
+//
+// The temp env is built with rootfsPartA=/dev/mmcblk0p2 (slot "a", part "2")
+// and rootfsPartB=/dev/mmcblk0p3 (slot "b", part "3").
+
+// (d) Stale /data/ota + upgrade_available=0 + a valid, different detected
+// partition ⇒ both files are rewritten to the detected slot.
+func TestReconcileToBootedSlot_RewritesStaleBookkeeping(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	env.detectFn = func() (string, error) { return "2", nil } // running slot-a
+
+	require.NoError(t, os.WriteFile(env.upgradeAvailFile, []byte("0\n"), 0644))
+	require.NoError(t, os.WriteFile(env.menderBootPartFile, []byte("3\n"), 0644)) // stale slot-b
+	require.NoError(t, os.WriteFile(env.slotFile, []byte("b\n"), 0644))           // stale slot-b
+
+	env.ReconcileToBootedSlot()
+
+	part, err := os.ReadFile(env.menderBootPartFile)
+	require.NoError(t, err)
+	assert.Equal(t, "2", strings.TrimSpace(string(part)), "mender_boot_part must be realigned to the booted partition")
+
+	slot, err := os.ReadFile(env.slotFile)
+	require.NoError(t, err)
+	assert.Equal(t, "a", strings.TrimSpace(string(slot)), "current_slot must be realigned to the booted slot")
+}
+
+// (e) SAFETY GATE — the most important test: with upgrade_available=1 the
+// reconcile must touch NOTHING, even though the detected slot differs from the
+// stale /data/ota values (which, mid-OTA, intentionally point at the pending
+// target slot).
+func TestReconcileToBootedSlot_UpgradePendingGateBlocksAllWrites(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	env.detectFn = func() (string, error) { return "2", nil } // running slot-a
+
+	require.NoError(t, os.WriteFile(env.upgradeAvailFile, []byte("1\n"), 0644))   // OTA pending
+	require.NoError(t, os.WriteFile(env.menderBootPartFile, []byte("3\n"), 0644)) // target slot-b
+	require.NoError(t, os.WriteFile(env.slotFile, []byte("b\n"), 0644))           // target slot-b
+
+	env.ReconcileToBootedSlot()
+
+	part, err := os.ReadFile(env.menderBootPartFile)
+	require.NoError(t, err)
+	assert.Equal(t, "3", strings.TrimSpace(string(part)), "mender_boot_part must be untouched while an OTA is pending")
+
+	slot, err := os.ReadFile(env.slotFile)
+	require.NoError(t, err)
+	assert.Equal(t, "b", strings.TrimSpace(string(slot)), "current_slot must be untouched while an OTA is pending")
+}
+
+// (f) An unrecognized/unmapped detected partition (not part of the configured
+// A/B pair) ⇒ no files are written; a slot outside the pair must never be
+// persisted.
+func TestReconcileToBootedSlot_UnmappedPartitionWritesNothing(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	env.detectFn = func() (string, error) { return "9", nil } // not part A(2) or B(3)
+
+	require.NoError(t, os.WriteFile(env.upgradeAvailFile, []byte("0\n"), 0644))
+
+	env.ReconcileToBootedSlot()
+
+	_, statErr := os.Stat(env.menderBootPartFile)
+	assert.True(t, os.IsNotExist(statErr), "mender_boot_part must not be created for an unmapped partition")
+	_, statErr = os.Stat(env.slotFile)
+	assert.True(t, os.IsNotExist(statErr), "current_slot must not be created for an unmapped partition")
+}
+
+// (g) When /data/ota already matches the booted slot (the common every-boot
+// case) the reconcile is a pure no-op: it must not rewrite the files. Proven by
+// stamping an old mtime on the files and asserting it is unchanged after the
+// call (writeFile would refresh mtime).
+func TestReconcileToBootedSlot_AlreadyInSyncIsNoOp(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	env.detectFn = func() (string, error) { return "2", nil } // running slot-a
+
+	require.NoError(t, os.WriteFile(env.upgradeAvailFile, []byte("0\n"), 0644))
+	require.NoError(t, os.WriteFile(env.menderBootPartFile, []byte("2\n"), 0644)) // already slot-a
+	require.NoError(t, os.WriteFile(env.slotFile, []byte("a\n"), 0644))           // already slot-a
+
+	old := time.Unix(1000000000, 0)
+	require.NoError(t, os.Chtimes(env.menderBootPartFile, old, old))
+	require.NoError(t, os.Chtimes(env.slotFile, old, old))
+
+	env.ReconcileToBootedSlot()
+
+	fi, err := os.Stat(env.menderBootPartFile)
+	require.NoError(t, err)
+	assert.True(t, fi.ModTime().Equal(old), "mender_boot_part must not be rewritten when already in sync")
+
+	fi, err = os.Stat(env.slotFile)
+	require.NoError(t, err)
+	assert.True(t, fi.ModTime().Equal(old), "current_slot must not be rewritten when already in sync")
 }

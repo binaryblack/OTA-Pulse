@@ -422,7 +422,17 @@ func (d *dualRootfsDeviceImpl) HandleBootCountFallback() {
 	bcStr, bcOk := env["bootcount"]
 
 	if !uaOk || ua != "1" {
-		// No pending upgrade — nothing to fall back from
+		// No pending upgrade — nothing to fall back from. This is also the
+		// once-per-boot moment to realign the agent's /data/ota bookkeeping to
+		// the slot actually running, on systemd-boot / loader.conf boards where
+		// /boot owns the boot slot and /data/ota can otherwise lag forever after
+		// a switch (BUG-110). The type assertion makes this a no-op on U-Boot-env
+		// boards, mirroring the ClearDirectBootBackup idiom in CommitUpdate. The
+		// reconcile itself is internally gated on upgrade_available (which is not
+		// "1" here) and is a cheap no-op when /data/ota already matches.
+		if r, ok := d.BootEnvReadWriter.(interface{ ReconcileToBootedSlot() }); ok {
+			r.ReconcileToBootedSlot()
+		}
 		return
 	}
 
