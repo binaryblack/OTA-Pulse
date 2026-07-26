@@ -72,5 +72,5 @@ The OTA agent performs these steps:
 ## Support
 
 For questions about firmware signing:
-- Security guide: [../../../../../docs/SECURITY.md](../../../../../docs/SECURITY.md)
-- Proposed runtime signature-verification design: [../../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md](../../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md)
+- Security guide: [../../../../docs/SECURITY.md](../../../../docs/SECURITY.md)
+- Proposed runtime signature-verification design: [../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md](../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md)
