@@ -212,6 +212,39 @@ fw_printenv
 - Add health check to ArtifactCommit_Enter script
 - Check boot count limit in U-Boot config
 
+### GPT Partlabel / systemd-boot Slot Issues
+
+**Symptom:** Wrong partition boots after an update, or `switch-boot-slot.sh`
+reports success but the slot doesn't actually change (most common on Radxa
+CM5 / RK3588S with systemd-boot EFI ABA — see
+[integration/rockchip-integration.md](integration/rockchip-integration.md#radxa-cm5-rk3588s-slot-switching)).
+
+**Check:**
+1. GPT partlabels resolve as expected:
+   ```bash
+   lsblk -o NAME,PARTLABEL,PARTUUID
+   ls -l /dev/disk/by-partlabel/
+   ```
+
+2. `switch-boot-slot.sh` received real partition paths (not synthetic/placeholder ones):
+   ```bash
+   sudo /usr/sbin/switch-boot-slot.sh status
+   ```
+
+3. For systemd-boot EFI ABA specifically, check the active boot entry:
+   ```bash
+   bootctl status
+   ```
+
+**Solution:**
+- If `/dev/disk/by-partlabel/rootfs_a` or `rootfs_b` is missing, the WKS/kickstart
+  file isn't setting GPT partition labels — check your platform's `.wks` file.
+- Confirm you're running a build that includes the partlabel-based partition
+  resolution fix (commit `877a401`) rather than one assuming a static
+  `mmcblk0pN` mapping.
+- On Radxa CM5, confirm `CONFIG_BOOTCOMMAND` is `bootflow scan` (bootstd
+  mode) — `run distro_bootcmd` will not use the systemd-boot slot-switch path.
+
 ### Stuck in Update State
 
 **Symptom:** Device stuck, not responding to new updates

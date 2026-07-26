@@ -43,7 +43,7 @@ Steps:
 4. Fix the document using the Edit tool for each issue found.
 5. Return a summary of all changes made (or "No changes needed" if the doc is accurate).
 
-Working directory: c:/Users/krish/OneDrive/Documents/GitHub/OTA-Pulse
+Working directory: the current OTA-Pulse checkout (use the actual repo root, not a hardcoded path)
 Document to review: <FILE_PATH>
 ```
 
@@ -62,10 +62,8 @@ After all agents complete, compile a final report:
 Review all files found in Step 1, including:
 - `docs/API.md`
 - `docs/CONFIGURATION.md`
-- `docs/INTEGRATION.md`
 - `docs/SECURITY.md`
 - `docs/TROUBLESHOOTING.md`
-- `docs/TODO_BUILD_SYSTEMS.md`
 - `docs/integration/README.md`
 - `docs/integration/generic-arm-integration.md`
 - `docs/integration/imx-integration.md`
