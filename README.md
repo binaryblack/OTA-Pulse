@@ -92,7 +92,7 @@ Flash the image to your device. On first boot, the device will automatically pro
 
 | Document | Description |
 |----------|-------------|
-| [Integration Guide](docs/INTEGRATION.md) | Complete integration walkthrough |
+| [Integration Guide](docs/integration/README.md) | Complete integration walkthrough |
 | [Configuration Reference](docs/CONFIGURATION.md) | All configuration options |
 | [API Reference](docs/API.md) | OTA agent API documentation |
 | [Security Guide](docs/SECURITY.md) | Security best practices |

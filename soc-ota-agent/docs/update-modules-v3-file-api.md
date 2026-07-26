@@ -1,12 +1,17 @@
 Update modules v3 protocol
 ==========================
 
-Update modules are executables that are placed in `/usr/share/mender/modules/v3`
-directory, where `v3` is a reference to the version of the protocol, which is
-the same as [the version of the Artifact
+Update modules are executables that are placed in the modules `v3` directory,
+where `v3` is a reference to the version of the protocol, which is the same as
+[the version of the Artifact
 format](https://github.com/mendersoftware/mender-artifact/tree/master/Documentation). Mender
 will look for update modules in the directory with the same version as the
 version of the Artifact being processed.
+
+In this OTA-Pulse agent, that path is `DefaultModulesPath` from
+`soc-ota-agent/conf/paths.go`: `${OTAPULSE_DATA_DIR:-/usr/share/otapulse}/modules/v3`,
+falling back to the legacy `/usr/share/mender/modules/v3` only if that's what's
+already present on disk (pre-rename systems).
 
 
 States and execution flow

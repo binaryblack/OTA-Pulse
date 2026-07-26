@@ -30,8 +30,11 @@ will still be considered valid.
 Automatic installation of the Artifact
 --------------------------------------
     
-On start-up, Mender checks for the existence of a bootstrap Artifact in path
-`/var/lib/mender/bootstrap.mender` and installs it in order to initialize the device database. The
+On start-up, the agent checks for the existence of a bootstrap Artifact at
+`DefaultBootstrapArtifactFile` (`soc-ota-agent/conf/paths.go`) — the OTAPulse
+state dir (`${OTAPULSE_DATASTORE_DIR:-/var/lib/otapulse}/bootstrap.mender`),
+falling back to the legacy `/var/lib/mender/bootstrap.mender` on pre-rename
+systems — and installs it in order to initialize the device database. The
 Artifact is not installed if the device already has a database.
 
 This applies both for `daemon` command and `bootstrap` and `install` standalone calls.

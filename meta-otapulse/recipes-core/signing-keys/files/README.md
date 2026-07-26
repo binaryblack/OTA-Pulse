@@ -20,6 +20,11 @@ SOC_OTA_VERIFICATION_KEYS = "/path/to/your/production-rsa-public.pem /path/to/yo
 
 ## Directory Structure
 
+This source directory (`files/`) holds flat `.pem` files only — the
+`active/`/`revoked/` split below is the **on-device installed layout**,
+created by `signing-keys_1.0.bb`'s `do_install`, not the layout of this
+source directory:
+
 ```
 /etc/soc-monitoring/signing-keys/
 ├── README.md (this file)
@@ -67,5 +72,5 @@ The OTA agent performs these steps:
 ## Support
 
 For questions about firmware signing:
-- Documentation: /docs/FIRMWARE_SIGNING_IMPLEMENTATION.md
-- Security: /docs/security/OTA_SECURITY_ARCHITECTURE.md
+- Security guide: [../../../../../docs/SECURITY.md](../../../../../docs/SECURITY.md)
+- Proposed runtime signature-verification design: [../../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md](../../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md)

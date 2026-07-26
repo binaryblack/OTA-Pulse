@@ -254,6 +254,6 @@ Monitor for security events:
 
 ## Further Resources
 
-- [Integration Guide](INTEGRATION.md)
+- [Integration Guide](integration/README.md)
 - [Configuration Reference](CONFIGURATION.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
