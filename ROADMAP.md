@@ -1,6 +1,6 @@
 # OTA-Pulse Build System Integration Roadmap
 
-This document tracks planned and potential build system integrations for OTA-Pulse.
+This document tracks planned and potential build system integrations for OTA-Pulse. For user-facing integration instructions on already-supported build systems, see [docs/integration/README.md](docs/integration/README.md).
 
 ## Current Status
 
@@ -236,7 +236,7 @@ To add support for a new build system:
 2. Add package/build files for that system
 3. Ensure mandatory signature verification
 4. Add documentation in `docs/`
-5. Update main `docs/INTEGRATION.md` table
+5. Update the platform table in `docs/integration/README.md`
 6. Submit PR
 
 ---

@@ -211,6 +211,33 @@ ROM → U-Boot SPL → U-Boot → Kernel → Rootfs → Application
     (signed)    (verified) (verified) (verified)
 ```
 
+### systemd-boot EFI ABA (Radxa CM5 / RK3588S)
+
+Boards booting via systemd-boot in EFI ABA mode (see
+[integration/rockchip-integration.md](integration/rockchip-integration.md#radxa-cm5-rk3588s-slot-switching))
+use `switch-boot-slot.sh`'s systemd-boot method rather than a U-Boot
+`boot.scr` for slot selection. The chain-of-trust diagram above still applies;
+only the slot-selection step at the U-Boot→kernel boundary differs from the
+generic `boot.scr` flow.
+
+### Signing-Key Rotation Workflow
+
+The signing-keys recipe (`meta-otapulse/recipes-core/signing-keys/`) supports
+multiple simultaneously-active verification keys specifically to allow
+rotation without an update gap:
+
+1. Add the new public key alongside the current one via
+   `SOC_OTA_VERIFICATION_KEYS` (space-separated list) — both old and new keys
+   verify successfully during the transition.
+2. Rebuild and deploy an image carrying both keys to your fleet.
+3. Once the fleet has the new key, start signing artifacts with the new
+   private key only.
+4. After a full rollout cycle, drop the old key from
+   `SOC_OTA_VERIFICATION_KEYS` and rebuild.
+
+See [signing-keys/files/README.md](../meta-otapulse/recipes-core/signing-keys/files/README.md)
+for the on-device `active/`/`revoked/` key layout this produces.
+
 ## Partition Layout Security
 
 ### A/B Partition Protection
@@ -287,6 +314,6 @@ Monitor for security events:
 
 ## Further Resources
 
-- [Integration Guide](INTEGRATION.md)
+- [Integration Guide](integration/README.md)
 - [Configuration Reference](CONFIGURATION.md)
 - [Troubleshooting](TROUBLESHOOTING.md)

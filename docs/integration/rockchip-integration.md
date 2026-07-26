@@ -6,7 +6,8 @@ This guide covers OTA-Pulse integration for Rockchip processors including RK3588
 
 | Platform | Example Boards | Status |
 |----------|---------------|--------|
-| RK3588/RK3588S | Rock 5B, Orange Pi 5, Radxa CM5 | ⚠️ Supported (needs testing) |
+| RK3588S | Radxa CM5 | ✅ Tested — see [Radxa CM5](#radxa-cm5-rk3588s-slot-switching) below |
+| RK3588/RK3588S | Rock 5B, Orange Pi 5 | ⚠️ Supported (needs testing) |
 | RK3568 | Rock 3A, Odroid M1 | ⚠️ Supported (needs testing) |
 | RK3566 | Quartz64, Pine64 | ⚠️ Supported (needs testing) |
 | RK3399 | Rock Pi 4, NanoPC-T4 | ⚠️ Supported (needs testing) |
@@ -282,6 +283,19 @@ MACHINE = "orangepi-5"
 MACHINE = "rock-3a"
 # Edit boot-rockchip.cmd: setenv fdt_file rockchip/rk3568-rock-3a.dtb
 ```
+
+## Radxa CM5 (RK3588S) Slot Switching
+
+The Radxa CM5 is the most heavily field-tested Rockchip target and uses a different boot/slot-switch mechanism than the generic `boot-rockchip.cmd` template above:
+
+- **Boot method**: RK vendor U-Boot in **bootstd** mode — `CONFIG_BOOTCOMMAND` must be `bootflow scan`, not `run distro_bootcmd`. The board does not use the `mender_boot_part`-file U-Boot script shown earlier in this guide; slot selection is via **systemd-boot EFI ABA**.
+- **Real device tree required**: the generic `rk3588s-radxa-cm5.dtb` (EVB variant) hangs on peripheral probe. You must inject the board's actual `rk3588s-radxa-cm5-io.dts` via a `KERNEL_DEVICETREE:forcevariable` bbappend — see `sources/meta-custom/recipes-bsp/otapulse-boot-script/files/README-rockchip-rk3588.md` in the parent Yocto project for the exact mechanism.
+- **Partition resolution**: like i.MX (see [imx-integration.md](imx-integration.md#partition-layout)), rootfs A/B slots are resolved by **GPT partlabel**, not a static `mmcblk0pN` mapping — fixed in commit `877a401`.
+- **Slot switching**: implemented in `switch-boot-slot.sh` (shipped in three places: `meta-otapulse/recipes-core/otapulse-firstboot/files/`, `meta-otapulse/recipes-bsp/u-boot-env-config/files/`, and the buildroot equivalent). Recent hardening on this path, all specific to Radxa CM5 field issues:
+  - **BUG-155**: primary-NIC MAC address churned across reboots (identity instability) — fixed by persisting the MAC.
+  - **BUG-157**: `switch-boot-slot.sh` was receiving synthetic partition paths instead of the real resolved paths — fixed to pass real partition paths through; a follow-up closed remaining false-success paths where the script could report success without actually switching.
+  - **BUG-158**: added a systemd-boot EFI ABA method to `switch-boot-slot.sh` as the primary mechanism for this board (rather than relying solely on the U-Boot env write path).
+- **Console/hush caveats**: RK vendor U-Boot's hush shell silently no-ops on comments inside a *sourced* `boot.scr` (i.e. `#` comments after the script is already loaded are not always safe — inline them before sourcing instead), and `setexpr.b` is unsupported on this U-Boot build (used by the generic Rockchip boot script above; avoid it here). Use Ctrl+C during autoboot to break into the prompt for debugging.
 
 ## Troubleshooting
 
