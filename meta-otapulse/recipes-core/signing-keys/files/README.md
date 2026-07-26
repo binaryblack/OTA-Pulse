@@ -66,6 +66,7 @@ The OTA agent performs these steps:
 
 ## Support
 
-For questions about firmware signing:
-- Documentation: /docs/FIRMWARE_SIGNING_IMPLEMENTATION.md
-- Security: /docs/security/OTA_SECURITY_ARCHITECTURE.md
+For questions about firmware signing, see the repository's
+[Security Guide](../../../../docs/SECURITY.md) (`docs/SECURITY.md` from the repo root),
+which covers key generation, artifact signing, verification-key deployment and the key
+rotation procedure.

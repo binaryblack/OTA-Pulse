@@ -120,6 +120,39 @@ Enable build-time verification enforcement:
 SOC_OTA_SIGNATURE_VERIFICATION = "1"
 ```
 
+`ArtifactVerifyKey` and `ArtifactVerifyKeys` are mutually exclusive — setting both is a
+configuration error. The agent verifies the signature embedded in the `.otapulse` artifact
+itself (there is no separate `.sig` download); it tries each configured key in turn and
+installs only if one of them verifies.
+
+By default, a *signed* artifact installs with a warning when no verification key is
+configured. To make a missing or unreadable key a hard install failure instead of a silent
+downgrade to unverified installs, set:
+
+```json
+{
+  "RequireArtifactVerification": true
+}
+```
+
+### Key Rotation Procedure
+
+Because multiple verification keys can be active at once, rotation is a rolling operation
+with no fleet downtime:
+
+1. Generate the new key pair on the secure signing host (see [Key Generation](#key-generation)).
+2. Add the new **public** key alongside the current one under
+   `/etc/soc-monitoring/signing-keys/active/` — via the `signing-keys` recipe, or by adding
+   its path to `ArtifactVerifyKeys`.
+3. Build and deploy a system image carrying both keys, and wait for the whole fleet to take it.
+4. Only then start signing new artifacts with the new private key.
+5. After the transition period, move the old public key to
+   `/etc/soc-monitoring/signing-keys/revoked/` (and drop it from `ArtifactVerifyKeys`) in the
+   next image.
+
+Public keys on the device are read-only (`0444`) and embedded in the read-only rootfs, so
+rotating them requires a firmware update by design. Private keys are never stored on devices.
+
 ## Device Authentication
 
 ### Tenant Token

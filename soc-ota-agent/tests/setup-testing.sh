@@ -69,16 +69,6 @@ chmod +x "${SCRIPT_DIR}/test-signature-verification.sh" 2>/dev/null || true
 chmod +x "${SCRIPT_DIR}/test-integration.sh" 2>/dev/null || true
 echo -e "${GREEN}✓ Done${NC}"
 
-# Check signature package
-echo -n "Checking signature package... "
-if [ -f "${PROJECT_ROOT}/soc-ota-agent/signature/verify.go" ]; then
-    echo -e "${GREEN}✓ Found${NC}"
-else
-    echo -e "${RED}✗ Not found${NC}"
-    echo "Signature package is missing!"
-    exit 1
-fi
-
 echo ""
 echo -e "${GREEN}=========================================="
 echo "Setup Complete!"
@@ -86,19 +76,15 @@ echo "==========================================${NC}"
 echo ""
 echo "Quick Start:"
 echo ""
-echo "1. Run Unit Tests:"
-echo "   cd ${PROJECT_ROOT}/soc-ota-agent/signature"
-echo "   go test -v"
-echo ""
-echo "2. Run Signature Verification Tests:"
+echo "1. Run Signature Verification Tests:"
 echo "   cd ${PROJECT_ROOT}/soc-ota-agent/tests"
 echo "   ./test-signature-verification.sh"
 echo ""
-echo "3. Run Full Integration Tests:"
+echo "2. Run Full Integration Tests:"
 echo "   cd ${PROJECT_ROOT}/soc-ota-agent/tests"
 echo "   ./test-integration.sh"
 echo ""
-echo "4. Read Documentation:"
-echo "   less ${PROJECT_ROOT}/soc-ota-agent/tests/TESTING_GUIDE.md"
+echo "3. Read Documentation:"
+echo "   less ${PROJECT_ROOT}/docs/SECURITY.md"
 echo ""
-echo -e "${BLUE}For more information, see TESTING_GUIDE.md${NC}"
+echo -e "${BLUE}For more information, see docs/SECURITY.md${NC}"
