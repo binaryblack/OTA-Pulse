@@ -403,10 +403,10 @@ python otapulse_sanity_check() {
             failed += 1
         else:
             # Recommended packages — warn only, never fail
-            if 'memfaultd-bin' not in image_install_pkgs and 'memfaultd' not in image_install_pkgs:
-                bb.warn("OTAPulse Sanity [packages]: 'memfaultd-bin' not in IMAGE_INSTALL "
+            if 'socmond-bin' not in image_install_pkgs and 'socmond' not in image_install_pkgs:
+                bb.warn("OTAPulse Sanity [packages]: 'socmond-bin' not in IMAGE_INSTALL "
                         "— device monitoring and crash reporting will be unavailable. "
-                        "Add: IMAGE_INSTALL:append = \" memfaultd-bin\"")
+                        "Add: IMAGE_INSTALL:append = \" socmond-bin\"")
             if 'u-boot-fw-utils' not in image_install_pkgs:
                 bb.warn("OTAPulse Sanity [packages]: 'u-boot-fw-utils' not in IMAGE_INSTALL "
                         "— U-Boot environment variable access may be unavailable on the device. "

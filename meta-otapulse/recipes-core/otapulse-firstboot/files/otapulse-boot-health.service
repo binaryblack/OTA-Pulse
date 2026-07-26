@@ -17,7 +17,7 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 DefaultDependencies=no
 After=local-fs.target systemd-udev-settle.service otapulse-partition-setup.service
 Wants=systemd-udev-settle.service
-Before=soc-ota-agent.service memfaultd.service
+Before=soc-ota-agent.service socmond.service
 
 [Service]
 Type=oneshot

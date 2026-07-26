@@ -113,7 +113,7 @@ Or add OTAPulse to your existing image by including the package group:
 
 ```bash
 # In your image recipe
-IMAGE_INSTALL:append = " soc-ota-agent memfaultd-bin"
+IMAGE_INSTALL:append = " soc-ota-agent socmond-bin"
 ```
 
 ## Step 6: Device Provisioning

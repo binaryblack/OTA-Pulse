@@ -66,7 +66,7 @@ IMAGE_INSTALL:append = " \
 
 # Optional: Monitoring and diagnostics
 IMAGE_INSTALL:append = " \
-    memfaultd \
+    socmond \
 "
 ```
 

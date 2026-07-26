@@ -431,7 +431,7 @@ else
     fi
 
     # Recommended packages (warn only)
-    for rec_bin in memfaultd sgdisk fw_printenv; do
+    for rec_bin in socmond sgdisk fw_printenv; do
         if [ -f "${TARGET_DIR}/usr/bin/${rec_bin}" ] || \
            [ -f "${TARGET_DIR}/usr/sbin/${rec_bin}" ]; then
             info "Recommended package present: ${rec_bin}"
@@ -477,10 +477,10 @@ else
     fi
 
     # Monitoring service (warn only)
-    if [ -f "${TARGET_DIR}/usr/lib/systemd/system/memfaultd.service" ]; then
-        info "Monitoring service present: memfaultd.service"
+    if [ -f "${TARGET_DIR}/usr/lib/systemd/system/socmond.service" ]; then
+        info "Monitoring service present: socmond.service"
     else
-        warn "Monitoring service not found: memfaultd.service"
+        warn "Monitoring service not found: socmond.service"
     fi
 fi
 

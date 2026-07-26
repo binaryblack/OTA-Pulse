@@ -43,7 +43,7 @@ Welcome to the OTA-Pulse integration documentation. This directory contains step
 | `soc-ota-agent` | OTA client daemon (Go binary) |
 | `otapulse-firstboot` | First-boot partition setup |
 | `otapulse-boot-script` | U-Boot boot script for A/B switching |
-| `memfaultd` | (Optional) Monitoring and diagnostics |
+| `socmond` | (Optional) Monitoring and diagnostics |
 | `soc-ctl` | Device control CLI (status, provisioning, config) |
 
 ## Architecture Overview

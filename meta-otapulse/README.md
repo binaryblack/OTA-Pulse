@@ -319,10 +319,10 @@ meta-otapulse/
 ├── recipes-core/
 │   ├── images/
 │   │   └── soc-monitoring-image.bb   # Complete image recipe
-│   ├── memfault/                     # Telemetry daemon
-│   │   ├── memfaultd_1.0.0.bb        # Rust implementation
+│   ├── socmond/                     # Telemetry daemon
+│   │   ├── socmond_1.0.0.bb        # Rust implementation
 │   │   └── files/
-│   │       ├── memfaultd-rs/         # Rust source
+│   │       ├── socmond-rs/         # Rust source
 │   │       ├── config.json           # Default configuration
 │   │       └── *.service             # Systemd units
 │   ├── signing-keys/                 # Firmware signing keys
@@ -416,8 +416,8 @@ systemctl status soc-ota-agent
 soc-ota-agent show-artifact
 
 # Check telemetry daemon
-systemctl status memfaultd
-journalctl -u memfaultd -f
+systemctl status socmond
+journalctl -u socmond -f
 ```
 
 ## License

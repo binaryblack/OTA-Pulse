@@ -2,5 +2,5 @@
 
 menu "OTA-Pulse"
 	source "$BR2_EXTERNAL_OTAPULSE_PATH/package/otapulse/Config.in"
-	source "$BR2_EXTERNAL_OTAPULSE_PATH/package/memfault/Config.in"
+	source "$BR2_EXTERNAL_OTAPULSE_PATH/package/socmond/Config.in"
 endmenu

@@ -81,9 +81,9 @@ otapulse_enable_netem_autoload() {
 }
 
 # Monitoring and telemetry
-# Using memfaultd-bin (shell script version) to avoid Rust build issues
+# Using socmond-bin (shell script version) to avoid Rust build issues
 IMAGE_INSTALL += " \
-    memfaultd-bin \
+    socmond-bin \
     "
 
 # OTA Updates - SoC OTA Agent (Mender-based)

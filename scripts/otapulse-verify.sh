@@ -365,12 +365,12 @@ else
     done
     $dtype_found || fail "device_type file not found in rootfs"
 
-    # ── memfaultd ────────────────────────────────────────────────────────
-    if debugfs_exists "$EXT4_IMAGE" "/usr/bin/memfaultd"; then
-        pass "memfaultd found (/usr/bin/memfaultd)"
+    # ── socmond ────────────────────────────────────────────────────────
+    if debugfs_exists "$EXT4_IMAGE" "/usr/bin/socmond"; then
+        pass "socmond found (/usr/bin/socmond)"
     else
-        warn "memfaultd not found — device monitoring and crash reporting unavailable"
-        info "  Add to image: IMAGE_INSTALL:append = \" memfaultd-bin\""
+        warn "socmond not found — device monitoring and crash reporting unavailable"
+        info "  Add to image: IMAGE_INSTALL:append = \" socmond-bin\""
     fi
 
     # ── systemd service file ─────────────────────────────────────────────
