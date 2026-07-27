@@ -17,7 +17,7 @@ config BR2_PACKAGE_OTAPULSE
 	select BR2_PACKAGE_DOSFSTOOLS
 	select BR2_PACKAGE_GPTFDISK
 	select BR2_PACKAGE_XZ
-	select BR2_PACKAGE_MEMFAULT
+	select BR2_PACKAGE_SOCMOND
 	help
 	  OTA-Pulse is a robust over-the-air (OTA) update solution for
 	  embedded Linux devices. It provides atomic A/B partition updates

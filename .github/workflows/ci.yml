@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: soc-ota-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod's `go 1.21` directive is the minimum language version
+          # (matches README's documented build requirement); CI builds with a
+          # newer toolchain so govulncheck isn't permanently red on stdlib CVEs
+          # fixed in later Go releases (GAP-XC-002/XC-001).
+          go-version: '1.25'
+          cache-dependency-path: soc-ota-agent/go.sum
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config liblzma-dev libssl-dev libglib2.0-dev
+
+      - name: go vet
+        run: go vet -composites=false -unsafeptr=false ./...
+
+      - name: gofmt check
+        run: |
+          fmt_out="$(gofmt -l $(find . -type f -name '*.go' -not -path './vendor/*'))"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'ed:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go test
+        run: go test -v ./...
+
+  vulncheck:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: soc-ota-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod's `go 1.21` directive is the minimum language version
+          # (matches README's documented build requirement); CI builds with a
+          # newer toolchain so govulncheck isn't permanently red on stdlib CVEs
+          # fixed in later Go releases (GAP-XC-002/XC-001).
+          go-version: '1.25'
+          cache-dependency-path: soc-ota-agent/go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck
+        run: govulncheck ./...

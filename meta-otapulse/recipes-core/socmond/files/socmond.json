@@ -1,0 +1,82 @@
+{
+  "server": {
+    "base_url": "http://192.168.0.123:8000",
+    "api_version": "v1",
+    "_comment": "Change base_url to your SoC Monitoring server address"
+  },
+  "device": {
+    "device_id": "",
+    "hardware_version": "",
+    "firmware_version": ""
+  },
+  "auth": {
+    "api_key": "",
+    "provisioning_token": "",
+    "project_key": "",
+    "_comment": "Use provisioning_token for new devices (recommended) or api_key for legacy setup"
+  },
+  "metrics": {
+    "enabled": true,
+    "upload_interval_seconds": 300,
+    "collection_interval_seconds": 60,
+    "max_buffer_size_bytes": 104857600,
+    "retry_max_attempts": 5,
+    "metrics_socket_path": "/run/socmond/metrics.sock"
+  },
+  "crash": {
+    "enabled": true,
+    "coredump_enabled": true,
+    "coredump_max_size_bytes": 52428800,
+    "coredump_compression": "gzip",
+    "coredump_storage_path": "/var/lib/socmond/coredumps",
+    "upload_on_crash": true,
+    "capture_logs_before_crash": true,
+    "log_lines_before_crash": 500
+  },
+  "reboot": {
+    "enabled": true,
+    "track_reason": true,
+    "reason_file_path": "/var/lib/socmond/last_reboot_reason"
+  },
+  "ota": {
+    "enabled": true,
+    "check_interval_seconds": 60,
+    "download_path": "/var/lib/socmond/ota",
+    "signature_verification": false,
+    "signature_algorithm": "ecdsa-p384",
+    "allow_downgrade": false,
+    "auto_install": true,
+    "retry_on_failure": true,
+    "max_download_retries": 3
+  },
+  "logs": {
+    "enabled": true,
+    "capture_kernel_logs": true,
+    "capture_journal_logs": true,
+    "max_log_buffer_bytes": 524288000,
+    "log_level": "info"
+  },
+  "system": {
+    "collect_cpu_metrics": true,
+    "collect_memory_metrics": true,
+    "collect_disk_metrics": true,
+    "collect_network_metrics": true,
+    "collect_temperature": true,
+    "temperature_paths": [
+      "/sys/class/thermal/thermal_zone0/temp",
+      "/sys/class/thermal/thermal_zone1/temp"
+    ]
+  },
+  "watchdog": {
+    "enabled": true,
+    "timeout_seconds": 30,
+    "pet_interval_seconds": 10
+  },
+  "network": {
+    "connect_timeout_seconds": 30,
+    "request_timeout_seconds": 60,
+    "use_tls": false,
+    "verify_certificates": false,
+    "ca_cert_path": "/etc/ssl/certs/ca-certificates.crt"
+  }
+}

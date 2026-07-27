@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"testing"
+	"time"
 
 	"github.com/binaryblack/OTA-Pulse/client"
 	"github.com/stretchr/testify/assert"
@@ -86,4 +87,47 @@ func TestInventoryDataParseError(t *testing.T) {
 	// empty inventory data.
 	assert.NoError(t, err)
 	assert.Equal(t, 0, len(data))
+}
+
+func TestInventoryDataHungToolIsKilled(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	// a well-behaved tool that returns quickly
+	fastFd, err := os.OpenFile(path.Join(tmpDir, "mender-inventory-fast"),
+		os.O_CREATE|os.O_WRONLY, 0755)
+	require.NoError(t, err)
+	fastFd.Write([]byte("#!/bin/sh\necho key=value\n"))
+	fastFd.Close()
+
+	// a tool that hangs forever - simulates GAP-OTA-013
+	hangFd, err := os.OpenFile(path.Join(tmpDir, "mender-inventory-hang"),
+		os.O_CREATE|os.O_WRONLY, 0755)
+	require.NoError(t, err)
+	hangFd.Write([]byte("#!/bin/sh\nsleep 3600\n"))
+	hangFd.Close()
+
+	origTimeout := inventoryToolTimeout
+	inventoryToolTimeout = 200 * time.Millisecond
+	defer func() { inventoryToolTimeout = origTimeout }()
+
+	inventory := NewInventoryDataRunner(tmpDir)
+
+	done := make(chan struct{})
+	var data client.InventoryData
+	go func() {
+		data, err = inventory.Get()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// the hung tool must be killed within the shortened timeout instead
+		// of stalling Get() indefinitely
+		assert.NoError(t, err)
+		assert.Contains(t, data, client.InventoryAttribute{Name: "key", Value: "value"})
+	case <-time.After(5 * time.Second):
+		t.Fatal("inventory.Get() did not return - hung tool was not killed")
+	}
 }

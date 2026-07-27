@@ -138,15 +138,35 @@ exit 0
 
 See `examples/state-scripts/` for more examples.
 
+## Boot Environment Files
+
+The agent tracks A/B slot state via files under `/data/ota/` (file-based boot
+environment; see `installer/file_bootenv.go`):
+
+| File | Purpose | Values |
+|------|---------|--------|
+| `current_slot` | Active slot indicator | `a` or `b` |
+| `mender_boot_part` | Boot partition number | board-specific (resolved by GPT partlabel where available — see [docs/integration/README.md](../docs/integration/README.md)) |
+| `upgrade_available` | Update pending flag | `0` or `1` |
+| `boot_count` | Boot attempt counter, used for automatic rollback | `0` to configured max |
+
 ## D-Bus API
 
-The agent exposes a D-Bus interface for programmatic control.
+The agent exposes a D-Bus interface for its authentication manager, so other applications
+can obtain the device's JWT for talking to the OTAPulse server. It is enabled by default
+when the agent is built with D-Bus support (`DBus.Enabled` in the agent config).
 
 ### Service Details
 
-- **Bus Name**: `io.otapulse.UpdateManager`
-- **Object Path**: `/io/otapulse/UpdateManager`
-- **Interface**: `io.otapulse.Update1`
+- **Bus Name**: `io.otapulse.AuthenticationManager`
+- **Object Path**: `/io/otapulse/AuthenticationManager`
+- **Interface**: `io.otapulse.Authentication1`
+
+| Member | Kind | Signature |
+|--------|------|-----------|
+| `GetJwtToken` | method | `() → (s token, s server_url)` |
+| `FetchJwtToken` | method | `() → (b success)` |
+| `JwtTokenStateChange` | signal | `(s token, s server_url)` |
 
 ### Example (Python)
 
@@ -154,12 +174,12 @@ The agent exposes a D-Bus interface for programmatic control.
 import dbus
 
 bus = dbus.SystemBus()
-proxy = bus.get_object('io.otapulse.UpdateManager', '/io/otapulse/UpdateManager')
-interface = dbus.Interface(proxy, 'io.otapulse.Update1')
+proxy = bus.get_object('io.otapulse.AuthenticationManager',
+                       '/io/otapulse/AuthenticationManager')
+interface = dbus.Interface(proxy, 'io.otapulse.Authentication1')
 
-# Get current artifact
-version = interface.GetVersion()
-print(f"Current: {version}")
+token, server_url = interface.GetJwtToken()
+print(f"Server: {server_url}")
 ```
 
 ## Systemd Service

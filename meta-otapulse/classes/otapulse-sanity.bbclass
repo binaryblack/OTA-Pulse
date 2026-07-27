@@ -26,11 +26,19 @@
 #   OTAPULSE_PROVISIONING_MODE (defined in otapulse.bbclass, read here)
 #     'token'  — a valid credential must exist at build time (default)
 #     'manual' — credentials are injected at runtime; skip the provisioning check
+#
+#   OTAPULSE_ALLOW_UNSIGNED (default: '0')
+#     '1' — explicit dev escape hatch: allow the 'signing' check to pass with
+#           SOC_OTA_SIGNATURE_VERIFICATION=0 instead of failing the build.
+#           Mirrors buildroot-otapulse/package/otapulse/otapulse.mk, which
+#           hard-errors on a missing verification key. Never set this for a
+#           production image.
 
 
 # ─── Check behaviour ──────────────────────────────────────────────────────────
-OTAPULSE_SANITY_LEVEL ?= "error"
-OTAPULSE_SANITY_SKIP  ?= ""
+OTAPULSE_SANITY_LEVEL   ?= "error"
+OTAPULSE_SANITY_SKIP    ?= ""
+OTAPULSE_ALLOW_UNSIGNED ?= "0"
 
 # ─── Placeholder detection lists ──────────────────────────────────────────────
 # These lists are defined as BitBake variables so projects can extend them:
@@ -323,15 +331,31 @@ python otapulse_sanity_check() {
                 bb.note("OTAPulse Sanity [signing]: OK "
                         "(verification enabled, key: %s)" % verify_keys)
                 passed += 1
-        else:
-            # Verification is off — warn but do not block; must be enabled before production
+        elif (d.getVar('OTAPULSE_ALLOW_UNSIGNED', True) or '0').strip() == '1':
+            # Verification is off, but the dev escape hatch is explicitly set — allow it
             bb.warn("OTAPulse Sanity [signing]: artifact signature verification is DISABLED "
-                    "(SOC_OTA_SIGNATURE_VERIFICATION=0). "
-                    "Enable it before shipping production firmware:\n"
+                    "(SOC_OTA_SIGNATURE_VERIFICATION=0) and OTAPULSE_ALLOW_UNSIGNED=1 — "
+                    "proceeding with an UNSIGNED build. Never ship this image to production:\n"
                     "  SOC_OTA_SIGNATURE_VERIFICATION = \"1\"\n"
                     "  SOC_OTA_VERIFICATION_KEYS       = \"/path/to/public.key\"\n"
                     "  SOC_OTA_SIGNING_KEY             = \"/path/to/private.key\"")
             passed += 1
+        else:
+            # Verification is off and no escape hatch — this must block the build.
+            # A stock 'inherit otapulse' image must never silently accept unsigned
+            # artifacts (Buildroot already hard-errors the equivalent case).
+            otapulse_sanity_msg(d, 'signing',
+                "Artifact signature verification is DISABLED "
+                "(SOC_OTA_SIGNATURE_VERIFICATION=0). Unsigned artifacts are not "
+                "permitted by default.",
+                "Enable signature verification:\n"
+                "  SOC_OTA_SIGNATURE_VERIFICATION = \"1\"\n"
+                "  SOC_OTA_VERIFICATION_KEYS       = \"/path/to/public.key\"\n"
+                "  SOC_OTA_SIGNING_KEY             = \"/path/to/private.key\"\n"
+                "\n"
+                "Or, for an explicit dev-only unsigned build:\n"
+                "  OTAPULSE_ALLOW_UNSIGNED = \"1\"")
+            failed += 1
 
     # ==================================================================
     # CHECK 'device-type' — Mender artifact must identify its target hardware
@@ -379,10 +403,10 @@ python otapulse_sanity_check() {
             failed += 1
         else:
             # Recommended packages — warn only, never fail
-            if 'memfaultd-bin' not in image_install_pkgs and 'memfaultd' not in image_install_pkgs:
-                bb.warn("OTAPulse Sanity [packages]: 'memfaultd-bin' not in IMAGE_INSTALL "
+            if 'socmond-bin' not in image_install_pkgs and 'socmond' not in image_install_pkgs:
+                bb.warn("OTAPulse Sanity [packages]: 'socmond-bin' not in IMAGE_INSTALL "
                         "— device monitoring and crash reporting will be unavailable. "
-                        "Add: IMAGE_INSTALL:append = \" memfaultd-bin\"")
+                        "Add: IMAGE_INSTALL:append = \" socmond-bin\"")
             if 'u-boot-fw-utils' not in image_install_pkgs:
                 bb.warn("OTAPulse Sanity [packages]: 'u-boot-fw-utils' not in IMAGE_INSTALL "
                         "— U-Boot environment variable access may be unavailable on the device. "

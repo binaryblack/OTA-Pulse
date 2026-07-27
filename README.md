@@ -25,16 +25,28 @@ OTA-Pulse/
 │   ├── recipes-core/       # Core packages (OTA agent, monitoring)
 │   └── recipes-support/    # Support packages
 │
+├── buildroot-otapulse/     # Buildroot BR2_EXTERNAL tree
+│   ├── board/              # Board overlays and post-build scripts
+│   ├── configs/            # Buildroot defconfigs
+│   ├── docs/               # Buildroot integration docs
+│   └── package/            # Buildroot packages
+│
 ├── soc-ota-agent/          # OTA Client Agent (Go)
 │   ├── app/                # Core application logic
 │   ├── cli/                # Command-line interface
 │   ├── client/             # HTTP client implementation
 │   ├── installer/          # Firmware installation
-│   ├── examples/           # Configuration examples
-│   └── support/            # Utilities and scripts
+│   ├── statescript/        # State script execution
+│   ├── store/              # Key/data store
+│   ├── tunnel/             # Remote SSH tunnel client
+│   ├── examples/           # Configuration and state-script examples
+│   ├── support/            # Utilities and scripts
+│   └── tests/              # Integration test scripts
 │
-├── docs/                   # Documentation
-└── examples/               # Integration examples
+├── build-raspberrypi4-64/  # Board-specific build config drop-ins
+├── scripts/                # Helper scripts (otapulse-verify.sh)
+├── .github/                # CI workflows
+└── docs/                   # Documentation (docs/archive/ = historical)
 ```
 
 ## Quick Start
@@ -92,7 +104,7 @@ Flash the image to your device. On first boot, the device will automatically pro
 
 | Document | Description |
 |----------|-------------|
-| [Integration Guide](docs/INTEGRATION.md) | Complete integration walkthrough |
+| [Integration Guide](docs/integration/README.md) | Complete integration walkthrough |
 | [Configuration Reference](docs/CONFIGURATION.md) | All configuration options |
 | [API Reference](docs/API.md) | OTA agent API documentation |
 | [Security Guide](docs/SECURITY.md) | Security best practices |
@@ -206,7 +218,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for detailed security configuration.
 For integration support and questions:
 
 - Documentation: [docs/](docs/)
-- Examples: [examples/](examples/)
+- Examples: [soc-ota-agent/examples/](soc-ota-agent/examples/)
 
 ## License
 

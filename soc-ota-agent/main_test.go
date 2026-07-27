@@ -51,7 +51,12 @@ func TestBinarySize(t *testing.T) {
 	// so.
 	//
 	// When increasing, use current binary size on amd64 + 1M.
-	const maxSize int64 = 9103464
+	// Bumped for GAP-XC-002/XC-001: CI now builds/vuln-scans with a current Go
+	// toolchain (was capped at the go.mod `go 1.21` directive's matching
+	// toolchain) to close 32 reachable stdlib CVEs (GO-2025-3373/3420/3447/3503/
+	// 3563 etc.) that only govulncheck under an old toolchain would flag as
+	// unfixable. The larger runtime accounts for the size delta.
+	const maxSize int64 = 10652912
 
 	cmd := exec.Command("go", "version")
 	version, err := cmd.CombinedOutput()

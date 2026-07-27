@@ -66,7 +66,7 @@ IMAGE_INSTALL:append = " \
 
 # Optional: Monitoring and diagnostics
 IMAGE_INSTALL:append = " \
-    memfaultd \
+    socmond \
 "
 ```
 
@@ -84,9 +84,11 @@ zstd -d -c tmp/deploy/images/<MACHINE>/my-image-<MACHINE>.wic.zst | \
 
 ### Storage Device Mapping
 
-| Board Type | eMMC Device | SD Card Device |
-|------------|-------------|----------------|
-| i.MX8MP FRDM | `/dev/mmcblk1` | `/dev/mmcblk0` |
+The eMMC/SD `mmcblk*` index is **board-specific and not a reliable constant** — e.g. an i.MX8MP FRDM board's soldered eMMC enumerates as `/dev/mmcblk2` (not `/dev/mmcblk1`), depending on how many other MMC controllers probe first. Don't hardcode a device index; verify per-board with `lsblk` before writing your boot script or `local.conf`.
+
+| Board Type | Example eMMC Device | Example SD Card Device |
+|------------|----------------------|--------------------------|
+| i.MX8MP FRDM | `/dev/mmcblk2` | `/dev/mmcblk0` or `/dev/mmcblk1` |
 | i.MX8MP EVK | `/dev/mmcblk2` | `/dev/mmcblk1` |
 | i.MX8MM EVK | `/dev/mmcblk2` | `/dev/mmcblk1` |
 
@@ -107,6 +109,8 @@ The boot script auto-detects based on which device contains the boot partition.
 └─────────────┴─────────────────────────────────────────────────────────┘
 ```
 
+Partition numbers 2/3/4 above are the **default/dynamic-mode layout**, not a guarantee. The agent resolves rootfs_a/rootfs_b primarily by **GPT partlabel** (`/dev/disk/by-partlabel/rootfs_a`, `/dev/disk/by-partlabel/rootfs_b` — see `installer/partitions.go`), falling back to the static partition numbers above only if partlabels aren't present. Don't assume a fixed `mmcblk0p3`/`mmcblk0p4` mapping in custom tooling.
+
 ### Boot Script Operation
 
 The i.MX boot script (`boot-imx8mp.cmd`) performs:
@@ -115,6 +119,8 @@ The i.MX boot script (`boot-imx8mp.cmd`) performs:
 2. Sets root partition based on file content (2=slot A, 3=slot B)
 3. Loads kernel and device tree
 4. Boots with correct root= parameter
+
+Note: the boot script itself still selects the slot number from `mender_boot_part`; it's userspace (the agent and `switch-boot-slot.sh`) that resolves which partition number a given slot maps to via GPT partlabel, so the correct partition is written even if the board's static numbering differs from the defaults above.
 
 ### Console Configuration
 

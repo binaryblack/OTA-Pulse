@@ -14,6 +14,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -183,6 +184,7 @@ func NewMender(config *conf.MenderConfig, pieces MenderPieces) (*Mender, error) 
 			apiKey,
 			deviceID,
 			serverURL,
+			newSoCAPIKeyReloader(),
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "error creating SoC Monitoring HTTP API client")
@@ -205,6 +207,40 @@ func NewMender(config *conf.MenderConfig, pieces MenderPieces) (*Mender, error) 
 	}
 
 	return m, nil
+}
+
+// newSoCAPIKeyReloader returns a function that re-reads the current SoCAPIKey
+// from the on-disk OTAPulse config, mirroring conf.LoadConfig's precedence
+// (the fallback/state-dir file is read first, then the main /etc file
+// overrides). It is wired into the SoCMonitoringClient so the agent can
+// recover, in-flight and without a process restart, from an API key that was
+// rotated on disk (e.g. by a re-provision that rewrote otapulse.conf) — see
+// client.SoCMonitoringClient.Do. This lives here rather than in package client
+// because conf imports client, so client importing conf would be a cycle.
+func newSoCAPIKeyReloader() func() (string, error) {
+	return func() (string, error) {
+		var parsed struct {
+			SoCAPIKey string `json:"SoCAPIKey"`
+		}
+		read := false
+		// Same order LoadConfig uses: fallback first, main overrides any
+		// field it actually contains (absent fields keep the fallback value).
+		for _, f := range []string{conf.DefaultFallbackConfFile, conf.DefaultConfFile} {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				// A missing/unreadable file is fine, exactly as in LoadConfig.
+				continue
+			}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				return "", errors.Wrapf(err, "parsing %s", f)
+			}
+			read = true
+		}
+		if !read {
+			return "", errors.New("no OTAPulse config file could be read")
+		}
+		return parsed.SoCAPIKey, nil
+	}
 }
 
 func (m *Mender) Authorize() (client.AuthToken, client.ServerURL, error) {

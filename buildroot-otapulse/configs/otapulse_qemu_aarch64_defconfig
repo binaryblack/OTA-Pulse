@@ -39,8 +39,7 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_OTAPULSE_PATH)/board/otapulse/post-
 # Kernel
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_LATEST_VERSION=y
-BR2_LINUX_KERNEL_USE_DEFCONFIG=y
-BR2_LINUX_KERNEL_DEFCONFIG="defconfig"
+BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_IMAGE=y
 
 # Bootloader (QEMU uses direct kernel boot, no U-Boot)
@@ -69,8 +68,12 @@ BR2_PACKAGE_LIBCURL_CURL=y
 
 # OTA-Pulse Package
 BR2_PACKAGE_OTAPULSE=y
+# GAP-OTA-014: no live credential is committed here. Leave BR2_PACKAGE_OTAPULSE_TENANT_TOKEN
+# unset and inject a real smk_/spt_ token at build time instead, e.g.:
+#   make BR2_PACKAGE_OTAPULSE_TENANT_TOKEN="smk_<your-real-token>" otapulse_qemu_aarch64_defconfig
+# or override it in a local post-defconfig fragment that isn't committed to git.
 BR2_PACKAGE_OTAPULSE_SERVER_URL="http://192.168.0.123:8000"
-BR2_PACKAGE_OTAPULSE_TENANT_TOKEN="smk_00f0c93af108b8dfbf88f2d5ba1a38279d8c92a1f7b0c1a67e282f86a06d1463"
+# BR2_PACKAGE_OTAPULSE_TENANT_TOKEN is not set
 BR2_PACKAGE_OTAPULSE_VERIFY_KEY="/home/krishna/buildroot-otapulse-test/keys/artifact-signing-public.pem"
 BR2_PACKAGE_OTAPULSE_SIGNING_KEY="/home/krishna/buildroot-otapulse-test/keys/artifact-signing-private.pem"
 BR2_PACKAGE_OTAPULSE_DEVICE_TYPE="qemu-aarch64"
@@ -92,8 +95,8 @@ BR2_PACKAGE_OTAPULSE_STATE_SCRIPTS=y
 BR2_PACKAGE_OTAPULSE_UPDATE_MODULES=y
 BR2_PACKAGE_OTAPULSE_SYSTEMD=y
 
-# SoC Monitoring (memfaultd, soc-ctl)
-BR2_PACKAGE_MEMFAULT=y
+# SoC Monitoring (socmond, soc-ctl)
+BR2_PACKAGE_SOCMOND=y
 
 # Host tools
 BR2_PACKAGE_HOST_DOSFSTOOLS=y

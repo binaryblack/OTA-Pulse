@@ -54,6 +54,12 @@ func (s *Store) Clear() error {
 }
 
 func (s *Store) StoreScript(r io.Reader, name string) error {
+	// reject artifact-supplied script names that could escape the scripts
+	// directory (path separators or "..") before joining into the filesystem path
+	if name == "" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		return errors.Errorf("statescript: rejecting unsafe script name: %q", name)
+	}
+
 	sLocation := filepath.Join(s.location, name)
 	f, err := os.OpenFile(sLocation, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0755)
 	if err != nil {

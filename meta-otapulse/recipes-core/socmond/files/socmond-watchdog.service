@@ -1,0 +1,21 @@
+[Unit]
+Description=SoC Monitoring System Watchdog
+Documentation=https://github.com/example/soc-monitoring
+After=socmond.service
+Wants=socmond.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socmond-watchdog --config /etc/socmond/config.json
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=socmond-watchdog
+
+[Install]
+WantedBy=multi-user.target

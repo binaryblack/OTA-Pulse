@@ -280,11 +280,25 @@ func (d *dualRootfsDeviceImpl) InstallUpdate() error {
 	log.Debug("Marking inactive partition as a boot candidate successful.")
 
 	// Call switch-boot-slot.sh to update bootloader configuration
-	// This handles PARTUUID swapping for Rockchip and other boot methods
+	// This handles PARTUUID swapping for Rockchip and other boot methods.
+	//
+	// switchBootSlot returns nil (no error) when the script is simply not
+	// present on this board (e.g. systems that use U-Boot env directly and
+	// never ship this script) - that case is intentionally optional and is
+	// gated by the os.Stat existence check inside switchBootSlot itself.
+	//
+	// If the script IS present but fails to execute successfully, this
+	// board relies on it for the slot switch to actually happen, and the
+	// switch has definitely NOT occurred. Swallowing that error here would
+	// leave upgrade_available=1 set while the boot slot was never switched,
+	// causing the device to reboot expecting an update that never landed.
+	// So: clear upgrade_available and fail the install.
 	if err := d.switchBootSlot(inactivePartition); err != nil {
-		log.Warnf("Failed to switch boot slot via script: %v", err)
-		// Don't fail the install - the boot env files are set, and some
-		// systems may not need the script (e.g., if using U-Boot env directly)
+		log.Errorf("switchBootSlot failed for partition %s: %v — clearing upgrade_available", inactivePartition, err)
+		if clearErr := d.WriteEnv(BootVars{"upgrade_available": "0"}); clearErr != nil {
+			log.Errorf("Failed to clear upgrade_available after switchBootSlot failure: %v", clearErr)
+		}
+		return errors.Wrap(err, "failed to switch boot slot via switch-boot-slot.sh")
 	}
 
 	return nil
@@ -326,7 +340,20 @@ func (d *dualRootfsDeviceImpl) switchBootSlot(partitionNumber string) error {
 
 	log.Infof("Executing: %s %s", switchBootSlotScript, slot)
 
+	// switch-boot-slot.sh's own board-agnostic partition auto-detection can
+	// fall back to a stale hardcoded default (e.g. /dev/mmcblk0pN) when its
+	// ROOTFS_A_PARTITION/ROOTFS_B_PARTITION env vars aren't set, which is
+	// wrong on any board whose rootfs disk enumerates differently (BUG:
+	// Radxa CM5 e2e_ota slot-switch failure — this device is /dev/mmcblk1,
+	// not mmcblk0). d.rootfsPartA/d.rootfsPartB are already the correct,
+	// board-detected paths for the CURRENT device (see how partANum/partBNum
+	// above are derived from them) — pass them through explicitly instead of
+	// letting the script re-derive or default them independently.
 	cmd := exec.Command(switchBootSlotScript, slot)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("ROOTFS_A_PARTITION=%s", d.rootfsPartA),
+		fmt.Sprintf("ROOTFS_B_PARTITION=%s", d.rootfsPartB),
+	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Errorf("switch-boot-slot.sh failed with error: %v, output: %s", err, string(output))
@@ -356,15 +383,31 @@ const (
 	// DefaultMaxBootRetries is the boot-count threshold at or above which
 	// the fallback mechanism must fire and clear the upgrade_available flag.
 	// Mirrors U-Boot boot_limit=3.
+	//
+	// SINGLE SOURCE OF TRUTH for the retry budget. The pre-agent shell fallback
+	// otapulse-boot-health (meta-otapulse/recipes-core/otapulse-firstboot/files/
+	// otapulse-boot-health) hardcodes the same value as MAX_BOOT_RETRIES because
+	// there is no clean way to share a Go constant with a /bin/sh script here.
+	// KEEP THE TWO NUMERICALLY IN SYNC if you change this.
 	DefaultMaxBootRetries = 3
 )
 
 // HandleBootCountFallback checks the boot environment for a max-retry-exceeded
 // condition (upgrade_available=1 and bootcount >= DefaultMaxBootRetries) and,
-// if found, clears both flags.  This provides the userspace fallback that the
-// bootloader normally handles at reboot time — the agent runs this check once
-// at startup so that the brick-prevention test (BP-004) can observe the fallback
-// signal without requiring a full device reboot.
+// if found, clears both flags.  This is the in-agent userspace fallback; the
+// agent runs it once at startup (daemon.Run), and the brick-prevention test
+// (BP-004) observes the cleared flags without needing a full device reboot.
+//
+// Division of responsibility across boot styles:
+//   - U-Boot-env boards: U-Boot's own bootlimit performs the REAL revert at
+//     reboot time; this Go-side check just clears the software flags after a
+//     successful post-revert boot.
+//   - Direct-boot (cmdline.txt) boards: the actual revert-or-accept action now
+//     happens PRE-AGENT in otapulse-boot-health.service, which restores
+//     cmdline_prev.txt after DefaultMaxBootRetries and reboots — so it works
+//     even when the agent never starts (GAP-OTA-006). By the time the agent
+//     runs, that script has already cleared the flags, making this Go-side
+//     check a harmless secondary/defensive clear (a no-op in the common case).
 //
 // Hardware and architecture independent: works through the BootEnvReadWriter
 // interface regardless of whether U-Boot env or file-based env is in use.
@@ -379,7 +422,17 @@ func (d *dualRootfsDeviceImpl) HandleBootCountFallback() {
 	bcStr, bcOk := env["bootcount"]
 
 	if !uaOk || ua != "1" {
-		// No pending upgrade — nothing to fall back from
+		// No pending upgrade — nothing to fall back from. This is also the
+		// once-per-boot moment to realign the agent's /data/ota bookkeeping to
+		// the slot actually running, on systemd-boot / loader.conf boards where
+		// /boot owns the boot slot and /data/ota can otherwise lag forever after
+		// a switch (BUG-110). The type assertion makes this a no-op on U-Boot-env
+		// boards, mirroring the ClearDirectBootBackup idiom in CommitUpdate. The
+		// reconcile itself is internally gated on upgrade_available (which is not
+		// "1" here) and is a cheap no-op when /data/ota already matches.
+		if r, ok := d.BootEnvReadWriter.(interface{ ReconcileToBootedSlot() }); ok {
+			r.ReconcileToBootedSlot()
+		}
 		return
 	}
 
@@ -437,7 +490,19 @@ func (d *dualRootfsDeviceImpl) CommitUpdate() error {
 	if hasUpdate {
 		log.Info("Committing update")
 		// For now set only appropriate boot flags
-		return d.WriteEnv(BootVars{"upgrade_available": "0"})
+		if err := d.WriteEnv(BootVars{"upgrade_available": "0"}); err != nil {
+			return err
+		}
+		// Direct-boot (cmdline.txt) boards keep a cmdline_prev.txt rollback backup
+		// that the pre-agent otapulse-boot-health.service uses to revert after
+		// DefaultMaxBootRetries failed boots (GAP-OTA-006). Now that this boot is
+		// committed the backup is stale; drop it so the NEXT OTA cycle writes a
+		// fresh one and its revert targets the correct previous slot. No-op on
+		// U-Boot boards and when the backup is absent.
+		if cleaner, ok := d.BootEnvReadWriter.(interface{ ClearDirectBootBackup() }); ok {
+			cleaner.ClearDirectBootBackup()
+		}
+		return nil
 	}
 	return errors.New(verifyRebootError)
 }

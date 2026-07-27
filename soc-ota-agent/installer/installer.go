@@ -99,6 +99,12 @@ func Install(art io.ReadCloser, dt string, keys []*conf.VerificationKey, scrDir 
 	return payloads, err
 }
 
+// ReadHeaders reads and verifies the Artifact headers. When keys is empty,
+// it falls back to installing an unsigned artifact — ReadHeaders itself
+// enforces nothing about that fallback. Callers must obtain keys via
+// conf.MenderConfig.GetVerificationKeys, which fails closed (returns an
+// error instead of an empty key list) before this fallback can ever be
+// reached when RequireArtifactVerification is set (GAP-OTA-003).
 func ReadHeaders(art io.ReadCloser, dt string, keys []*conf.VerificationKey, scrDir string,
 	inst *AllModules) (*Installer, []PayloadUpdatePerformer, error) {
 

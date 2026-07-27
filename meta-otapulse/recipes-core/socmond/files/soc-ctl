@@ -1,0 +1,899 @@
+#!/bin/sh
+# soc-ctl - SoC Monitoring Device Control CLI
+# Provides commands for device registration, configuration, and status
+
+set -e
+
+VERSION="1.0.0"
+CONFIG_FILE="/etc/socmond/config.json"
+API_KEY_FILE="/var/lib/socmond/api_key"
+SERVER_DEVICE_ID_FILE="/var/lib/socmond/server_device_id"
+PROVISIONING_TOKEN_FILE="/etc/socmond/provisioning_token"
+LOG_DIR="/var/log/socmond"
+# OTAPulse config paths - use persistent /data partition for credentials
+# This ensures API key and device ID persist across A/B OTA updates
+OTAPULSE_CONFIG_DIR="/etc/otapulse"
+OTAPULSE_WRITABLE_DIR="${OTAPULSE_DATASTORE_DIR:-/data/otapulse}"
+OTAPULSE_WRITABLE_CONFIG="${OTAPULSE_WRITABLE_DIR}/otapulse.conf"
+
+# Fallback to mender paths if otapulse doesn't exist (legacy systems)
+if [ ! -d "${OTAPULSE_CONFIG_DIR}" ] && [ -d "/etc/mender" ]; then
+    OTAPULSE_CONFIG_DIR="/etc/mender"
+    OTAPULSE_WRITABLE_DIR="/var/lib/mender"
+    OTAPULSE_WRITABLE_CONFIG="${OTAPULSE_WRITABLE_DIR}/mender.conf"
+fi
+
+# Legacy reference (for backward compatibility)
+MENDER_CONFIG_FILE="${OTAPULSE_CONFIG_DIR}/otapulse.conf"
+if [ ! -f "${MENDER_CONFIG_FILE}" ]; then
+    MENDER_CONFIG_FILE="${OTAPULSE_CONFIG_DIR}/mender.conf"
+fi
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Detect init system
+INIT_SYSTEM="unknown"
+if command -v systemctl >/dev/null 2>&1 && systemctl --version >/dev/null 2>&1; then
+    INIT_SYSTEM="systemd"
+elif [ -d /etc/init.d ] && [ -f /etc/init.d/socmond ]; then
+    INIT_SYSTEM="sysvinit"
+fi
+
+# Helper functions
+print_success() { echo -e "${GREEN}✓${NC} $1"; }
+print_error() { echo -e "${RED}✗${NC} $1"; }
+print_warning() { echo -e "${YELLOW}!${NC} $1"; }
+print_info() { echo -e "${BLUE}ℹ${NC} $1"; }
+
+# Service control wrapper functions
+service_is_active() {
+    local service_name="$1"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl is-active --quiet "$service_name" 2>/dev/null
+    elif [ "$INIT_SYSTEM" = "sysvinit" ]; then
+        [ -f "/var/run/${service_name}.pid" ] && kill -0 $(cat "/var/run/${service_name}.pid" 2>/dev/null) 2>/dev/null
+    else
+        pgrep -x "$service_name" >/dev/null 2>&1
+    fi
+}
+
+service_is_enabled() {
+    local service_name="$1"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl is-enabled --quiet "$service_name" 2>/dev/null
+    elif [ "$INIT_SYSTEM" = "sysvinit" ]; then
+        [ -L "/etc/rc3.d/S99${service_name}" ] || [ -L "/etc/rc5.d/S99${service_name}" ]
+    else
+        return 0
+    fi
+}
+
+service_restart() {
+    local service_name="$1"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl restart "$service_name"
+    elif [ "$INIT_SYSTEM" = "sysvinit" ]; then
+        /etc/init.d/"$service_name" restart
+    else
+        print_error "Unknown init system, cannot restart service"
+        return 1
+    fi
+}
+
+service_enable() {
+    local service_name="$1"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl enable "$service_name" 2>/dev/null
+    elif [ "$INIT_SYSTEM" = "sysvinit" ]; then
+        update-rc.d "$service_name" defaults 2>/dev/null || true
+    fi
+}
+
+service_start() {
+    local service_name="$1"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl start "$service_name"
+    elif [ "$INIT_SYSTEM" = "sysvinit" ]; then
+        /etc/init.d/"$service_name" start
+    else
+        print_error "Unknown init system, cannot start service"
+        return 1
+    fi
+}
+
+service_stop() {
+    local service_name="$1"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl stop "$service_name" 2>/dev/null
+    elif [ "$INIT_SYSTEM" = "sysvinit" ]; then
+        /etc/init.d/"$service_name" stop 2>/dev/null
+    else
+        print_error "Unknown init system, cannot stop service"
+        return 1
+    fi
+}
+
+service_disable() {
+    local service_name="$1"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl disable "$service_name" 2>/dev/null
+    elif [ "$INIT_SYSTEM" = "sysvinit" ]; then
+        update-rc.d -f "$service_name" remove 2>/dev/null || true
+    fi
+}
+
+# Get server URL from config
+get_server_url() {
+    if [ -f "${CONFIG_FILE}" ]; then
+        jq -r '.server.base_url // ""' "${CONFIG_FILE}"
+    fi
+}
+
+# Update OTAPulse/mender config with SoC Monitoring credentials
+# This writes to the writable config location (/var/lib/otapulse/otapulse.conf)
+# which is loaded as fallback config by the agent
+update_otapulse_config() {
+    local api_key="$1"
+    local device_id="$2"
+
+    # Create writable config directory if needed
+    mkdir -p "${OTAPULSE_WRITABLE_DIR}"
+
+    # Build the config JSON
+    local tmp_file=$(mktemp)
+    local result=0
+
+    # If writable config exists, merge with it; otherwise create new
+    if [ -f "${OTAPULSE_WRITABLE_CONFIG}" ]; then
+        if jq --arg key "${api_key}" --arg id "${device_id}" \
+            '.SoCAPIKey = $key | .SoCDeviceID = $id' \
+            "${OTAPULSE_WRITABLE_CONFIG}" > "${tmp_file}" 2>/dev/null; then
+            mv "${tmp_file}" "${OTAPULSE_WRITABLE_CONFIG}"
+            chmod 600 "${OTAPULSE_WRITABLE_CONFIG}"
+            print_success "OTAPulse config updated: ${OTAPULSE_WRITABLE_CONFIG}"
+        else
+            rm -f "${tmp_file}"
+            print_warning "Could not update config (jq error), creating new"
+            # Fallback: create new config
+            cat > "${OTAPULSE_WRITABLE_CONFIG}" << EOF
+{
+    "SoCAPIKey": "${api_key}",
+    "SoCDeviceID": "${device_id}"
+}
+EOF
+            chmod 600 "${OTAPULSE_WRITABLE_CONFIG}"
+            print_success "OTAPulse config created: ${OTAPULSE_WRITABLE_CONFIG}"
+        fi
+    else
+        # Create new config file with credentials
+        cat > "${OTAPULSE_WRITABLE_CONFIG}" << EOF
+{
+    "SoCAPIKey": "${api_key}",
+    "SoCDeviceID": "${device_id}"
+}
+EOF
+        chmod 600 "${OTAPULSE_WRITABLE_CONFIG}"
+        print_success "OTAPulse config created: ${OTAPULSE_WRITABLE_CONFIG}"
+    fi
+
+    return ${result}
+}
+
+# Alias for backward compatibility
+update_mender_config() {
+    update_otapulse_config "$@"
+}
+
+# Get device ID (MAC-based)
+get_device_id() {
+    if [ -f /sys/class/net/eth0/address ]; then
+        cat /sys/class/net/eth0/address | tr -d ':'
+    elif [ -f /sys/class/net/end0/address ]; then
+        cat /sys/class/net/end0/address | tr -d ':'
+    elif [ -f /etc/machine-id ]; then
+        cat /etc/machine-id
+    else
+        echo "unknown"
+    fi
+}
+
+# Get MAC address
+get_mac_address() {
+    if [ -f /sys/class/net/eth0/address ]; then
+        cat /sys/class/net/eth0/address
+    elif [ -f /sys/class/net/end0/address ]; then
+        cat /sys/class/net/end0/address
+    else
+        echo ""
+    fi
+}
+
+# Show device status
+cmd_status() {
+    echo "═══════════════════════════════════════════════════"
+    echo "         SoC Monitoring Device Status"
+    echo "═══════════════════════════════════════════════════"
+    echo ""
+    
+    # Device info
+    echo "Device Information:"
+    echo "  Device ID:     $(get_device_id)"
+    echo "  MAC Address:   $(get_mac_address)"
+    echo "  Hostname:      $(hostname)"
+    echo "  Firmware:      $(cat /etc/os-release 2>/dev/null | grep "^VERSION=" | cut -d= -f2 | tr -d '"' || echo "unknown")"
+    echo "  Hardware:      $(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || echo "generic")"
+    echo ""
+    
+    # Server connection
+    echo "Server Connection:"
+    local server_url=$(get_server_url)
+    echo "  Server URL:    ${server_url:-Not configured}"
+    
+    # Check API key from socmond file or OTAPulse config
+    local api_key=""
+    if [ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ]; then
+        api_key=$(cat "${API_KEY_FILE}" | tr -d '[:space:]')
+    elif [ -f "${OTAPULSE_WRITABLE_CONFIG}" ]; then
+        api_key=$(jq -r '.SoCAPIKey // ""' "${OTAPULSE_WRITABLE_CONFIG}" 2>/dev/null || echo "")
+    fi
+
+    if [ -n "${api_key}" ]; then
+        echo "  API Key:       $(printf '%.12s' "$api_key")... (provisioned)"
+    else
+        echo "  API Key:       Not provisioned"
+    fi
+
+    # Check Server ID from socmond file or OTAPulse config
+    local server_id=""
+    if [ -f "${SERVER_DEVICE_ID_FILE}" ]; then
+        server_id=$(cat "${SERVER_DEVICE_ID_FILE}")
+    elif [ -f "${OTAPULSE_WRITABLE_CONFIG}" ]; then
+        server_id=$(jq -r '.SoCDeviceID // ""' "${OTAPULSE_WRITABLE_CONFIG}" 2>/dev/null || echo "")
+    fi
+
+    if [ -n "${server_id}" ]; then
+        echo "  Server ID:     ${server_id}"
+    else
+        echo "  Server ID:     Not registered"
+    fi
+    echo ""
+    
+    # Service status
+    echo "Service Status:"
+    if service_is_active socmond; then
+        print_success "socmond is running"
+    else
+        print_error "socmond is not running"
+    fi
+    
+    if service_is_active socmond-watchdog; then
+        print_success "socmond-watchdog is running"
+    else
+        print_warning "socmond-watchdog is not running"
+    fi
+    echo ""
+    
+    # Network connectivity
+    echo "Network Connectivity:"
+    if [ -n "${server_url}" ]; then
+        if curl -s --connect-timeout 5 "${server_url}/health" >/dev/null 2>&1; then
+            print_success "Server reachable"
+        else
+            print_error "Server unreachable"
+        fi
+    else
+        print_warning "Server URL not configured"
+    fi
+    echo ""
+}
+
+# Configure server URL
+cmd_config_server() {
+    local server_url="$1"
+    
+    if [ -z "${server_url}" ]; then
+        print_error "Usage: soc-ctl config server <url>"
+        echo "  Example: soc-ctl config server https://monitoring.example.com"
+        exit 1
+    fi
+    
+    if [ ! -f "${CONFIG_FILE}" ]; then
+        print_error "Config file not found: ${CONFIG_FILE}"
+        exit 1
+    fi
+    
+    # Update config file
+    local tmp_file=$(mktemp)
+    jq --arg url "${server_url}" '.server.base_url = $url' "${CONFIG_FILE}" > "${tmp_file}"
+    mv "${tmp_file}" "${CONFIG_FILE}"
+    
+    print_success "Server URL set to: ${server_url}"
+    print_info "Restart socmond to apply: soc-ctl restart"
+}
+
+# Set provisioning token
+cmd_config_token() {
+    local token="$1"
+    
+    if [ -z "${token}" ]; then
+        print_error "Usage: soc-ctl config token <provisioning-token>"
+        exit 1
+    fi
+    
+    # Save token to file
+    echo -n "${token}" > "${PROVISIONING_TOKEN_FILE}"
+    chmod 600 "${PROVISIONING_TOKEN_FILE}"
+    
+    # Also update config file
+    if [ -f "${CONFIG_FILE}" ]; then
+        local tmp_file=$(mktemp)
+        jq --arg token "${token}" '.auth.provisioning_token = $token' "${CONFIG_FILE}" > "${tmp_file}"
+        mv "${tmp_file}" "${CONFIG_FILE}"
+    fi
+    
+    print_success "Provisioning token saved"
+    print_info "Run 'soc-ctl provision' to register device"
+}
+
+# Set API key directly
+cmd_config_apikey() {
+    local api_key="$1"
+
+    if [ -z "${api_key}" ]; then
+        print_error "Usage: soc-ctl config apikey <api-key>"
+        exit 1
+    fi
+
+    mkdir -p "$(dirname "${API_KEY_FILE}")"
+    echo -n "${api_key}" > "${API_KEY_FILE}"
+    chmod 600 "${API_KEY_FILE}"
+
+    # Also update mender.conf for soc-ota-agent
+    local device_id=$(get_device_id)
+    update_mender_config "${api_key}" "${device_id}"
+
+    print_success "API key saved"
+
+    # Auto-restart soc-ota-agent if it's running
+    if service_is_active soc-ota-agent; then
+        print_info "Restarting soc-ota-agent..."
+        service_restart soc-ota-agent
+        sleep 2
+        if service_is_active soc-ota-agent; then
+            print_success "soc-ota-agent restarted successfully"
+        else
+            print_error "soc-ota-agent failed to restart"
+        fi
+    else
+        print_info "Start OTA agent: systemctl start soc-ota-agent"
+    fi
+}
+
+# Set device ID directly
+cmd_config_deviceid() {
+    local device_id="$1"
+
+    if [ -z "${device_id}" ]; then
+        print_error "Usage: soc-ctl config deviceid <device-id>"
+        echo "  Example: soc-ctl config deviceid my-device-001"
+        exit 1
+    fi
+
+    # Get existing API key if any
+    local api_key=""
+    if [ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ]; then
+        api_key=$(cat "${API_KEY_FILE}" | tr -d '[:space:]')
+    fi
+
+    # Read from writable config if API key not in file
+    if [ -z "${api_key}" ] && [ -f "${OTAPULSE_WRITABLE_CONFIG}" ]; then
+        api_key=$(jq -r '.SoCAPIKey // ""' "${OTAPULSE_WRITABLE_CONFIG}" 2>/dev/null || echo "")
+    fi
+
+    # Update OTAPulse config with the device ID
+    mkdir -p "${OTAPULSE_WRITABLE_DIR}"
+
+    if [ -f "${OTAPULSE_WRITABLE_CONFIG}" ]; then
+        local tmp_file=$(mktemp)
+        if jq --arg id "${device_id}" '.SoCDeviceID = $id' \
+            "${OTAPULSE_WRITABLE_CONFIG}" > "${tmp_file}" 2>/dev/null; then
+            mv "${tmp_file}" "${OTAPULSE_WRITABLE_CONFIG}"
+            chmod 600 "${OTAPULSE_WRITABLE_CONFIG}"
+        else
+            rm -f "${tmp_file}"
+            # Create new with just device ID
+            cat > "${OTAPULSE_WRITABLE_CONFIG}" << EOF
+{
+    "SoCDeviceID": "${device_id}"
+}
+EOF
+            chmod 600 "${OTAPULSE_WRITABLE_CONFIG}"
+        fi
+    else
+        # Create new config with device ID
+        cat > "${OTAPULSE_WRITABLE_CONFIG}" << EOF
+{
+    "SoCDeviceID": "${device_id}"
+}
+EOF
+        chmod 600 "${OTAPULSE_WRITABLE_CONFIG}"
+    fi
+
+    print_success "Device ID saved: ${device_id}"
+    print_info "Config location: ${OTAPULSE_WRITABLE_CONFIG}"
+
+    # Auto-restart soc-ota-agent if it's running
+    if service_is_active soc-ota-agent; then
+        print_info "Restarting soc-ota-agent..."
+        service_restart soc-ota-agent
+        sleep 2
+        if service_is_active soc-ota-agent; then
+            print_success "soc-ota-agent restarted successfully"
+        else
+            print_error "soc-ota-agent failed to restart"
+        fi
+    else
+        print_info "Start OTA agent: systemctl start soc-ota-agent"
+    fi
+}
+
+
+# Provision device with server
+cmd_provision() {
+    local server_url=$(get_server_url)
+    local token=""
+    
+    # Get provisioning token
+    if [ -f "${PROVISIONING_TOKEN_FILE}" ]; then
+        token=$(cat "${PROVISIONING_TOKEN_FILE}" | tr -d '[:space:]')
+    fi
+    
+    if [ -f "${CONFIG_FILE}" ] && [ -z "${token}" ]; then
+        token=$(jq -r '.auth.provisioning_token // ""' "${CONFIG_FILE}")
+    fi
+    
+    if [ -z "${server_url}" ]; then
+        print_error "Server URL not configured"
+        echo "  Run: soc-ctl config server <url>"
+        exit 1
+    fi
+    
+    if [ -z "${token}" ]; then
+        print_error "Provisioning token not configured"
+        echo "  Run: soc-ctl config token <token>"
+        exit 1
+    fi
+    
+    # Check if already provisioned
+    if [ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ]; then
+        print_warning "Device already provisioned"
+        read -p "Re-provision? (y/N): " confirm
+        if [ "${confirm}" != "y" ] && [ "${confirm}" != "Y" ]; then
+            exit 0
+        fi
+    fi
+    
+    print_info "Provisioning device with server..."
+    
+    local device_id=$(get_device_id)
+    local mac_address=$(get_mac_address)
+    local hardware_version=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || echo "generic")
+    local firmware_version=$(cat /etc/os-release 2>/dev/null | grep "^VERSION=" | cut -d= -f2 | tr -d '"' || echo "unknown")
+    
+    local response
+    response=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -H "X-Provisioning-Token: ${token}" \
+        -d "{\"device_id\":\"${device_id}\",\"mac_address\":\"${mac_address}\",\"serial_number\":\"${device_id}\",\"hardware_version\":\"${hardware_version}\",\"firmware_version\":\"${firmware_version}\",\"device_type\":\"${hardware_version}\"}" \
+        "${server_url}/api/v1/provision" \
+        --connect-timeout 30 \
+        --max-time 60 2>/dev/null || echo '{"status":"error","detail":"Connection failed"}')
+    
+    local status=$(echo "${response}" | jq -r '.status // "error"')
+    
+    if [ "${status}" = "ok" ]; then
+        local new_api_key=$(echo "${response}" | jq -r '.api_key')
+        local new_device_id=$(echo "${response}" | jq -r '.device_id')
+        
+        if [ -n "${new_api_key}" ] && [ "${new_api_key}" != "null" ]; then
+            mkdir -p "$(dirname "${API_KEY_FILE}")"
+            echo -n "${new_api_key}" > "${API_KEY_FILE}"
+            chmod 600 "${API_KEY_FILE}"
+
+            if [ -n "${new_device_id}" ] && [ "${new_device_id}" != "null" ]; then
+                echo -n "${new_device_id}" > "${SERVER_DEVICE_ID_FILE}"
+            fi
+
+            # Also update mender.conf for soc-ota-agent
+            update_mender_config "${new_api_key}" "${device_id}"
+
+            print_success "Device provisioned successfully!"
+            echo "  Server Device ID: ${new_device_id}"
+            echo "  API Key: $(printf '%.12s' "$new_api_key")..."
+            print_info "Restart services: soc-ctl restart && systemctl restart soc-ota-agent"
+            return 0
+        fi
+    fi
+    
+    local error_detail=$(echo "${response}" | jq -r '.detail // "Unknown error"')
+    print_error "Provisioning failed: ${error_detail}"
+    exit 1
+}
+
+# Register device (legacy flow with API key)
+cmd_register() {
+    local server_url=$(get_server_url)
+    local api_key=""
+    
+    if [ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ]; then
+        api_key=$(cat "${API_KEY_FILE}" | tr -d '[:space:]')
+    fi
+    
+    if [ -z "${server_url}" ]; then
+        print_error "Server URL not configured"
+        exit 1
+    fi
+    
+    if [ -z "${api_key}" ]; then
+        print_error "API key not configured. Use 'soc-ctl provision' or 'soc-ctl config apikey <key>'"
+        exit 1
+    fi
+    
+    print_info "Registering device with server..."
+    
+    local device_id=$(get_device_id)
+    local hardware_version=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || echo "generic")
+    local firmware_version=$(cat /etc/os-release 2>/dev/null | grep "^VERSION=" | cut -d= -f2 | tr -d '"' || echo "unknown")
+    
+    local response
+    response=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: ${api_key}" \
+        -d "{\"device_id\":\"${device_id}\",\"name\":\"${hardware_version}\",\"serial_number\":\"${device_id}\",\"hardware_version\":\"${hardware_version}\",\"firmware_version\":\"${firmware_version}\"}" \
+        "${server_url}/api/v1/register" \
+        --connect-timeout 30 \
+        --max-time 60 2>/dev/null || echo '{"status":"error"}')
+    
+    local status=$(echo "${response}" | jq -r '.status // "error"')
+    
+    if [ "${status}" = "ok" ]; then
+        local server_device_id=$(echo "${response}" | jq -r '.device_id')
+        if [ -n "${server_device_id}" ] && [ "${server_device_id}" != "null" ]; then
+            echo -n "${server_device_id}" > "${SERVER_DEVICE_ID_FILE}"
+            print_success "Device registered: ${server_device_id}"
+            return 0
+        fi
+    fi
+    
+    print_error "Registration failed"
+    echo "  Response: ${response}"
+    exit 1
+}
+
+# Deregister device
+cmd_deregister() {
+    local server_url=$(get_server_url)
+    local api_key=""
+    local server_device_id=""
+    
+    if [ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ]; then
+        api_key=$(cat "${API_KEY_FILE}" | tr -d '[:space:]')
+    fi
+    
+    if [ -f "${SERVER_DEVICE_ID_FILE}" ]; then
+        server_device_id=$(cat "${SERVER_DEVICE_ID_FILE}")
+    fi
+    
+    if [ -z "${server_device_id}" ]; then
+        print_warning "Device not registered with server"
+    else
+        print_info "Deregistering from server..."
+        
+        if [ -n "${api_key}" ] && [ -n "${server_url}" ]; then
+            curl -s -X DELETE \
+                -H "X-API-Key: ${api_key}" \
+                -H "X-Device-ID: ${server_device_id}" \
+                "${server_url}/api/v1/devices/${server_device_id}" \
+                --connect-timeout 30 \
+                --max-time 60 2>/dev/null || true
+        fi
+    fi
+    
+    # Clear local credentials
+    rm -f "${API_KEY_FILE}" "${SERVER_DEVICE_ID_FILE}"
+    
+    print_success "Device deregistered and credentials cleared"
+    print_info "Restart socmond: soc-ctl restart"
+}
+
+# Show logs
+cmd_logs() {
+    local lines="${1:-50}"
+    
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u socmond -n "${lines}" --no-pager
+    elif [ -f "${LOG_DIR}/socmond.log" ]; then
+        tail -n "${lines}" "${LOG_DIR}/socmond.log"
+    else
+        print_error "No logs available"
+    fi
+}
+
+# Follow logs
+cmd_logs_follow() {
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u socmond -f
+    elif [ -f "${LOG_DIR}/socmond.log" ]; then
+        tail -f "${LOG_DIR}/socmond.log"
+    else
+        print_error "No logs available"
+    fi
+}
+
+# Restart services
+cmd_restart() {
+    # Restart socmond
+    print_info "Restarting socmond..."
+    service_restart socmond
+    sleep 1
+
+    if service_is_active socmond; then
+        print_success "socmond restarted successfully"
+    else
+        print_error "socmond failed to start"
+        echo "Check logs: soc-ctl logs"
+    fi
+
+    # Also restart soc-ota-agent if it's running
+    if service_is_active soc-ota-agent 2>/dev/null || systemctl is-enabled soc-ota-agent 2>/dev/null; then
+        print_info "Restarting soc-ota-agent..."
+        service_restart soc-ota-agent
+        sleep 1
+
+        if service_is_active soc-ota-agent; then
+            print_success "soc-ota-agent restarted successfully"
+        else
+            print_error "soc-ota-agent failed to start"
+            echo "Check logs: journalctl -u soc-ota-agent"
+        fi
+    fi
+}
+
+# Test server connectivity
+cmd_test() {
+    local server_url=$(get_server_url)
+    
+    if [ -z "${server_url}" ]; then
+        print_error "Server URL not configured"
+        exit 1
+    fi
+    
+    echo "Testing connectivity to: ${server_url}"
+    echo ""
+    
+    # Test basic connectivity
+    echo -n "  Health endpoint: "
+    if curl -s --connect-timeout 5 "${server_url}/health" >/dev/null 2>&1; then
+        print_success "OK"
+    else
+        print_error "Failed"
+    fi
+    
+    # Test API endpoint
+    echo -n "  API endpoint:    "
+    local api_response=$(curl -s --connect-timeout 5 "${server_url}/api/v1/" 2>/dev/null || echo "")
+    if [ -n "${api_response}" ]; then
+        print_success "OK"
+    else
+        print_error "Failed"
+    fi
+    
+    # Test with API key if available
+    if [ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ]; then
+        local api_key=$(cat "${API_KEY_FILE}" | tr -d '[:space:]')
+        echo -n "  Authentication:  "
+        local auth_response=$(curl -s --connect-timeout 5 -H "X-API-Key: ${api_key}" "${server_url}/api/v1/devices" 2>/dev/null || echo "")
+        if echo "${auth_response}" | jq -e . >/dev/null 2>&1; then
+            print_success "OK"
+        else
+            print_error "Failed"
+        fi
+    fi
+}
+
+# Show help
+cmd_help() {
+    cat << EOF
+soc-ctl v${VERSION} - SoC Monitoring Device Control CLI
+
+Usage: soc-ctl <command> [options]
+
+Commands:
+  status              Show device status and connection info
+  provision           Provision device with server (using provisioning token)
+  register            Register device with server (using API key)
+  deregister          Deregister device and clear credentials
+  restart             Restart socmond service
+  test                Test server connectivity
+  logs [n]            Show last n log lines (default: 50)
+  logs -f             Follow logs in real-time
+
+Dashboard:
+  dashboard enable    Enable and start local web dashboard (port 8080)
+  dashboard disable   Disable and stop local web dashboard
+  dashboard status    Show dashboard status
+
+Configuration:
+  config server <url>     Set server URL
+  config token <token>    Set provisioning token
+  config apikey <key>     Set API key directly
+  config deviceid <id>    Set device ID directly
+
+Examples:
+  soc-ctl status
+  soc-ctl config server https://monitoring.example.com
+  soc-ctl config token abc123...
+  soc-ctl config apikey smk_xxxx...
+  soc-ctl config deviceid my-device-001
+  soc-ctl provision
+  soc-ctl dashboard enable
+  soc-ctl logs -f
+
+EOF
+}
+
+# Dashboard commands
+cmd_dashboard_enable() {
+    if ! command -v soc-dashboard >/dev/null 2>&1; then
+        print_error "soc-dashboard not installed"
+        echo "  Install the socmond-dashboard package first"
+        exit 1
+    fi
+    
+    print_info "Enabling local dashboard..."
+    service_enable soc-dashboard || true
+    service_start soc-dashboard
+    
+    sleep 2
+    if service_is_active soc-dashboard; then
+        print_success "Dashboard enabled and running"
+        
+        # Get IP address
+        local ip=""
+        for iface in eth0 end0 wlan0; do
+            ip=$(ip -4 addr show ${iface} 2>/dev/null | awk '/inet / {split($2, a, "/"); print a[1]; exit}')
+            if [ -n "${ip}" ]; then
+                break
+            fi
+        done
+        
+        if [ -n "${ip}" ]; then
+            echo ""
+            echo "  Access dashboard at: http://${ip}:8080"
+        fi
+    else
+        print_error "Dashboard failed to start"
+        echo "  Check logs: journalctl -u soc-dashboard"
+    fi
+}
+
+cmd_dashboard_disable() {
+    print_info "Disabling local dashboard..."
+    service_stop soc-dashboard || true
+    service_disable soc-dashboard || true
+    print_success "Dashboard disabled"
+}
+
+cmd_dashboard_status() {
+    echo "Dashboard Status:"
+    if service_is_active soc-dashboard; then
+        print_success "Running"
+        
+        # Get IP address
+        local ip=""
+        for iface in eth0 end0 wlan0; do
+            ip=$(ip -4 addr show ${iface} 2>/dev/null | awk '/inet / {split($2, a, "/"); print a[1]; exit}')
+            if [ -n "${ip}" ]; then
+                break
+            fi
+        done
+        
+        if [ -n "${ip}" ]; then
+            echo "  URL: http://${ip}:8080"
+        fi
+    else
+        print_warning "Not running"
+        if service_is_enabled soc-dashboard; then
+            echo "  Service is enabled but not running"
+        else
+            echo "  Run 'soc-ctl dashboard enable' to start"
+        fi
+    fi
+}
+
+# Main command dispatcher
+case "${1:-}" in
+    status)
+        cmd_status
+        ;;
+    config)
+        case "${2:-}" in
+            server)
+                cmd_config_server "$3"
+                ;;
+            token)
+                cmd_config_token "$3"
+                ;;
+            apikey)
+                cmd_config_apikey "$3"
+                ;;
+            deviceid)
+                cmd_config_deviceid "$3"
+                ;;
+            *)
+                print_error "Unknown config option: ${2:-}"
+                echo "  Available: server, token, apikey, deviceid"
+                exit 1
+                ;;
+        esac
+        ;;
+    provision)
+        cmd_provision
+        ;;
+    register)
+        cmd_register
+        ;;
+    deregister)
+        cmd_deregister
+        ;;
+    restart)
+        cmd_restart
+        ;;
+    test)
+        cmd_test
+        ;;
+    logs)
+        if [ "${2:-}" = "-f" ]; then
+            cmd_logs_follow
+        else
+            cmd_logs "${2:-50}"
+        fi
+        ;;
+    dashboard)
+        case "${2:-}" in
+            enable)
+                cmd_dashboard_enable
+                ;;
+            disable)
+                cmd_dashboard_disable
+                ;;
+            status)
+                cmd_dashboard_status
+                ;;
+            *)
+                print_error "Unknown dashboard command: ${2:-}"
+                echo "  Available: enable, disable, status"
+                exit 1
+                ;;
+        esac
+        ;;
+    help|--help|-h)
+        cmd_help
+        ;;
+    version|--version|-v)
+        echo "soc-ctl v${VERSION}"
+        ;;
+    *)
+        if [ -n "${1:-}" ]; then
+            print_error "Unknown command: ${1}"
+            echo ""
+        fi
+        cmd_help
+        exit 1
+        ;;
+esac

@@ -90,6 +90,36 @@ func TestStore(t *testing.T) {
 
 }
 
+func TestStoreScriptRejectsUnsafeNames(t *testing.T) {
+	tmp, err := ioutil.TempDir("", "storescript")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tmp)
+
+	s := NewStore(tmp)
+
+	unsafeNames := []string{
+		"../../../etc/foo",
+		"../escape",
+		"sub/dir/script",
+		"sub\\dir\\script",
+		"..",
+		"",
+	}
+	for _, name := range unsafeNames {
+		buf := bytes.NewBufferString("execute me")
+		err := s.StoreScript(buf, name)
+		assert.Errorf(t, err, "expected StoreScript to reject unsafe name %q", name)
+	}
+
+	// confirm nothing escaped the scripts directory
+	_, statErr := os.Stat(filepath.Join(filepath.Dir(tmp), "foo"))
+	assert.True(t, os.IsNotExist(statErr))
+
+	// a normal, safe name must still work
+	buf := bytes.NewBufferString("execute me")
+	assert.NoError(t, s.StoreScript(buf, "ArtifactInstall_Enter_05"))
+}
+
 func testLogContainsMessage(entries []*log.Entry, msg string) bool {
 	for _, entry := range entries {
 		if strings.Contains(entry.Message, msg) {
@@ -450,10 +480,14 @@ func TestReportScriptStatus(t *testing.T) {
 
 	l.ExecuteAll("ArtifactInstall", "Enter", false, r)
 
+	// Scripts run in sorted order (05 then 06); each script's "finished"
+	// report is sent synchronously right after it runs, not batched via
+	// defer at function return (which previously reported the wrong,
+	// last-iteration script name for every entry - GAP-OTA-010).
 	assert.JSONEq(
 		t,
 		string(
-			`{"status":"installing","substate":"finished executing script: ArtifactInstall_Enter_06"}`,
+			`{"status":"installing","substate":"Executing script: ArtifactInstall_Enter_06"}`,
 		),
 		string(responder.recdata[2]),
 	)

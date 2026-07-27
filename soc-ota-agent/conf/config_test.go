@@ -308,3 +308,56 @@ func TestDBusUpdateControlMapExpirationTimeSecondsConfig(t *testing.T) {
 	assert.Equal(t, 10, config.GetUpdateControlMapExpirationTimeSeconds())
 	assert.Equal(t, 15, config.GetUpdateControlMapBootExpirationTimeSeconds())
 }
+
+func TestGetVerificationKeys_noKeysConfigured_notRequired_returnsNilNoError(t *testing.T) {
+	c := &MenderConfig{}
+	keys, err := c.GetVerificationKeys()
+	assert.NoError(t, err)
+	assert.Nil(t, keys)
+}
+
+func TestGetVerificationKeys_noKeysConfigured_required_returnsError(t *testing.T) {
+	c := &MenderConfig{}
+	c.RequireArtifactVerification = true
+	keys, err := c.GetVerificationKeys()
+	assert.Error(t, err)
+	assert.Nil(t, keys)
+}
+
+func TestGetVerificationKeys_unreadableConfiguredKey_isFatal(t *testing.T) {
+	c := &MenderConfig{}
+	c.MenderConfigFromFile.ArtifactVerifyKeys = []string{"/nonexistent/path/to/key.pem"}
+	keys, err := c.GetVerificationKeys()
+	assert.Error(t, err, "an unreadable configured key must fail closed, not be skipped")
+	assert.Nil(t, keys)
+}
+
+func TestGetVerificationKeys_validKey_installsNormally(t *testing.T) {
+	tfile, err := ioutil.TempFile("", "verify-key")
+	require.NoError(t, err)
+	defer os.Remove(tfile.Name())
+	_, err = tfile.WriteString("-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----\n")
+	require.NoError(t, err)
+
+	c := &MenderConfig{}
+	c.MenderConfigFromFile.ArtifactVerifyKeys = []string{tfile.Name()}
+	c.RequireArtifactVerification = true
+	keys, err := c.GetVerificationKeys()
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	assert.Equal(t, tfile.Name(), keys[0].Path)
+}
+
+func TestGetVerificationKeys_oneOfMultipleKeysUnreadable_isFatal(t *testing.T) {
+	tfile, err := ioutil.TempFile("", "verify-key")
+	require.NoError(t, err)
+	defer os.Remove(tfile.Name())
+	_, err = tfile.WriteString("valid-key-data")
+	require.NoError(t, err)
+
+	c := &MenderConfig{}
+	c.MenderConfigFromFile.ArtifactVerifyKeys = []string{tfile.Name(), "/nonexistent/other-key.pem"}
+	keys, err := c.GetVerificationKeys()
+	assert.Error(t, err)
+	assert.Nil(t, keys)
+}

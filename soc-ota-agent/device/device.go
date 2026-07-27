@@ -167,10 +167,16 @@ func (d *DeviceManager) ReadArtifactHeaders(from io.ReadCloser) (*installer.Inst
 		)
 	}
 
+	verifyKeys, err := d.Config.GetVerificationKeys()
+	if err != nil {
+		log.Errorf("Loading artifact verification keys failed: %v", err)
+		return nil, err
+	}
+
 	var i *installer.Installer
 	i, d.Installers, err = installer.ReadHeaders(from,
 		deviceType,
-		d.Config.GetVerificationKeys(),
+		verifyKeys,
 		d.StateScriptPath,
 		&d.InstallerFactories)
 	return i, err

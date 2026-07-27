@@ -16,10 +16,24 @@
 #   4. systemd-machine-id-commit.service (if present) is a no-op because
 #      /etc/machine-id is no longer empty.
 #
+# Same problem, one interface: primary-NIC MAC persistence (BUG-155).
+# systemd's MACAddressPolicy=persistent (see */99-default.link) derives the
+# MAC from a hash that includes /etc/machine-id's CURRENT contents at the
+# moment udev processes the interface — which happens as soon as the kernel
+# driver probes the device, before local-fs.target (and therefore before
+# this script restores the real machine-id from /data). There is no unit
+# ordering that fixes this: udev binds the MAC before /data can possibly be
+# mounted, exactly like the machine-id problem above, just one step earlier.
+# Solution: same pattern as machine-id — capture whatever MAC the interface
+# ends up with on first real boot, persist it to /data, and on every later
+# boot explicitly force that MAC back onto the interface once /data is
+# available (overriding whatever transient value udev derived this boot).
+#
 
 set -e
 
 PERSIST="/data/etc/machine-id"
+PERSIST_MAC="/data/etc/net-mac-address"
 LOG_TAG="otapulse-machine-id"
 
 log() {
@@ -61,4 +75,73 @@ else
 
     cp /etc/machine-id "$PERSIST"
     log "Generated new machine-id and persisted to $PERSIST"
+fi
+
+# ---------------------------------------------------------------------------
+# BUG-155: primary-NIC MAC persistence (see header comment for why this
+# can't be fixed by systemd unit ordering)
+# ---------------------------------------------------------------------------
+
+is_valid_mac() {
+    LC_ALL=C printf '%s' "$1" | LC_ALL=C grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
+}
+
+# Same interface-selection rule as
+# ota-pulse/meta-otapulse/.../identity/mender-device-identity: lowest
+# ifindex among ARPHRD_ETHER (type 1) interfaces, skipping dummy devices.
+find_primary_iface() {
+    min=65535
+    ifdev=
+    for dev in /sys/class/net/*; do
+        [ -f "$dev/type" ] || continue
+        iftype=$(cat "$dev/type" 2>/dev/null) || continue
+        [ "$iftype" = "1" ] || continue
+        case "$dev" in */dummy*) continue ;; esac
+        idx=$(cat "$dev/ifindex" 2>/dev/null) || continue
+        if [ "$idx" -lt "$min" ]; then
+            min="$idx"
+            ifdev="$dev"
+        fi
+    done
+    [ -n "$ifdev" ] && basename "$ifdev"
+}
+
+# || true on both: with `set -e`, a bare assignment whose command
+# substitution exits non-zero (no interface found / address file unreadable)
+# would otherwise abort the whole script here, silently skipping machine-id
+# restore's already-completed work having no effect and — worse — leaving
+# this unit permanently failed on the critical boot path on any board with
+# no ARPHRD_ETHER interface yet enumerated at this point (NIC-less QEMU, or
+# a USB NIC that hasn't come up yet). Confirmed by testing under dash and
+# busybox ash.
+IFACE=$(find_primary_iface) || true
+
+if [ -n "$IFACE" ]; then
+    CURRENT_MAC=$(cat "/sys/class/net/$IFACE/address" 2>/dev/null || true)
+
+    if is_valid_mac "$(cat "$PERSIST_MAC" 2>/dev/null)"; then
+        PERSISTED_MAC=$(cat "$PERSIST_MAC")
+        if [ "$PERSISTED_MAC" != "$CURRENT_MAC" ]; then
+            if ip link set dev "$IFACE" down 2>/dev/null \
+                && ip link set dev "$IFACE" address "$PERSISTED_MAC" 2>/dev/null \
+                && ip link set dev "$IFACE" up 2>/dev/null; then
+                log "Restored persistent MAC $PERSISTED_MAC on $IFACE (was $CURRENT_MAC)"
+            else
+                # Partial failure (e.g. down succeeded, address set failed) —
+                # don't strand the interface down; bring it back up with
+                # whatever MAC it currently has rather than waiting on the
+                # network manager to notice and recover it.
+                ip link set dev "$IFACE" up 2>/dev/null || true
+                log "WARNING: failed to apply persisted MAC $PERSISTED_MAC to $IFACE — leaving $CURRENT_MAC"
+            fi
+        fi
+    elif is_valid_mac "$CURRENT_MAC"; then
+        [ -e "$PERSIST_MAC" ] && log "Existing $PERSIST_MAC is not a valid MAC — regenerating from $IFACE"
+        echo "$CURRENT_MAC" > "$PERSIST_MAC"
+        log "Captured $IFACE MAC $CURRENT_MAC and persisted to $PERSIST_MAC"
+    else
+        log "WARNING: $IFACE has no usable MAC ($CURRENT_MAC) — cannot persist"
+    fi
+else
+    log "WARNING: no primary ethernet interface found — skipping MAC persistence"
 fi

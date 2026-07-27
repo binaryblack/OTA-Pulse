@@ -19,6 +19,7 @@ import (
 	"path"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -31,6 +32,13 @@ import (
 const (
 	inventoryToolPrefix = "mender-inventory-"
 )
+
+// inventoryToolTimeout bounds how long a single inventory tool may run
+// before it is killed. Mirrors statescript's SIGKILL-on-timeout pattern
+// (statescript/executor.go); without it a hung inventory tool stalls the
+// whole inventory loop indefinitely since cmd.Wait() never returns.
+// Variable (not const) so tests can shrink it instead of waiting 30s.
+var inventoryToolTimeout = 30 * time.Second
 
 func NewInventoryDataRunner(scriptsDir string) InventoryDataRunner {
 	return InventoryDataRunner{
@@ -83,10 +91,19 @@ func (id *InventoryDataRunner) Get() (client.InventoryData, error) {
 			continue
 		}
 
+		// give the tool (and any children it spawns) its own process group so
+		// a timeout can kill the whole group, mirroring statescript's pattern
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 		if err := cmd.Start(); err != nil {
 			log.Errorf("Inventory tool %s failed with status: %v", t, err)
 			continue
 		}
+
+		timer := time.AfterFunc(inventoryToolTimeout, func() {
+			log.Errorf("Inventory tool %s exceeded %s timeout, killing", t, inventoryToolTimeout)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		})
 
 		p := utils.KeyValParser{}
 		var parseErr error
@@ -97,6 +114,7 @@ func (id *InventoryDataRunner) Get() (client.InventoryData, error) {
 		if err := cmd.Wait(); err != nil {
 			log.Warnf("Inventory tool %s wait failed: %v", t, err)
 		}
+		timer.Stop()
 
 		if parseErr == nil {
 			idec.AppendFromRaw(p.Collect())

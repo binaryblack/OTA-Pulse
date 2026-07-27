@@ -157,8 +157,9 @@ define OTAPULSE_INSTALL_TARGET_CMDS
 		$(INSTALL) -D -m 0644 $(call qstrip,$(BR2_PACKAGE_OTAPULSE_VERIFY_KEY_SECONDARY)) \
 			$(TARGET_DIR)/etc/otapulse/keys/artifact-verify-key-secondary.pem)
 
-	# Generate configuration file
-	$(INSTALL) -D -m 0644 /dev/null $(TARGET_DIR)/etc/otapulse/otapulse.conf
+	# Generate configuration file (0600 — may contain a TenantToken/provisioning
+	# credential, so it must not be world/group-readable; mirrors the Yocto recipe)
+	$(INSTALL) -D -m 0600 /dev/null $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	echo '{' > $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	echo '  "ServerURL": "$(call qstrip,$(BR2_PACKAGE_OTAPULSE_SERVER_URL))",' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	$(if $(call qstrip,$(BR2_PACKAGE_OTAPULSE_TENANT_TOKEN)),\

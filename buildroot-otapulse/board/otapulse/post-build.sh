@@ -107,16 +107,23 @@ fi
 # — including after A/B OTA rootfs updates.
 : > "${TARGET_DIR}/etc/machine-id"
 
-# Setup SSH host keys persistence
+# Pre-generate SSH host keys as plain files baked into the image at build time.
+# Previously these were symlinked to /data/etc/ssh/*, but nothing generated keys
+# into /data before sshd started on first boot (BUG-001 anti-pattern: sshd waits
+# on the /data mount / otapulse-partition-setup and can stall past its timeout,
+# same class of bug fixed for Yocto in meta-otapulse/recipes-connectivity/openssh).
+# Every device then ships an identical set of keys unless this generates fresh
+# ones per build, so keys are generated once per build output (not reused across
+# rebuilds) and are NOT persisted to /data - sshd has no /data dependency.
 if [ -d "${TARGET_DIR}/etc/ssh" ]; then
     for key in ssh_host_rsa_key ssh_host_ecdsa_key ssh_host_ed25519_key; do
-        if [ ! -L "${TARGET_DIR}/etc/ssh/${key}" ]; then
-            rm -f "${TARGET_DIR}/etc/ssh/${key}"
-            rm -f "${TARGET_DIR}/etc/ssh/${key}.pub"
-            ln -sf "/data/etc/ssh/${key}" "${TARGET_DIR}/etc/ssh/${key}"
-            ln -sf "/data/etc/ssh/${key}.pub" "${TARGET_DIR}/etc/ssh/${key}.pub"
-        fi
+        rm -f "${TARGET_DIR}/etc/ssh/${key}" "${TARGET_DIR}/etc/ssh/${key}.pub"
     done
+    ssh-keygen -q -f "${TARGET_DIR}/etc/ssh/ssh_host_rsa_key" -N '' -t rsa -b 4096
+    ssh-keygen -q -f "${TARGET_DIR}/etc/ssh/ssh_host_ecdsa_key" -N '' -t ecdsa
+    ssh-keygen -q -f "${TARGET_DIR}/etc/ssh/ssh_host_ed25519_key" -N '' -t ed25519
+    chmod 600 "${TARGET_DIR}/etc/ssh/"ssh_host_*_key
+    chmod 644 "${TARGET_DIR}/etc/ssh/"ssh_host_*_key.pub
 fi
 
 # Install dev SSH authorized_keys if configured (for QEMU / dev builds)
