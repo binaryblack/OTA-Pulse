@@ -15,10 +15,10 @@
 #    the fleet (two boards sharing a hostname would otherwise collide on
 #    frps), on every run — not just the first one (see the tunnel-realignment
 #    section below). NOTE: proxyName is NOT relied on to match any backend
-#    device row's device_id — memfaultd's heartbeat (which authenticates via
+#    device row's device_id — socmond's heartbeat (which authenticates via
 #    API key, not proxyName) is what keeps the canonical row's tunnel_id
 #    aligned with the actual frps proxy name; see meta-otapulse/recipes-core/
-#    memfault/files/memfaultd send_heartbeat().
+#    socmond/files/socmond send_heartbeat().
 
 set -e
 
@@ -35,8 +35,8 @@ CONFIG_FILE="${CONFIG_DIR}/otapulse.conf"
 # frequently a backend-row UUID rather than a dev-XXXX canonical device_id,
 # so it must never be assumed to equal any row's device_id; that's fine here
 # because proxyName's only job is uniqueness, and the actual tunnel_id ↔
-# canonical-row alignment happens via memfaultd's heartbeat (self-aligning,
-# see memfaultd send_heartbeat()), not via this value.
+# canonical-row alignment happens via socmond's heartbeat (self-aligning,
+# see socmond send_heartbeat()), not via this value.
 MAIN_CONFIG_FILE="/etc/otapulse/otapulse.conf"
 
 # Persisted copy of whatever identity we last resolved from MAIN_CONFIG_FILE's
@@ -580,9 +580,9 @@ else
         # boards $DEVICE_ID (sourced from SoCDeviceID) is frequently a
         # backend-row UUID, not a dev-XXXX canonical id. Routing the
         # canonical row's tunnel_id correctly is handled independently by
-        # memfaultd's heartbeat, which reports the actual rendered frpc proxy
+        # socmond's heartbeat, which reports the actual rendered frpc proxy
         # name and is applied by the backend to whichever row the heartbeat's
-        # own API-key auth resolves to (self-aligning; see memfaultd
+        # own API-key auth resolves to (self-aligning; see socmond
         # send_heartbeat()).
         if [ -f "$TUNNEL_CONF" ]; then
             python3 - "$TUNNEL_CONF" "$DEVICE_ID" <<'PY' || log "tunnel.conf patch failed (non-fatal)"
