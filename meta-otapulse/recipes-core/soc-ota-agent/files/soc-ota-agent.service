@@ -18,6 +18,14 @@ RestartSec=30
 # The agent has its own timeout handling for network operations
 WatchdogSec=0
 
+# systemd's default soft RLIMIT_CORE is 0, and a zero limit makes the kernel
+# skip a PIPED core_pattern entirely — socmond-core-handler is never even
+# invoked, so a crash of this agent produces no coredump at all. The coredump
+# pipeline exists precisely to capture crashes of this process, so it needs a
+# non-zero limit here; a shell `ulimit -c` cannot help, since this service
+# inherits systemd's limit rather than any shell's.
+LimitCORE=infinity
+
 # Hardening.
 # BUG-095: ProtectSystem=full|true|strict all remount the FAT /boot partition
 # read-only, and ReadWritePaths=/boot / BindPaths=/boot CANNOT carve a SEPARATE

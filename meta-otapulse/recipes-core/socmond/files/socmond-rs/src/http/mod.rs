@@ -79,14 +79,11 @@ struct OtaCheckRequest {
     hardware_version: String,
 }
 
-/// Reboot report request
+/// Reboot report request (wire format of POST /api/v1/reboot)
 #[derive(Debug, Serialize)]
 struct RebootReportRequest {
-    device_id: String,
     reason: String,
-    firmware_version: String,
-    hardware_version: String,
-    uptime_before_reboot: Option<f64>,
+    uptime_before_seconds: Option<f64>,
 }
 
 /// Device heartbeat request
@@ -323,6 +320,38 @@ impl HttpClient {
 
         self.handle_response(response).await?;
         info!("Successfully uploaded coredump: {:?}", coredump_path);
+
+        Ok(())
+    }
+
+    /// Report the reason for the last reboot
+    pub async fn report_reboot(&self, reason: &str, uptime_before: Option<f64>) -> Result<(), HttpError> {
+        if self.api_key.is_empty() {
+            debug!("No API key configured, skipping reboot report");
+            return Ok(());
+        }
+
+        let url = self.url("reboot");
+
+        let request = RebootReportRequest {
+            reason: reason.to_string(),
+            uptime_before_seconds: uptime_before,
+        };
+
+        debug!("Reporting reboot reason '{}' to {}", reason, url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header(Self::api_key_header_name(), self.api_key_header()?)
+            .header(Self::device_id_header_name(), self.device_id_header()?)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&request)
+            .send()
+            .await?;
+
+        self.handle_response(response).await?;
+        info!("Successfully reported reboot reason: {}", reason);
 
         Ok(())
     }

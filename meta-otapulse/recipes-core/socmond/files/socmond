@@ -502,7 +502,7 @@ send_heartbeat() {
         -o /dev/null 2>/dev/null || true
 }
 
-# Report reboot reason (logged locally for now, server endpoint TBD)
+# Report reboot reason to the server
 report_reboot() {
     local reason_file="/var/lib/socmond/last_reboot_reason"
     local reason="unknown"
@@ -518,8 +518,28 @@ report_reboot() {
 
     log "Reboot reason: ${reason}"
 
-    # Clear the reason file
-    rm -f "${reason_file}"
+    # Strip characters that would break inline JSON (quotes, backslashes, newlines).
+    reason=$(printf '%s' "${reason}" | tr -d '"\\' | tr '\n' ' ')
+
+    # The shell variant does not track pre-reboot uptime, so it reports null.
+    if [ -n "${API_KEY}" ] && [ -n "${SERVER_URL}" ] && [ -n "${DEVICE_ID}" ]; then
+        if curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${API_KEY}" \
+            -H "X-Device-ID: ${DEVICE_ID}" \
+            -d "{\"reason\":\"${reason}\",\"uptime_before_seconds\":null}" \
+            "${SERVER_URL}/api/v1/reboot" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -o /dev/null \
+            -w "%{http_code}" | grep -q "^2"; then
+            log "Reported reboot reason to server"
+            # Only clear once the server has it — otherwise the next boot retries.
+            rm -f "${reason_file}"
+        else
+            log "Failed to report reboot reason, will retry on next boot"
+        fi
+    fi
 }
 
 # Create Unix socket for IPC (simplified)

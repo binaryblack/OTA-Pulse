@@ -467,13 +467,17 @@ async fn report_reboot_reason(
     };
     let _ = history.add_entry(entry);
 
-    // Report to server
-    if let Err(e) = http_client.report_reboot(&reason.to_string(), uptime_before).await {
-        warn!("Failed to report reboot reason: {}", e);
+    // Report to server. This runs exactly once per boot, so clearing the stored
+    // reason unconditionally would permanently lose the event on one transient
+    // failure — only clear once the server has it, and let the next boot retry.
+    match http_client.report_reboot(&reason.to_string(), uptime_before).await {
+        Ok(()) => {
+            let _ = tracker.clear_reason();
+        }
+        Err(e) => {
+            warn!("Failed to report reboot reason, will retry on next boot: {}", e);
+        }
     }
-
-    // Clear stored reason
-    let _ = tracker.clear_reason();
 }
 
 async fn handle_ipc_message(message: IpcMessage, state: &DaemonState, http_client: &HttpClient) {
