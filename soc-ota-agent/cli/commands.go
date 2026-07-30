@@ -80,6 +80,30 @@ func initDualRootfsDevice(config *conf.MenderConfig) installer.DualRootfsDevice 
 			deviceConfig.RootfsPartA,
 			deviceConfig.RootfsPartB,
 		)
+	} else if !fwEnvConfigHasActiveEntries(fwEnvConfigPath) {
+		// BUG-178 defense-in-depth: on a board where /etc/fw_env.config has
+		// no active (non-comment, non-blank) entries, fw_printenv itself
+		// SIGSEGVs under libubootenv, and ReadEnv below falls through its
+		// getCommand chain to fw_printenv (see installer.UBootEnv.getCommand
+		// in bootenv.go) — so merely PROBING the U-Boot environment produces
+		// a crash-loop of junk coredumps on every agent start. This mirrors
+		// the intent of installer.uBootEnvWorks (file_bootenv.go), which
+		// probes by actually running fw_printenv; that helper is unexported
+		// and, more importantly, running the binary at all is the crash we
+		// are trying to avoid here, so this checks the static config instead
+		// of executing it. Skip the U-Boot probe entirely and go straight to
+		// file-based boot env. Note this also bypasses the grub-mender-
+		// grubenv-print / systemd-boot-printenv probes in the getCommand
+		// chain (bootenv.go) — acceptable because this branch is unreachable
+		// when otapulse.conf carries the baked-in UseFileBasedBootEnv=true
+		// (enforced by validate-image.sh CFG-005), and in the corrupted-conf
+		// state it guards against (BUG-178), file-based IS the designed path.
+		log.Warnf("No active entries in %s, skipping U-Boot environment probe and using file-based boot environment", fwEnvConfigPath)
+		env = installer.NewFileBasedBootEnv(
+			new(system.OsCalls),
+			deviceConfig.RootfsPartA,
+			deviceConfig.RootfsPartB,
+		)
 	} else {
 		// Try U-Boot environment first
 		ubootEnv := installer.NewEnvironment(new(system.OsCalls), config.BootUtilitiesSetActivePart,
@@ -116,6 +140,31 @@ func initDualRootfsDevice(config *conf.MenderConfig) installer.DualRootfsDevice 
 	}
 
 	return dualRootfsDevice
+}
+
+// fwEnvConfigPath is the standard libubootenv/fw_printenv config location
+// (see the mender_saveenv_canary error message in installer/bootenv.go for
+// the same reference path).
+const fwEnvConfigPath = "/etc/fw_env.config"
+
+// fwEnvConfigHasActiveEntries reports whether filePath has at least one
+// non-comment, non-blank line. An empty or all-commented fw_env.config means
+// libubootenv has no environment location configured, which is exactly the
+// condition under which fw_printenv SIGSEGVs instead of exiting cleanly
+// (BUG-178). A missing file is treated the same as no active entries.
+func fwEnvConfigHasActiveEntries(filePath string) bool {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 var SignalHandlerChan = make(chan os.Signal, 2)

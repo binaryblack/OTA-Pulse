@@ -405,13 +405,17 @@ upload_coredumps() {
 
         local coredump_file process_name signal_num executable
         coredump_file=$(jq -r '.coredump_file' "${meta_file}")
-        process_name=$(jq -r '.process_name // "unknown"' "${meta_file}")
+        # Fall back to .executable when core-handler.sh's .meta has no
+        # process_name field (it currently never writes one, so this was
+        # always "unknown" — BUG-179 cosmetic fix).
+        process_name=$(jq -r '.process_name // .executable // "unknown"' "${meta_file}")
         signal_num=$(jq -r '.signal // "0"' "${meta_file}")
         executable=$(jq -r '.executable // ""' "${meta_file}")
         [ -f "${coredump_file}" ] || continue
 
         if [ -n "${API_KEY}" ] && [ -n "${SERVER_URL}" ] && [ -n "${DEVICE_ID}" ]; then
-            if curl -s -X POST \
+            local http_code curl_status
+            http_code=$(curl -s -X POST \
                 -H "X-API-Key: ${API_KEY}" \
                 -H "X-Device-ID: ${DEVICE_ID}" \
                 -H "X-Process-Name: ${process_name}" \
@@ -422,10 +426,22 @@ upload_coredumps() {
                 --connect-timeout 30 \
                 --max-time 300 \
                 -o /dev/null \
-                -w "%{http_code}" | grep -q "^2"; then
+                -w "%{http_code}")
+            curl_status=$?
+            if [ ${curl_status} -eq 0 ] && echo "${http_code}" | grep -q "^2"; then
                 # Mark as uploaded
                 jq '.uploaded = true' "${meta_file}" > "${meta_file}.tmp" && mv "${meta_file}.tmp" "${meta_file}"
                 log "Uploaded coredump: ${coredump_file}"
+            else
+                # BUG-179: a failing upload used to leave zero diagnostic trace
+                # anywhere (no log line, no meta bookkeeping), which is exactly
+                # what made BUG-177 look like an upload-path bug. Log it and
+                # record it on the .meta so a stuck coredump is diagnosable.
+                log "ERROR: Failed to upload coredump ${coredump_file} (curl_exit=${curl_status} http_status=${http_code:-none})"
+                jq --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+                    --arg msg "curl_exit=${curl_status} http_status=${http_code:-none}" \
+                    '.last_upload_error = {"message": $msg, "timestamp": $ts} | .upload_attempts = ((.upload_attempts // 0) + 1)' \
+                    "${meta_file}" > "${meta_file}.tmp" && mv "${meta_file}.tmp" "${meta_file}"
             fi
         fi
     done
