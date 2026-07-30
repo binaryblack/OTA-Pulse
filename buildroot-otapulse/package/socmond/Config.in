@@ -24,6 +24,31 @@ config BR2_PACKAGE_SOCMOND
 
 if BR2_PACKAGE_SOCMOND
 
+comment "--- Server Provisioning (Optional) ---"
+
+config BR2_PACKAGE_SOCMOND_SERVER_URL
+	string "SoC Monitoring Server URL"
+	default ""
+	help
+	  Base URL of the SoC Monitoring backend (e.g. http://192.168.0.123:8000),
+	  baked into /etc/socmond/config.json's server.base_url at build time.
+
+	  Leave empty to keep the shipped config.json default and provision
+	  socmond at runtime instead — the normal path for boards with a
+	  persistent (non-snapshot) rootfs.
+
+config BR2_PACKAGE_SOCMOND_PROVISIONING_TOKEN
+	string "SoC Monitoring Provisioning Token"
+	default ""
+	help
+	  An spt_... provisioning token (see socMonitoring's
+	  POST /api/provisioning-tokens) baked into config.json's
+	  auth.provisioning_token at build time.
+
+	  Required for devices with an ephemeral/snapshot-mode disk (e.g. QEMU
+	  in snapshot mode), where a runtime SSH-based credential push cannot
+	  survive the next VM restart.
+
 config BR2_PACKAGE_SOCMOND_DASHBOARD
 	bool "Local web dashboard"
 	select BR2_PACKAGE_PYTHON3

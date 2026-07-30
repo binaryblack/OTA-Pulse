@@ -26,8 +26,22 @@ define SOCMOND_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/soc-deregister $(TARGET_DIR)/usr/bin/soc-deregister
 	$(INSTALL) -D -m 0755 $(@D)/show-version $(TARGET_DIR)/usr/bin/show-version
 
-	# Install default configuration
-	$(INSTALL) -D -m 0644 $(@D)/config.json $(TARGET_DIR)/etc/socmond/config.json
+	# Install default configuration. Mode 0600 (not 0644) — the build-time
+	# overrides below may bake in a real provisioning token, mirroring the
+	# otapulse.mk convention for its own credential-bearing config file.
+	$(INSTALL) -D -m 0600 $(@D)/config.json $(TARGET_DIR)/etc/socmond/config.json
+
+	# Optional build-time server/token overrides — needed for devices with
+	# an ephemeral/snapshot-mode disk (e.g. QEMU) where a runtime credential
+	# push can't survive a reboot; see BR2_PACKAGE_SOCMOND_SERVER_URL /
+	# BR2_PACKAGE_SOCMOND_PROVISIONING_TOKEN. Left blank, config.json keeps
+	# its shipped defaults and socmond provisions itself at runtime instead.
+	$(if $(call qstrip,$(BR2_PACKAGE_SOCMOND_SERVER_URL)),\
+		sed -i 's|"base_url": *"[^"]*"|"base_url": "$(call qstrip,$(BR2_PACKAGE_SOCMOND_SERVER_URL))"|' \
+			$(TARGET_DIR)/etc/socmond/config.json)
+	$(if $(call qstrip,$(BR2_PACKAGE_SOCMOND_PROVISIONING_TOKEN)),\
+		sed -i 's|"provisioning_token": *"[^"]*"|"provisioning_token": "$(call qstrip,$(BR2_PACKAGE_SOCMOND_PROVISIONING_TOKEN))"|' \
+			$(TARGET_DIR)/etc/socmond/config.json)
 
 	# Install systemd service files
 	$(INSTALL) -D -m 0644 $(@D)/socmond.service \

@@ -56,6 +56,13 @@ Environment="PATH=/usr/bin:/bin:/usr/sbin:/sbin"
 # Use persistent /data partition for runtime config (API key, device ID)
 # This ensures credentials persist across A/B OTA updates
 Environment="OTAPULSE_DATASTORE_DIR=/data/otapulse"
+# The agent is a Go binary. Go's runtime catches fatal signals (SIGSEGV/etc)
+# and by default exits without re-raising them, so the kernel's core_pattern
+# pipe handler (socmond-core-handler) is never invoked despite LimitCORE=
+# infinity above — a crash produces no coredump. GOTRACEBACK=crash makes Go
+# reset the signal disposition to default and re-raise, so the real coredump
+# pipeline fires (CRASH-004).
+Environment="GOTRACEBACK=crash"
 
 [Install]
 WantedBy=multi-user.target

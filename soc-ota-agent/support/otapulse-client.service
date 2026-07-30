@@ -12,6 +12,15 @@ Group=root
 ExecStart=/usr/bin/otapulse --no-syslog daemon
 Restart=on-failure
 RestartSec=30
+
+# otapulse is a Go binary. Go's runtime installs its own handler for fatal
+# signals (SIGSEGV/SIGBUS/etc) and by default (GOTRACEBACK=all) prints a
+# goroutine dump and exits WITHOUT re-raising the signal, so the kernel's
+# core_pattern pipe (socmond-core-handler) is never invoked and a crash of
+# this agent produces no coredump at all — verified: with GOTRACEBACK=crash
+# set, Go resets the signal disposition to default and re-raises, so the
+# real OS coredump pipeline fires (CRASH-004).
+Environment=GOTRACEBACK=crash
 StandardOutput=journal+console
 StandardError=journal+console
 
