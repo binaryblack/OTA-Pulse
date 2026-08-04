@@ -304,6 +304,60 @@ config BR2_PACKAGE_OTAPULSE_WATCHDOG
 	  Automatically reboots the device if the update process hangs.
 	  Provides additional safety during OTA operations.
 
+comment "--- Remote SSH Tunnel (soc-ota-tunneld) ---"
+
+config BR2_PACKAGE_OTAPULSE_REMOTE_SSH
+	bool "Remote SSH tunnel (soc-ota-tunneld)"
+	default y
+	depends on BR2_aarch64 || BR2_arm || BR2_x86_64 || BR2_i386
+	select BR2_PACKAGE_FRP
+	select BR2_PACKAGE_SUDO
+	help
+	  Build and install soc-ota-tunneld, the reverse-SSH NAT-traversal
+	  tunnel supervisor daemon that powers the Remote SSH terminal
+	  feature (TODO-002). It supervises the frpc client (BR2_PACKAGE_FRP)
+	  to establish a persistent reverse TCP tunnel from this device to
+	  the OTA-Pulse gateway. Mirrors meta-otapulse's recipes-core/
+	  soc-ota-tunnel/soc-ota-tunneld_1.0.0.bb on the Yocto side.
+
+	  Set BR2_PACKAGE_OTAPULSE_TUNNEL_SERVER_ADDR to the frps gateway's
+	  hostname/IP for the tunnel to actually connect.
+
+	  NOTE (BUG-208): even with this enabled, the tunnel will not come up
+	  until a per-device tunnel credential is minted to
+	  /data/frp/credential — on Buildroot images this currently requires
+	  a manual/test-harness provisioning step, since otapulse-auto-
+	  provision (which mints it on Yocto hardware boards) is not yet
+	  packaged for this board type.
+
+	  NOTE (BUG-215): this option also selects BR2_PACKAGE_SUDO and
+	  installs the shell-access layer (support user + curated NOPASSWD
+	  sudoers allowlist + gateway authorized key) that the gateway's
+	  Standard SSH tier needs to actually log in through the tunnel —
+	  mirrors meta-otapulse's recipes-core/soc-shell-access/
+	  soc-shell-access_1.0.0.bb. Without it the gateway attaches the
+	  session WebSocket but the SSH handshake into the device fails
+	  (WS close 1011).
+
+if BR2_PACKAGE_OTAPULSE_REMOTE_SSH
+
+config BR2_PACKAGE_OTAPULSE_TUNNEL_SERVER_ADDR
+	string "Tunnel (frps) Server Address"
+	default ""
+	help
+	  Hostname or IP of the frps gateway that soc-ota-tunneld's
+	  supervised frpc client connects to.
+
+	  Example: 192.168.0.123 (LAN) or staging.ota-pulse.com
+
+config BR2_PACKAGE_OTAPULSE_TUNNEL_SERVER_PORT
+	int "Tunnel (frps) Server Port"
+	default 7000
+	help
+	  TCP port the frps gateway listens on for frpc connections.
+
+endif # BR2_PACKAGE_OTAPULSE_REMOTE_SSH
+
 comment "--- Development / Testing ---"
 
 config BR2_PACKAGE_OTAPULSE_DEV_SSH_KEY

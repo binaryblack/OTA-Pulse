@@ -1,0 +1,11 @@
+# Locally computed, cross-checked against frp's official
+# frp_sha256_checksums.txt for v0.69.0 and re-verified by independently
+# downloading each tarball from the GitHub release (2026-08-04). Same values
+# as meta-otapulse's recipes-connectivity/frp/frp_0.69.0.bb FRP_SHA256:<arch>.
+sha256  24a4fc82b4c041835103419685ea124c4d6a7dbf83d0425481c5831b4ce4b3a4  frp_0.69.0_linux_arm64.tar.gz
+sha256  8ee99ad9b09eafe5f77fea7cbd9db15deb056dc2857955477972ccb31a74e708  frp_0.69.0_linux_arm.tar.gz
+sha256  6b90d1cd28fc661f170c0de90dde03d2c63e4fd7ce0ae2da2ca1c28014b8146e  frp_0.69.0_linux_amd64.tar.gz
+
+# License file hash (identical across all arch tarballs).
+md5    fa818a259cbed7ce8bc2a22d35a464fc  LICENSE
+sha256  c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08  LICENSE

@@ -187,6 +187,16 @@ if check_skipped "provisioning"; then
 else
     TENANT_TOKEN="$(br2_get BR2_PACKAGE_OTAPULSE_TENANT_TOKEN)"
     PROV_TOKEN="$(br2_get BR2_PACKAGE_OTAPULSE_PROVISIONING_TOKEN)"
+    # socmond-based provisioning: on this fleet the device credential is the
+    # socmond provisioning token (spt_) baked into /etc/socmond/config.json by
+    # the socmond package — socmond registers the device and mints its API key,
+    # not the OTA agent. Accept it as a valid credential source; without this,
+    # every socmond-provisioned image failed this check despite provisioning
+    # correctly on boot. (BR2_PACKAGE_OTAPULSE_PROVISIONING_TOKEN above is
+    # additionally not a defined Kconfig symbol — kept for forward-compat only.)
+    if [ -z "${PROV_TOKEN}" ]; then
+        PROV_TOKEN="$(br2_get BR2_PACKAGE_SOCMOND_PROVISIONING_TOKEN)"
+    fi
 
     TENANT_VALID=0
     PROV_VALID=0

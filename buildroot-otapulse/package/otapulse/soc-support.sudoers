@@ -1,0 +1,85 @@
+# /etc/sudoers.d/10-soc-support
+#
+# Buildroot mirror of meta-otapulse/recipes-core/soc-shell-access/files/
+# soc-support.sudoers (BUG-215) — the command allowlist below is kept
+# IDENTICAL to the Yocto version so the same probes (journalctl, dmesg,
+# ip addr, soc-diag, systemctl status/restart) exercise for real on both
+# build systems and the remote_ssh_security RSSH-209 sudo-allowlist test
+# behaves identically regardless of which build produced the image.
+#
+# Root-owned (mode 0440), replaced on every OTA update.  The support user
+# has no write access (non-root, not in any sudo/wheel group) and cannot
+# elevate beyond this curated allowlist.
+#
+# Scope: Standard shell tier — read-only diagnostics + a controlled
+#        set of service restarts for approved daemons only.
+
+# ---------------------------------------------------------------------------
+# Command aliases — one alias per capability group, all absolute paths.
+# ---------------------------------------------------------------------------
+
+# Read system journal (read-only, no editing, no --root/-M manipulations)
+Cmnd_Alias SOC_JOURNALCTL = \
+    /usr/bin/journalctl, \
+    /bin/journalctl
+
+# Kernel message ring buffer (read-only)
+Cmnd_Alias SOC_DMESG = \
+    /usr/bin/dmesg, \
+    /bin/dmesg
+
+# Network address inspection (read-only; 'ip addr' only — NOT ip link set, ip route add, etc.)
+Cmnd_Alias SOC_IP_ADDR = \
+    /sbin/ip addr, \
+    /usr/sbin/ip addr, \
+    /bin/ip addr, \
+    /usr/bin/ip addr
+
+# NOTE: there is intentionally NO 'cat /var/log/*' entry here.  In sudoers,
+# a '*' in a command ARGUMENT is matched by fnmatch() WITHOUT FNM_PATHNAME,
+# so '*' matches '/' and '..'.  An entry like '/bin/cat /var/log/*' would
+# therefore allow 'sudo cat /var/log/../../etc/shadow' to read ANY root-owned
+# file.  Log reading is instead done through the validated wrapper
+# /usr/libexec/soc-diag/soc-readlog (covered by the SOC_DIAG alias below),
+# which rejects path traversal and confines reads to /var/log/.
+
+# Vendor diagnostic scripts (drop-in directory; scripts are root-owned 0755).
+# This also covers the soc-readlog log-reader wrapper shipped by this package.
+Cmnd_Alias SOC_DIAG = \
+    /usr/libexec/soc-diag/*
+
+# systemctl status — read-only, any unit. 'status' is read-only by design
+# (it queries unit state and never modifies it), so the '*' wildcard here is
+# safe: no traversal/escalation is possible through a read-only subcommand.
+Cmnd_Alias SOC_SYSTEMCTL_STATUS = \
+    /usr/bin/systemctl status *, \
+    /bin/systemctl status *
+
+# systemctl restart — RESTRICTED to the approved daemon list only.
+# Do NOT add a wildcard here; each approved service is listed explicitly.
+# Approved: OTA agent, tunnel daemon, networking, NTP.
+Cmnd_Alias SOC_SYSTEMCTL_RESTART = \
+    /usr/bin/systemctl restart soc-ota-agent.service, \
+    /usr/bin/systemctl restart soc-ota-tunneld.service, \
+    /usr/bin/systemctl restart NetworkManager.service, \
+    /usr/bin/systemctl restart systemd-networkd.service, \
+    /usr/bin/systemctl restart systemd-resolved.service, \
+    /usr/bin/systemctl restart chronyd.service, \
+    /bin/systemctl restart soc-ota-agent.service, \
+    /bin/systemctl restart soc-ota-tunneld.service, \
+    /bin/systemctl restart NetworkManager.service, \
+    /bin/systemctl restart systemd-networkd.service, \
+    /bin/systemctl restart systemd-resolved.service, \
+    /bin/systemctl restart chronyd.service
+
+# ---------------------------------------------------------------------------
+# Grant: support user may run the above aliases as root, no password required.
+# No other sudo commands are permitted (implicit NOPASSWD: ALL denial).
+# ---------------------------------------------------------------------------
+support ALL=(root) NOPASSWD: \
+    SOC_JOURNALCTL, \
+    SOC_DMESG, \
+    SOC_IP_ADDR, \
+    SOC_DIAG, \
+    SOC_SYSTEMCTL_STATUS, \
+    SOC_SYSTEMCTL_RESTART

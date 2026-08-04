@@ -1,0 +1,20 @@
+comment "frp needs an aarch64, arm, x86_64 or i386 target"
+	depends on !(BR2_aarch64 || BR2_arm || BR2_x86_64 || BR2_i386)
+
+config BR2_PACKAGE_FRP
+	bool "frp (frpc client)"
+	depends on BR2_aarch64 || BR2_arm || BR2_x86_64 || BR2_i386
+	help
+	  frp (Fast Reverse Proxy) client (frpc) — a NAT-traversal reverse
+	  tunnel client. OTA-Pulse's soc-ota-tunneld (BR2_PACKAGE_OTAPULSE_
+	  REMOTE_SSH) supervises frpc on-device to establish the Remote SSH
+	  terminal feature's reverse tunnel to the OTA-Pulse gateway.
+
+	  Only the frpc (client) binary is installed; frps (server) runs on
+	  the OTA-Pulse gateway, not on the device.
+
+	  Ships as a pre-built static Go binary — no compilation, mirrors
+	  meta-otapulse's recipes-connectivity/frp/frp_0.69.0.bb on the
+	  Yocto side.
+
+	  https://github.com/fatedier/frp

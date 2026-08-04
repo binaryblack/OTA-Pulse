@@ -1,0 +1,88 @@
+[Unit]
+Description=OTA-Pulse Reverse SSH Tunnel Supervisor
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Wait for a routable network before attempting to connect to frps.
+After=network-online.target
+Wants=network-online.target
+
+# TASK-S29-006 — gate startup on the first-boot tunnel-credential mint.
+# otapulse-auto-provision (oneshot) writes /data/otapulse/.tunnel-provisioned
+# only after it has successfully POSTed to /tunnel-credential/rotate, saved
+# /data/frp/credential, and patched proxyName in tunnel.conf. Without this gate
+# soc-ota-tunneld would crash-loop on the missing credential before
+# auto-provision completes.
+#
+# NOTE (BUG-208, Buildroot QEMU boards): otapulse-auto-provision.service is
+# not yet packaged for this board type (see meta-otapulse's recipes-core/
+# otapulse-firstboot for the Yocto original) — on a Buildroot image this
+# After=/Wants= simply has no unit to order against (systemd logs a warning
+# and continues), and /data/otapulse/.tunnel-provisioned will never be
+# created, so this ConditionPathExists keeps the unit "condition failed"
+# until that follow-up packaging work lands. Kept here unchanged for
+# forward-compatibility with that future work and semantic parity with the
+# Yocto unit.
+After=otapulse-auto-provision.service
+Wants=otapulse-auto-provision.service
+ConditionPathExists=/data/otapulse/.tunnel-provisioned
+
+# Don't run (and don't crash-loop) until the per-device tunnel credential has
+# been provisioned to /data/frp/credential.  systemd reports the unit as
+# "condition failed" instead of restart-counter spinning when the file is
+# missing — see BUG-013 for the underlying provisioning gap.  Once the
+# credential is written, `systemctl start soc-ota-tunneld` will pick it up.
+ConditionPathExists=/data/frp/credential
+ConditionFileNotEmpty=/data/frp/credential
+
+[Service]
+Type=simple
+User=root
+
+# Launch the tunnel daemon with the baked-in config file.
+# All settings can also be injected via TUNNEL_* environment variables
+# (see the Environment= lines below or use an EnvironmentFile=).
+ExecStart=/usr/bin/soc-ota-tunneld -config /etc/otapulse/tunnel.conf
+
+# Restart aggressively — tunnel connectivity is critical.
+# The daemon itself has back-off logic for frpc restarts; this outer
+# restart handles daemon-level crashes or fatal config errors after
+# admin intervention (e.g. credential rotation).
+Restart=always
+RestartSec=10
+
+# -----------------------------------------------------------------------
+# Hardening
+# -----------------------------------------------------------------------
+# ProtectSystem=full prevents writes to /usr, /boot, /etc (read-only bind).
+# We allow writes to /data and /etc/otapulse explicitly.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+# NoNewPrivileges=no is required: frpc is exec'd as a child process and
+# must be able to inherit the root credentials to bind privileged ports
+# if RemotePortHint < 1024 is configured.
+NoNewPrivileges=no
+
+# Paths the daemon must be able to write to at runtime.
+# /data/frp  — credential file (read) + rendered frpc.toml (write, mode 0600).
+# /data       — parent; MkdirAll may create it on first boot.
+ReadWritePaths=/data
+ReadWritePaths=/data/frp
+
+# -----------------------------------------------------------------------
+# Environment — TUNNEL_* overrides
+# -----------------------------------------------------------------------
+# Uncomment and set these to override the JSON config file at runtime,
+# e.g. via an EnvironmentFile=/data/frp/tunnel.env that is written by
+# the provisioning flow.
+#
+# Environment=TUNNEL_SERVER_ADDR=staging.ota-pulse.com
+# Environment=TUNNEL_SERVER_PORT=7000
+# Environment=TUNNEL_LOCAL_SSH_PORT=22
+# Environment=TUNNEL_PROXY_NAME=
+# Environment=TUNNEL_FRPC_PATH=/usr/bin/frpc
+# Environment=TUNNEL_CREDENTIAL_PATH=/data/frp/credential
+# Environment=TUNNEL_RENDERED_CONFIG_PATH=/data/frp/frpc.toml
+Environment="PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+
+[Install]
+WantedBy=multi-user.target

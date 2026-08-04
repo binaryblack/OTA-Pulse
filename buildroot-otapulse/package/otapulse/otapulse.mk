@@ -26,6 +26,42 @@ ifeq ($(BR2_PACKAGE_OTAPULSE_BOOT_GRUB),y)
 OTAPULSE_DEPENDENCIES += grub2
 endif
 
+# soc-ota-tunneld (built below) execs frpc as a child process at runtime —
+# same runtime dependency as meta-otapulse's soc-ota-tunneld recipe's
+# RDEPENDS:${PN} = "frp". sudo is required for the shell-access sudoers.d
+# allowlist (BUG-215) to be anything but inert — RDEPENDS:${PN} = "sudo"
+# on the Yocto side (soc-shell-access_1.0.0.bb). Depending on sudo here
+# (not just selecting BR2_PACKAGE_SUDO in Config.in) also guarantees sudo's
+# own install step — which removes its dist example sudoers.d files — runs
+# BEFORE our OTAPULSE_INSTALL_SHELL_ACCESS hook below, so our drop-in is
+# never raced by sudo's post-install cleanup.
+ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
+OTAPULSE_DEPENDENCIES += frp sudo
+endif
+
+# ==============================================================================
+# Shell-access support user (BUG-215)
+# ==============================================================================
+# Buildroot users-table syntax: username uid group gid password home shell
+# groups comment (docs/manual/makeusers-syntax.adoc). Mirrors the Yocto
+# recipe's USERADD_PARAM (--system --shell /bin/sh --home-dir /home/support
+# --create-home --no-user-group --gid support --groups "" support):
+#   - uid/gid -1: Buildroot allocates a stable system-range id.
+#   - password '*': login via password is never possible (no valid crypt
+#     hash). Unlike Yocto's OpenSSH target, this image's sshd is Dropbear,
+#     which does NOT consult the shadow/password field during pubkey auth
+#     (verified against dropbear's svr-authpubkey.c) — so there is no
+#     equivalent of the no-PAM allowed_user() lockout that forced Yocto's
+#     build-time random-secret SHA-512 hash dance (S16-009). A plain locked
+#     '*' password is sufficient and simpler here.
+#   - groups '-': no secondary groups — not sudo/wheel/root. The only
+#     elevation path is the exact curated sudoers.d allowlist below.
+ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
+define OTAPULSE_USERS
+	support -1 support -1 * /home/support /bin/sh - OTA-Pulse gateway support user
+endef
+endif
+
 # ==============================================================================
 # Build Configuration Validation
 # ==============================================================================
@@ -126,6 +162,33 @@ define OTAPULSE_BUILD_CMDS
 		-tags "$(OTAPULSE_GO_TAGS)" \
 		-o otapulse
 endef
+
+# ==============================================================================
+# soc-ota-tunneld (Remote SSH tunnel supervisor) — BUG-208
+# ==============================================================================
+# soc-ota-tunneld lives in the same soc-ota-agent source tree (cmd/soc-ota-
+# tunneld) as the main agent, so it's built as an extra step in this same
+# package rather than a separate Buildroot package — mirrors why meta-
+# otapulse's soc-ota-tunneld Yocto recipe shares soc-ota-agent's EXTERNALSRC
+# tree and sets CLEANBROKEN=1 to avoid a 'make clean' from one recipe
+# clobbering the other's build output.
+#
+# CGO_ENABLED=0 override: unlike the main otapulse binary (which needs CGO
+# for openssl/lmdb bindings), soc-ota-tunneld is pure-Go and CGO-free — same
+# as the Yocto recipe's "export CGO_ENABLED = 0". $(OTAPULSE_GO_ENV) still
+# supplies the correct GOARCH/GOARM for this target; the trailing
+# CGO_ENABLED=0 overrides its CGO_ENABLED=1.
+ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
+define OTAPULSE_BUILD_TUNNELD
+	cd $(@D) && \
+	$(OTAPULSE_GO_ENV) CGO_ENABLED=0 $(GO_BIN) build \
+		-trimpath \
+		-ldflags "-s -w" \
+		-o soc-ota-tunneld \
+		./cmd/soc-ota-tunneld
+endef
+OTAPULSE_POST_BUILD_HOOKS += OTAPULSE_BUILD_TUNNELD
+endif
 
 # ==============================================================================
 # Installation
@@ -315,6 +378,95 @@ define OTAPULSE_INSTALL_SYSTEMD_SERVICE
 		$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/otapulse.service
 endef
 OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_SYSTEMD_SERVICE
+endif
+
+# ==============================================================================
+# soc-ota-tunneld Installation (binary + config + systemd unit) — BUG-208
+# ==============================================================================
+
+ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
+define OTAPULSE_INSTALL_TUNNELD
+	# Install the tunnel supervisor binary.
+	$(INSTALL) -D -m 0755 $(@D)/soc-ota-tunneld $(TARGET_DIR)/usr/bin/soc-ota-tunneld
+
+	# Install the tunnel config, substituting the frps gateway address/port.
+	# Mode 0600 — embeds the frps server address, same rationale as
+	# otapulse.conf above.
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/otapulse
+	sed -e "s|@SERVER_ADDR@|$(call qstrip,$(BR2_PACKAGE_OTAPULSE_TUNNEL_SERVER_ADDR))|g" \
+	    -e "s|@SERVER_PORT@|$(call qstrip,$(BR2_PACKAGE_OTAPULSE_TUNNEL_SERVER_PORT))|g" \
+	    $(OTAPULSE_PKGDIR)/tunnel.conf.in > $(TARGET_DIR)/etc/otapulse/tunnel.conf
+	chmod 0600 $(TARGET_DIR)/etc/otapulse/tunnel.conf
+
+	# Install and enable the systemd unit (mirrors meta-otapulse's
+	# soc-ota-tunneld.service — same ExecStart, same credential gate).
+	$(INSTALL) -D -m 0644 $(OTAPULSE_PKGDIR)/soc-ota-tunneld.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/soc-ota-tunneld.service
+	mkdir -p $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants
+	ln -sf /usr/lib/systemd/system/soc-ota-tunneld.service \
+		$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/soc-ota-tunneld.service
+
+	# Seed the update-safe /data/frp directory at image build time so the
+	# daemon can write its credential and rendered frpc.toml there on first
+	# boot. The actual files are written at runtime; we only seed the dir.
+	$(INSTALL) -d -m 0700 $(TARGET_DIR)/data/frp
+endef
+OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_TUNNELD
+endif
+
+# ==============================================================================
+# Shell-access layer installation (sudoers allowlist + gateway key) — BUG-215
+# ==============================================================================
+# Mirrors meta-otapulse/recipes-core/soc-shell-access/soc-shell-access_1.0.0.bb
+# do_install(). The 'support' user itself is created by OTAPULSE_USERS above
+# (processed by Buildroot's mkusers at rootfs-finalize time, which also
+# chowns /home/support and everything under it to support:support — so no
+# explicit chown is needed here for the .ssh files below).
+ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
+define OTAPULSE_INSTALL_SHELL_ACCESS
+	# ------------------------------------------------------------------
+	# 1. Sudoers drop-in. Mode 0440, root:root — required by sudo; any
+	#    other mode/owner causes sudo to ignore the file entirely.
+	# ------------------------------------------------------------------
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/sudoers.d
+	$(INSTALL) -m 0440 $(OTAPULSE_PKGDIR)/soc-support.sudoers \
+		$(TARGET_DIR)/etc/sudoers.d/10-soc-support
+
+	# Belt-and-suspenders: confirm /etc/sudoers actually pulls in
+	# sudoers.d. Upstream sudo's default template ships this, but if a
+	# future toolchain/version ever omits it, a silently-ignored
+	# allowlist is exactly the BUG-215 failure mode again — so we assert
+	# it rather than assume it (same defensive pattern as meta-otapulse's
+	# BUG-114 sshd_config Include guard).
+	if [ -f $(TARGET_DIR)/etc/sudoers ] && \
+	   ! grep -q "^#includedir /etc/sudoers.d\|^@includedir /etc/sudoers.d" \
+		$(TARGET_DIR)/etc/sudoers; then \
+		echo "@includedir /etc/sudoers.d" >> $(TARGET_DIR)/etc/sudoers; \
+	fi
+
+	# ------------------------------------------------------------------
+	# 2. Vendor diagnostic scripts directory + the validated log-reader
+	#    wrapper (covered by the SOC_DIAG sudoers alias).
+	# ------------------------------------------------------------------
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/libexec/soc-diag
+	$(INSTALL) -m 0755 $(OTAPULSE_PKGDIR)/soc-readlog \
+		$(TARGET_DIR)/usr/libexec/soc-diag/soc-readlog
+
+	# ------------------------------------------------------------------
+	# 3. Support user home + gateway authorized key.
+	#    Dropbear (this image's sshd — BR2_PACKAGE_DROPBEAR) has no
+	#    OpenSSH-style AuthorizedKeysFile global override: it only reads
+	#    ~/.ssh/authorized_keys for the login user. So (unlike Yocto's
+	#    /etc/ssh/authorized_keys/%u + sshd_config.d drop-in) the gateway
+	#    key must go directly into support's own home directory.
+	#    0700/0600: authorized_keys must not be group/world-readable.
+	# ------------------------------------------------------------------
+	$(INSTALL) -d -m 0750 $(TARGET_DIR)/home/support
+	$(INSTALL) -d -m 0700 $(TARGET_DIR)/home/support/.ssh
+	$(INSTALL) -m 0600 $(OTAPULSE_PKGDIR)/gateway-authorized-key \
+		$(TARGET_DIR)/home/support/.ssh/authorized_keys
+endef
+OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_SHELL_ACCESS
 endif
 
 # ==============================================================================
