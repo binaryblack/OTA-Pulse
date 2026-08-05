@@ -37,8 +37,20 @@ RRECOMMENDS:${PN} = " \
 # Only depend on signing-keys if signature verification is enabled
 RDEPENDS:${PN}:append = " ${@bb.utils.contains('SOC_OTA_SIGNATURE_VERIFICATION', '1', 'signing-keys', '', d)}"
 
-# For Rockchip platforms, include the PARTUUID-based boot switching state script
-RRECOMMENDS:${PN}:append:rockchip = " otapulse-rockchip-bootenv"
+# BUG-232: otapulse-rockchip-bootenv used to be RRECOMMENDS'd here for Rockchip
+# platforms. It installed an ArtifactCommit_* script into ${sysconfdir}/otapulse/scripts
+# (RootfsScriptsPath) — a location the agent NEVER executes Artifact* transition
+# scripts from (those come from ArtScriptsPath, populated FROM THE ARTIFACT; see
+# installer/installer.go). Worse, CheckRootfsScriptsVersion (statescript/executor.go)
+# fails EVERY commit when RootfsScriptsPath is non-empty but lacks a 'version' file,
+# which this package never provided — so the script never ran AND broke every OTA
+# commit on Rockchip boards. The PARTUUID/extlinux/etc. slot switch this package
+# tried to do is already handled correctly and generically by
+# u-boot-env-config's switch-boot-slot.sh (RRECOMMENDS'd universally above), which
+# the agent invokes natively (installer/dual_rootfs_device.go switchBootSlot()) on
+# install, and via ArtifactRollbackReboot_Enter_01 (staged below) on rollback.
+# Removed entirely rather than fixed in place — see otapulse-rockchip-bootenv_1.0.bb
+# for the (also fixed) package itself, kept as a documented no-op.
 
 # Use externalsrc for local Go project
 inherit externalsrc systemd goarch
@@ -54,6 +66,7 @@ SRC_URI = " \
     file://device_type \
     file://soc-ota-provision \
     file://ArtifactReboot_Enter_01 \
+    file://ArtifactRollbackReboot_Enter_01 \
 "
 
 # Signature verification configuration.
@@ -244,6 +257,13 @@ do_install() {
     # (${THISDIR}/files), not ${WORKDIR}, exactly like otapulse.conf.in/soc-ota-provision above.
     install -d ${D}${datadir}/otapulse/state-scripts
     install -m 0755 ${FILESDIR}/ArtifactReboot_Enter_01 ${D}${datadir}/otapulse/state-scripts/ArtifactReboot_Enter_01
+
+    # BUG-232: ArtifactRollbackReboot_Enter_01 mirrors switchBootSlot() (called
+    # natively by InstallUpdate() for the forward path, see
+    # installer/dual_rootfs_device.go) for the ROLLBACK path, which Rollback()
+    # does not call. Self-gates on /usr/sbin/switch-boot-slot.sh being present
+    # and on there being a recorded rollback target; see the script header.
+    install -m 0755 ${FILESDIR}/ArtifactRollbackReboot_Enter_01 ${D}${datadir}/otapulse/state-scripts/ArtifactRollbackReboot_Enter_01
 
     # Install identity script (to new OTAPulse path with new naming)
     install -d ${D}${datadir}/otapulse/identity

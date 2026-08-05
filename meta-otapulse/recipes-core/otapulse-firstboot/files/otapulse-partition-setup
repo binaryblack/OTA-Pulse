@@ -512,7 +512,7 @@ if check_all_partitions_ready; then
 
     # Mount data partition if not already mounted (check both "data" and "userdata" labels)
     if ! mountpoint -q /data 2>/dev/null; then
-        local mount_dev=""
+        mount_dev=""
         if [ -e "/dev/disk/by-partlabel/data" ]; then
             mount_dev="/dev/disk/by-partlabel/data"
         elif [ -e "/dev/disk/by-partlabel/userdata" ]; then

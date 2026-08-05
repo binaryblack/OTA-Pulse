@@ -629,6 +629,8 @@ main() {
     local last_upload=0
     local last_heartbeat=0
     local heartbeat_interval=60
+    local last_reprovision_attempt=0
+    local reprovision_interval=300
 
     # NOTE: OTA updates are handled by soc-ota-agent, not socmond
     log "OTA updates are handled by soc-ota-agent service"
@@ -639,6 +641,20 @@ main() {
 
         # Pet the watchdog
         pet_watchdog
+
+        # Retry provisioning if still not provisioned. Provisioning state
+        # lives on the rootfs and is wiped by every A/B slot switch, so
+        # without this the daemon would stay a permanently unprovisioned,
+        # watchdog-healthy zombie after any OTA update (RC-B3).
+        if [ "${provisioned}" = "false" ] && [ $((now - last_reprovision_attempt)) -ge "${reprovision_interval}" ]; then
+            if provision_device; then
+                provisioned=true
+                log "Re-provisioning succeeded — device is now connected"
+            else
+                log "Re-provisioning attempt failed, will retry in ${reprovision_interval}s"
+            fi
+            last_reprovision_attempt=${now}
+        fi
 
         # Send heartbeat
         if [ $((now - last_heartbeat)) -ge "${heartbeat_interval}" ]; then

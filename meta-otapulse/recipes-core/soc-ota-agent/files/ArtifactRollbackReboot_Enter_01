@@ -1,0 +1,70 @@
+#!/bin/sh
+# OTAPulse State Script: ArtifactRollbackReboot_Enter
+#
+# BUG-232: soc-ota-agent's native switchBootSlot() (installer/dual_rootfs_device.go)
+# is called from InstallUpdate() for the FORWARD install path, and invokes
+# /usr/sbin/switch-boot-slot.sh to update whichever boot-media scheme this board
+# actually uses (PARTUUID swap, extlinux.conf, systemd-boot ABA, FAT
+# mender_boot_part, uEnv.txt). Rollback() in the same file only rewrites the
+# FileBasedBootEnv mender_boot_part file — it does NOT call switchBootSlot(). On
+# any board where mender_boot_part is not the boot-authoritative mechanism (e.g.
+# Radxa CM5 / Rockchip RK3588 U-Boot distroboot, which boots via
+# extlinux/extlinux.conf's static root=PARTLABEL=... line), a failed-commit
+# rollback silently fails to revert the boot media and the device reboots right
+# back into the bad slot it was trying to roll back from.
+#
+# This script closes that gap at the state-script layer (no agent Go code
+# change): it re-derives the rollback TARGET slot from
+# /data/ota/mender_boot_part — which Rollback() has already rewritten to the
+# old/rollback-target partition number by the time this state fires — and
+# re-runs the exact same generic, self-gating switch-boot-slot.sh fallback
+# chain used on install, so every supported boot-media scheme gets reverted
+# symmetrically with the forward path.
+#
+# Hardware/arch independent: derives the target slot letter from GPT partlabels
+# (rootfs_a/rootfs_b) only, never hardcodes a board, bus, or partition number.
+# No-ops cleanly if switch-boot-slot.sh is absent (boards that don't ship
+# u-boot-env-config) or if there is no rollback target recorded.
+
+log() {
+    echo "ArtifactRollbackReboot_Enter: $*"
+    logger -t otapulse-rollback-reboot "$*" 2>/dev/null || true
+}
+
+BOOT_PART_FILE="/data/ota/mender_boot_part"
+
+if [ ! -x /usr/sbin/switch-boot-slot.sh ]; then
+    log "switch-boot-slot.sh not present, nothing to do"
+    exit 0
+fi
+
+if [ ! -f "$BOOT_PART_FILE" ]; then
+    log "no $BOOT_PART_FILE, nothing to do"
+    exit 0
+fi
+
+TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+if [ -z "$TARGET_PART" ]; then
+    log "$BOOT_PART_FILE is empty, nothing to do"
+    exit 0
+fi
+
+PART_B=""
+if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+    PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+fi
+
+if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+    TARGET_SLOT="B"
+else
+    TARGET_SLOT="A"
+fi
+
+log "reverting boot media to slot $TARGET_SLOT (partition $TARGET_PART) via switch-boot-slot.sh"
+/usr/sbin/switch-boot-slot.sh "$TARGET_SLOT"
+RESULT=$?
+if [ $RESULT -ne 0 ]; then
+    log "switch-boot-slot.sh returned $RESULT (some methods may not apply to this board's boot scheme; continuing)"
+fi
+
+exit 0
