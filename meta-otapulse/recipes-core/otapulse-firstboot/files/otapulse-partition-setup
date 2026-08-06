@@ -219,6 +219,12 @@ setup_data_partition_fallback() {
     # fresh empty /data unless the BSP provides a real data partition.
     # Users wanting persistent data across OTA updates should add a real
     # data partition to their flash layout (e.g. flash.xml.in for Tegra).
+    #
+    # BUG-241: this is now only reached when setup_data_partition_static_gpt()
+    # (below) found no dedicated data/userdata/UDA partition of usable size —
+    # boards that DO ship one (e.g. Jetson's flash-time UDA partition) get a
+    # real shared /data that survives slot switches instead of this per-slot
+    # bind-mount.
     local fallback_dir="/var/local/otapulse-data"
 
     if mountpoint -q /data 2>/dev/null; then
@@ -248,6 +254,119 @@ setup_data_partition_fallback() {
     return 1
 }
 
+# =============================================================================
+# BUG-241: claim an existing dedicated partition as the real shared /data on
+# static-GPT (Tegra) boards, instead of always falling back to the per-slot
+# rootfs bind-mount.
+# =============================================================================
+# Some static-GPT BSPs ship a flash-time partition that is never used by the
+# base image (e.g. NVIDIA's "UDA" — User Data Area — on the Jetson Xavier NX
+# L4T redundant-boot layout). Its GPT PARTLABEL is stable from flash time,
+# BEFORE this script ever runs, so it can be claimed at runtime without
+# repartitioning or reflashing. Unlike the bind-mount fallback, a real
+# partition survives OTA slot switches, so /data/otapulse/otapulse.conf
+# (device identity/API key) and the mender-store no longer drift or vanish
+# after every slot switch (BUG-241; the bind-mount fallback's own per-slot
+# limitation is documented above it).
+#
+# Falls back to setup_data_partition_fallback() (unchanged behavior) when no
+# candidate partition exists, when it's too small, or if anything about
+# claiming it fails — this must never brick a board that used to work.
+# =============================================================================
+setup_data_partition_static_gpt() {
+    if mountpoint -q /data 2>/dev/null; then
+        return 0
+    fi
+
+    # First match wins. "data"/"userdata" are the generic conventions used
+    # elsewhere in this script; "UDA" is Tegra/L4T's own name for the same
+    # kind of spare partition (confirmed present on the Jetson Xavier NX
+    # redundant-boot layout — see BUG-241).
+    local partlabel="" candidate_dev=""
+    for partlabel in data userdata UDA; do
+        if [ -e "/dev/disk/by-partlabel/$partlabel" ]; then
+            candidate_dev="/dev/disk/by-partlabel/$partlabel"
+            break
+        fi
+    done
+
+    if [ -z "$candidate_dev" ]; then
+        log "No dedicated data/userdata/UDA partition found — using rootfs fallback"
+        setup_data_partition_fallback
+        return $?
+    fi
+
+    # Size gate: refuse anything implausibly small rather than risk formatting
+    # something that isn't really a spare data area.
+    local candidate_bytes candidate_mb
+    candidate_bytes=$(blockdev --getsize64 "$candidate_dev" 2>/dev/null)
+    candidate_bytes="${candidate_bytes:-0}"
+    candidate_mb=$((candidate_bytes / 1024 / 1024))
+    if [ "$candidate_mb" -lt 64 ]; then
+        log "$partlabel partition too small for shared /data (${candidate_mb}MB < 64MB) — using rootfs fallback"
+        setup_data_partition_fallback
+        return $?
+    fi
+
+    log "Found dedicated $partlabel partition ($candidate_dev, ${candidate_mb}MB) — claiming as shared /data"
+
+    # Only format if the partition has no existing filesystem. A raw,
+    # never-used flash-time partition (the common case) has no FSTYPE; a
+    # partition already claimed by a previous boot (or a prior version of
+    # this script) already has ext4 and must NOT be reformatted, or its
+    # persisted identity would be wiped on every boot.
+    local fstype
+    fstype=$(lsblk -no FSTYPE "$candidate_dev" 2>/dev/null || true)
+    if [ -z "$fstype" ]; then
+        log "formatting raw $partlabel partition as shared /data"
+        if ! mkfs.ext4 -F -E nodiscard -L data "$candidate_dev"; then
+            log "WARNING: mkfs.ext4 on $candidate_dev failed — using rootfs fallback"
+            setup_data_partition_fallback
+            return $?
+        fi
+    else
+        log "$partlabel partition already has a filesystem ($fstype) — mounting as-is, no format"
+    fi
+
+    mkdir -p /data
+    if ! mount "$candidate_dev" /data; then
+        log "WARNING: mount of $candidate_dev at /data failed — using rootfs fallback"
+        setup_data_partition_fallback
+        return $?
+    fi
+    log "Mounted $candidate_dev → /data"
+
+    # One-time migration from the rootfs-backed fallback location, gated on
+    # otapulse.conf presence so this never overwrites a /data that's already
+    # populated (e.g. a fresh format with nothing to migrate, or a re-run
+    # after migration already happened). Preserves ownership/perms/subdirs
+    # (otapulse/, ota/, etc/, scripts/, ssh/) via `cp -a`.
+    local fallback_dir="/var/local/otapulse-data"
+    if [ ! -f "/data/otapulse/otapulse.conf" ] && [ -f "$fallback_dir/otapulse/otapulse.conf" ]; then
+        log "Migrating existing identity/state from $fallback_dir to shared /data"
+        if cp -a "$fallback_dir/." /data/; then
+            log "Migration complete"
+            # Rename the source dir (rather than delete) so it can never be
+            # bind-mounted by accident again by a future run of this script,
+            # while keeping a copy around for forensics if something's wrong.
+            mv "$fallback_dir" "${fallback_dir}.migrated-to-${partlabel}"
+            log "Renamed $fallback_dir -> ${fallback_dir}.migrated-to-${partlabel}"
+        else
+            log "WARNING: migration from $fallback_dir to /data was incomplete"
+        fi
+    fi
+
+    # fstab durability: remove any stale /data lines first (same pattern as
+    # the bind-mount fallback below), then add this partition as the sole
+    # /data entry. nofail + a bounded device-timeout keep boot from hanging
+    # if the device is ever briefly unavailable.
+    sed -i '/^[^#].* \/data /d' /etc/fstab
+    echo "/dev/disk/by-partlabel/$partlabel /data ext4 defaults,nofail,x-systemd.device-timeout=10 0 0" >> /etc/fstab
+    log "Updated /etc/fstab: removed stale /data entries, added $partlabel partition mount"
+
+    return 0
+}
+
 handle_static_gpt_bsp() {
     log "Static-GPT BSP detected (Tegra) — using BSP partition layout"
 
@@ -267,8 +386,9 @@ handle_static_gpt_bsp() {
         log "  rootfs_b not present (single-slot layout — set USE_REDUNDANT_FLASH_LAYOUT=1 in meta-tegra for A/B)"
     fi
 
-    # Set up /data — either a real partition or a rootfs-backed fallback
-    setup_data_partition_fallback || log "WARNING: /data setup failed"
+    # Set up /data — claim an existing dedicated partition (BUG-241) if the
+    # board has one, else fall back to the rootfs-backed bind-mount.
+    setup_data_partition_static_gpt || log "WARNING: /data setup failed"
 
     # Now that /data is available, ensure persistence files exist.
     # machine-id is handled by the dedicated otapulse-machine-id.service
@@ -320,6 +440,18 @@ ensure_persistent_ssh_keys || log "SSH key persistence skipped (data partition n
 
 # Always ensure boot scripts are available
 ensure_persistent_boot_scripts || log "Boot scripts persistence skipped (data partition not ready)"
+
+# BUG-241: every-boot self-heal for static-GPT (Tegra) boards. Once the
+# MARKER_FILE exists, everything below this point (including
+# handle_static_gpt_bsp) is skipped on subsequent boots — but a rootfs slot
+# can still come up without a /data mount, e.g. a rollback to an older image
+# revision flashed/built before this feature existed, or an OTA'd slot whose
+# /etc/fstab predates it. Cheap to check every boot: if the dedicated
+# partition + filesystem already exist, this just mounts it (no reformat, no
+# re-migration, both gated on state that's already there).
+if is_static_gpt_bsp && ! mountpoint -q /data 2>/dev/null; then
+    setup_data_partition_static_gpt || log "WARNING: static-GPT /data self-heal failed"
+fi
 
 # Check if already configured
 if [ -f "$MARKER_FILE" ]; then
