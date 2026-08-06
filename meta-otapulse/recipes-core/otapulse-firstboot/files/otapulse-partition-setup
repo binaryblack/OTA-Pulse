@@ -39,9 +39,9 @@ error() {
 # (legacy mender layout) → /proc/device-tree/model (best-effort kernel name) →
 # "unknown".
 #
-# NOTE: The static-GPT (Tegra) path has its own inline seeding logic; this
-# helper is intentionally not used there to preserve byte-for-byte Tegra
-# behavior.
+# BUG-237: the static-GPT (Tegra) path used to have its own divergent inline
+# copy of this logic (missing the /etc/otapulse/device_type priority) — it
+# now calls this same helper, so both paths share one source of truth.
 # =============================================================================
 seed_device_type() {
     local otapulse_dir="/data/otapulse"
@@ -289,22 +289,21 @@ handle_static_gpt_bsp() {
 
         # Seed device_type for OTA agent compatibility checking.
         # The agent checks /data/otapulse/device_type against update artifacts.
-        local otapulse_dir="/data/otapulse"
-        mkdir -p "$otapulse_dir"
-        if [ ! -f "$otapulse_dir/device_type" ]; then
-            # Prefer MENDER_DEVICE_TYPE if set at build time; otherwise fall
-            # back to the kernel MACHINE name from device tree.
-            local dev_type=""
-            if [ -f /etc/mender/device_type ]; then
-                dev_type=$(cat /etc/mender/device_type 2>/dev/null | sed 's/^device_type=//')
-            fi
-            if [ -z "$dev_type" ] && [ -r /proc/device-tree/model ]; then
-                dev_type=$(tr -d '\0' < /proc/device-tree/model | tr ' ' '_' | tr '[:upper:]' '[:lower:]')
-            fi
-            [ -z "$dev_type" ] && dev_type="unknown"
-            echo "device_type=$dev_type" > "$otapulse_dir/device_type"
-            log "Seeded device_type=$dev_type in $otapulse_dir/device_type"
-        fi
+        # BUG-237: this used to be a hand-rolled copy of seed_device_type() that
+        # only consulted /etc/mender/device_type and /proc/device-tree/model —
+        # never /etc/otapulse/device_type, the value the soc-ota-agent recipe
+        # actually installs (device_type=${MACHINE}) and the same value baked
+        # into every artifact's device_types header at build time. On a board
+        # whose /etc/mender/device_type doesn't exist (OTAPulse-only image,
+        # never had Mender), that left /proc/device-tree/model (a
+        # human-readable marketing string, e.g. "NVIDIA Jetson Xavier NX
+        # Developer Kit" -> "nvidia_jetson_xavier_nx_developer_kit") as the
+        # only fallback, which never matches ${MACHINE} (e.g.
+        # "jetson-xavier-nx-devkit-emmc") and fails every OTA at the
+        # artifact-header compatibility check. Call the shared helper so the
+        # static-GPT path uses the same MACHINE-authoritative priority order
+        # as every other BSP.
+        seed_device_type
     fi
 
     # Mark complete and exit

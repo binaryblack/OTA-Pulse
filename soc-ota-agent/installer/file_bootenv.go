@@ -267,6 +267,32 @@ func (f *FileBasedBootEnv) writeMenderBootPart(partNum string) error {
 	return nil
 }
 
+// deviceAlreadyMounted reports whether dev is already mounted anywhere on the
+// system, per the given /proc/self/mounts lines. Resolves symlinks first
+// (e.g. /dev/disk/by-partlabel/boot) so a by-partlabel/by-label alias for an
+// already-mounted device is recognised as a collision even though its own
+// path never appears literally in /proc/self/mounts (BUG-239).
+func deviceAlreadyMounted(dev string, mountLines []string) bool {
+	real, err := filepath.EvalSymlinks(dev)
+	if err != nil {
+		real = dev
+	}
+	for _, line := range mountLines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		mountedReal, err := filepath.EvalSymlinks(fields[0])
+		if err != nil {
+			mountedReal = fields[0]
+		}
+		if mountedReal == real {
+			return true
+		}
+	}
+	return false
+}
+
 // syncBootSlotToBootPartition copies the mender_boot_part file to the boot partition
 // so that U-Boot can read it during boot. U-Boot cannot read from ext4 data partition.
 // Supports multiple platforms: i.MX, Raspberry Pi, Rockchip, generic ARM boards.
@@ -316,20 +342,57 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
 			"/dev/mmcblk0p1",              // SD card
 			"/dev/sda1",                   // USB/SATA
 		}
+		triedCandidate := false
 		for _, dev := range bootDevices {
-			if _, err := os.Stat(dev); err == nil {
-				mountPoint := "/mnt/boot"
-				if err := os.MkdirAll(mountPoint, 0755); err != nil {
-					log.Warnf("FileBasedBootEnv: Failed to create mount point: %v", err)
-					continue
-				}
-				cmd := f.Commander.Command("mount", dev, mountPoint)
-				if err := cmd.Run(); err == nil {
-					bootFile = filepath.Join(mountPoint, "mender_boot_part")
-					log.Infof("FileBasedBootEnv: Mounted boot partition %s at %s", dev, mountPoint)
-					break
-				}
+			if _, err := os.Stat(dev); err != nil {
+				continue
 			}
+			// BUG-239: skip candidates already mounted elsewhere — most
+			// notably the root device itself. Some boards (e.g. Jetson/
+			// Tegra, whose A/B redundancy is entirely rootfs-level with no
+			// separate FAT boot partition) have their lowest device-node
+			// candidate (/dev/mmcblk0p1) BE the currently-mounted root
+			// filesystem. util-linux's mount refuses to mount an
+			// already-mounted block device a second time ("already mounted
+			// on /"), and that refusal used to be treated identically to a
+			// genuine boot-partition access failure — forcing an
+			// unconditional ArtifactInstall rollback on every OTA on such
+			// boards, even though there was never a boot partition to sync
+			// to in the first place.
+			if deviceAlreadyMounted(dev, mountLines) {
+				log.Debugf("FileBasedBootEnv: Skipping boot-device candidate %s, already mounted elsewhere", dev)
+				continue
+			}
+			triedCandidate = true
+			mountPoint := "/mnt/boot"
+			if err := os.MkdirAll(mountPoint, 0755); err != nil {
+				log.Warnf("FileBasedBootEnv: Failed to create mount point: %v", err)
+				continue
+			}
+			cmd := f.Commander.Command("mount", dev, mountPoint)
+			if err := cmd.Run(); err == nil {
+				bootFile = filepath.Join(mountPoint, "mender_boot_part")
+				log.Infof("FileBasedBootEnv: Mounted boot partition %s at %s", dev, mountPoint)
+				break
+			} else {
+				log.Warnf("FileBasedBootEnv: Failed to mount candidate boot device %s: %v", dev, err)
+			}
+		}
+
+		if bootFile == "" && !triedCandidate {
+			// No boot-partition candidate exists on this board at all once
+			// already-mounted devices (typically root) are excluded — e.g.
+			// Jetson/Tegra, which has no separate FAT boot device and whose
+			// real A/B authority is handled entirely elsewhere (nvbootctrl
+			// rootfs slots, driven by switch-boot-slot.sh as a state
+			// script). FileBasedBootEnv's FAT sync is simply not applicable
+			// here; treat it as a soft no-op rather than a fatal
+			// ArtifactInstall error. This intentionally does NOT relax
+			// BUG-106/GAP-OTA-004's protection: a board that DOES have a
+			// real boot-partition candidate but fails to mount or write it
+			// still falls through to the fatal path below.
+			log.Warn("FileBasedBootEnv: No FAT boot-partition candidate present on this board (candidates exist only as already-mounted devices, e.g. root) — skipping FAT sync; boot slot must be managed by another mechanism on this board")
+			return nil
 		}
 	}
 
@@ -629,6 +692,12 @@ func (f *FileBasedBootEnv) findBootDir() (bootDir string, mountedAt string) {
 	}
 	for _, dev := range bootDevices {
 		if _, err := os.Stat(dev); err != nil {
+			continue
+		}
+		// BUG-239: same already-mounted skip as syncBootSlotToBootPartition
+		// — avoids a doomed "mount <root device> /mnt/boot" attempt (and its
+		// stderr noise) on boards with no separate FAT boot partition.
+		if deviceAlreadyMounted(dev, mountLines) {
 			continue
 		}
 		mountPoint := "/mnt/boot"

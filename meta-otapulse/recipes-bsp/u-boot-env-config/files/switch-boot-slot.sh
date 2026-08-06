@@ -65,6 +65,64 @@ get_partition_number() {
     echo "$1" | grep -o '[0-9]*$'
 }
 
+# Method 0: NVIDIA Tegra nvbootctrl rootfs A/B (Jetson)
+# Tegra boards (Jetson) ship a fixed, flash-time GPT layout with fully
+# redundant partition pairs (APP/APP_b, kernel/kernel_b, ...) managed by
+# NVIDIA's own boot_control HAL — there is no U-Boot, extlinux, uEnv, or FAT
+# boot partition on these boards at all (see is_static_gpt_bsp in
+# otapulse-partition-setup), which is exactly why every method below
+# self-gates out on Tegra with "not found" (BUG-239). `nvbootctrl -t rootfs
+# set-active-boot-slot <0|1>` is the real, verified authority for which
+# rootfs slot (APP=0/A, APP_b=1/B) boots next — confirmed with a live
+# A->B->A reboot round-trip on a Jetson Xavier NX (findmnt / + `nvbootctrl -t
+# rootfs dump-slots-info` both tracked the switch correctly across real
+# reboots). Self-gates on: binary present, AND rootfs A/B actually enabled
+# (is-rootfs-ab-enabled's documented exit codes: 1=enabled/slot A,
+# 2=enabled/slot B, 0=disabled — single-rootfs image, nothing to switch).
+# Placed FIRST, like try_systemd_boot_aba, so a highly board-specific,
+# verified-effective method is never shadowed by a generic one that might
+# operationally "succeed" while changing nothing on this board.
+try_nvbootctrl() {
+    if ! command -v nvbootctrl >/dev/null 2>&1; then
+        log "nvbootctrl not available"
+        return 1
+    fi
+
+    nvbootctrl -t rootfs is-rootfs-ab-enabled >/dev/null 2>&1
+    local ab_status=$?
+    if [ "$ab_status" != "1" ] && [ "$ab_status" != "2" ]; then
+        log "nvbootctrl: rootfs A/B not enabled (is-rootfs-ab-enabled exit=$ab_status)"
+        return 1
+    fi
+
+    local target_slot_num
+    if [ "$SLOT" = "A" ]; then
+        target_slot_num=0
+    else
+        target_slot_num=1
+    fi
+
+    if ! nvbootctrl -t rootfs set-active-boot-slot "$target_slot_num" 2>/dev/null; then
+        log "nvbootctrl: set-active-boot-slot $target_slot_num failed"
+        return 1
+    fi
+    sync
+
+    # Verify — "Active rootfs slot: A|B" is the PENDING slot for next boot
+    # (distinct from "Current rootfs slot", the currently-booted one, which
+    # only changes after the reboot actually happens).
+    local active
+    active=$(nvbootctrl -t rootfs dump-slots-info 2>/dev/null | \
+        awk -F': ' '/^Active rootfs slot/{print $2}')
+    if [ "$active" != "$SLOT" ]; then
+        log "nvbootctrl: verification failed - active rootfs slot is '$active', expected '$SLOT'"
+        return 1
+    fi
+
+    log "nvbootctrl: active rootfs slot set to $SLOT (takes effect on next reboot)"
+    return 0
+}
+
 # Method 1: Use Rockchip PARTUUID swapping method
 # The kernel cmdline has root=PARTUUID=614e0000-0000 (prefix match)
 # We swap the PARTUUIDs so the target slot gets the matching prefix
@@ -151,7 +209,24 @@ try_fw_setenv() {
             return 1
         fi
     fi
-    
+
+    # Safety gate (RPi4 fw_setenv SIGSEGV, 2026-08-05): fw_env.config can
+    # exist on disk purely as the recipe's shipped placeholder template
+    # (all lines commented out) on boards with no real U-Boot in the boot
+    # chain at all — e.g. Raspberry Pi's stock VideoCore firmware, which
+    # never runs U-Boot and has no reserved U-Boot env region anywhere on
+    # the media. fw_setenv/fw_printenv SIGSEGV (rather than failing
+    # gracefully) when pointed at such a config instead of erroring
+    # cleanly, so `-f fw_env.config` alone is not a sufficient guard —
+    # verify there is a real, uncommented device entry that actually
+    # exists as a device node before ever invoking the tool.
+    local cfg_device
+    cfg_device=$(awk '!/^[[:space:]]*#/ && NF>=3 {print $1; exit}' /etc/fw_env.config 2>/dev/null)
+    if [ -z "$cfg_device" ] || [ ! -e "$cfg_device" ]; then
+        log "fw_env.config has no valid/existing device entry (found: '${cfg_device:-none}'); skipping fw_setenv (no real U-Boot env on this board)"
+        return 1
+    fi
+
     local target_partition target_partuuid
     if [ "$SLOT" = "A" ]; then
         target_partition="$ROOTFS_A"
@@ -530,13 +605,127 @@ try_systemd_boot_aba() {
 store_boot_slot() {
     mkdir -p "$(dirname "$BOOT_SLOT_FILE")"
     echo "$SLOT" > "$BOOT_SLOT_FILE"
-    
+
     # Also store in /boot if writable
     if [ -w /boot ]; then
         echo "$SLOT" > /boot/boot_slot
     fi
-    
+
     log "Stored boot slot preference: $SLOT"
+    return 0
+}
+
+# Method 8: Rewrite root= in cmdline.txt on the FAT boot partition
+# (RPi4 slot-switch fix, 2026-08-05) Some boards have NO bootloader layer
+# at all — e.g. Raspberry Pi's stock VideoCore firmware, which loads the
+# kernel directly and reads root= straight out of a bare cmdline.txt on
+# the FAT boot partition. There is no boot.scr, no extlinux.conf, no
+# uEnv.txt, no loader/entries on such boards, so every method above
+# correctly self-gates out ("not found") and the switch previously fell
+# through to store-preference-only, silently failing to move the slot.
+# This is the catch-all for that class: locate the FAT boot partition,
+# find cmdline.txt, and rewrite its root= parameter for the target slot,
+# preserving whatever scheme (PARTUUID=/PARTLABEL=/raw device path) is
+# already in use so we don't introduce a rooting scheme the firmware/
+# kernel combo wasn't already using. Deliberately LAST in the method
+# chain — it is the most permissive method (fires on the mere presence of
+# a bare cmdline.txt) and would false-positive-shadow the more specific
+# bootloader methods above it if tried earlier.
+try_cmdline_txt() {
+    local fat_dev="" mnt="" cmdline=""
+
+    if [ -f /boot/cmdline.txt ]; then
+        cmdline="/boot/cmdline.txt"
+    else
+        if [ -e /dev/disk/by-label/boot ]; then
+            fat_dev=$(readlink -f /dev/disk/by-label/boot)
+        else
+            for dev in /dev/mmcblk*p1 /dev/sd?1 /dev/vd?1 /dev/nvme*n*p1; do
+                [ -b "$dev" ] || continue
+                if [ "$(blkid -s TYPE -o value "$dev" 2>/dev/null)" = "vfat" ] && \
+                   [ "$(blkid -s LABEL -o value "$dev" 2>/dev/null)" = "boot" ]; then
+                    fat_dev="$dev"
+                    break
+                fi
+            done
+        fi
+        if [ -z "$fat_dev" ]; then
+            log "cmdline.txt not found (no FAT boot partition)"
+            return 1
+        fi
+        mnt="/tmp/.cmdline_$$"
+        mkdir -p "$mnt"
+        if ! mount "$fat_dev" "$mnt" 2>/dev/null; then
+            log "cmdline.txt not found (cannot mount $fat_dev)"
+            rmdir "$mnt" 2>/dev/null || true
+            return 1
+        fi
+        cmdline="$mnt/cmdline.txt"
+        if [ ! -f "$cmdline" ]; then
+            log "cmdline.txt not found"
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+            return 1
+        fi
+    fi
+
+    if ! grep -q 'root=' "$cmdline"; then
+        log "cmdline.txt has no root= parameter"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
+    fi
+
+    local target_partition new_root="" partlabel target_partuuid current_root
+    if [ "$SLOT" = "A" ]; then
+        target_partition="$ROOTFS_A"
+    else
+        target_partition="$ROOTFS_B"
+    fi
+
+    # Preserve whatever scheme is already in use, same preference order as
+    # try_extlinux: PARTUUID/PARTLABEL are stable across re-partitioning;
+    # fall back to the raw device path (what RPi-class boards ship by
+    # default) only if neither is in use already.
+    current_root=$(grep -o 'root=[^ ]*' "$cmdline" | head -1)
+    case "$current_root" in
+        root=PARTLABEL=*)
+            partlabel=$(blkid -s PARTLABEL -o value "$target_partition" 2>/dev/null)
+            [ -n "$partlabel" ] && new_root="PARTLABEL=$partlabel"
+            ;;
+        root=PARTUUID=*)
+            target_partuuid=$(get_partuuid "$target_partition")
+            [ -n "$target_partuuid" ] && new_root="PARTUUID=$target_partuuid"
+            ;;
+    esac
+    if [ -z "$new_root" ]; then
+        new_root="$target_partition"
+    fi
+
+    log "Updating cmdline.txt root=$new_root"
+
+    cp "$cmdline" "${cmdline}.bak"
+    sed -i "s|root=[^ ]*|root=$new_root|" "$cmdline"
+
+    if ! grep -q "root=$new_root" "$cmdline"; then
+        log "cmdline.txt rewrite did not take, restoring backup"
+        cp "${cmdline}.bak" "$cmdline"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    sync
+
+    if [ -n "$mnt" ]; then
+        umount "$mnt" 2>/dev/null
+        rmdir "$mnt" 2>/dev/null || true
+    fi
+
+    log "Updated cmdline.txt"
     return 0
 }
 
@@ -558,12 +747,18 @@ main() {
     local success=false
     
     # Try methods in order of preference
+    # try_nvbootctrl sits FIRST: it self-gates on the nvbootctrl binary plus
+    # a documented "rootfs A/B enabled" check, so it can only ever fire on
+    # genuine Tegra/Jetson boards (BUG-239) — no risk of shadowing a more
+    # appropriate method elsewhere.
     # PARTUUID swapping is most reliable for Rockchip platforms.
     # try_systemd_boot_aba sits BEFORE try_fw_setenv deliberately: EFI ABA
     # boards self-identify via loader/entries, and letting them fall through
     # to fw_setenv would attempt a blind raw-offset env write that
     # systemd-boot never reads (false success / corruption hazard).
-    if try_partuuid_swap; then
+    if try_nvbootctrl; then
+        success=true
+    elif try_partuuid_swap; then
         success=true
     elif try_fat_boot_part; then
         success=true
@@ -574,6 +769,8 @@ main() {
     elif try_extlinux; then
         success=true
     elif try_uenv; then
+        success=true
+    elif try_cmdline_txt; then
         success=true
     fi
     
