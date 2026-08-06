@@ -1,0 +1,132 @@
+#!/bin/sh
+# OTAPulse State Script: ArtifactCommit_Enter (BUG-245)
+#
+# TWO-COPY FILE — keep byte-identical in both locations:
+#   (1) otapulse_testagent/framework/state_scripts/ArtifactCommit_Enter_01  [test-repo / artifact re-bake]
+#   (2) multiboard_yocto/sources/OTA-Pulse/meta-otapulse/recipes-core/soc-ota-agent/files/ArtifactCommit_Enter_01  [Yocto image build]
+# After editing either copy run:  scripts/check-state-script-sync.sh
+# The pre-commit hook enforces this automatically.
+#
+# Runs when the agent COMMITS an update — i.e. the new slot has booted and the
+# agent has confirmed it healthy. This is the ONLY place the RPi4 direct-boot
+# permanent cmdline.txt is ever rewritten now (see ArtifactReboot_Enter_01
+# section 1): the try boot itself never touches it, so an unverified/failed
+# try leaves the permanent config pointing at the OLD slot with no action
+# needed here at all.
+#
+# Same find_fat_boot / mount / cleanup pattern as ArtifactReboot_Enter_01 (sh,
+# not bash — runs under busybox/dash on-device).
+
+BOOT_PART_FILE="/data/ota/mender_boot_part"
+
+find_fat_boot() {
+    for dev in /dev/disk/by-partlabel/boot /dev/mmcblk*p1 /dev/nvme*n1p1 /dev/sd?1; do
+        [ -b "$dev" ] || continue
+        FSTYPE=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+        LABEL=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+        if [ "$FSTYPE" = "vfat" ] && [ "$LABEL" = "boot" ]; then
+            echo "$dev"; return 0
+        fi
+    done
+    return 1
+}
+
+FAT_DEV=$(find_fat_boot)
+if [ -z "$FAT_DEV" ]; then
+    echo "ArtifactCommit_Enter: No FAT boot partition found — nothing to do"
+    exit 0
+fi
+
+MNT="/tmp/.otapulse_commit_$$"
+mkdir -p "$MNT"
+if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
+    echo "ArtifactCommit_Enter: Failed to mount $FAT_DEV — nothing to do"
+    rmdir "$MNT" 2>/dev/null || true
+    exit 0
+fi
+
+cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; }
+
+# ── RPi4 direct-boot (VideoCore): promote the TRY boot to permanent ─────────
+if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FILE" ]; then
+    TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+    FAT_REAL=$(readlink -f "$FAT_DEV" 2>/dev/null || echo "$FAT_DEV")
+    DISK_PREFIX=$(printf '%s' "$FAT_REAL" | sed -E 's/[0-9]+$//')
+    EXPECTED_DEV="${DISK_PREFIX}${TARGET_PART}"
+
+    # Verify the CURRENTLY RUNNING root actually is the OTA target before
+    # committing anything. A commit from the wrong slot (e.g. this script
+    # somehow invoked without having actually booted the new slot) must fail
+    # loudly rather than silently promote the wrong device into cmdline.txt.
+    RUNNING_ROOT=$(grep -oE 'root=[^ ]+' /proc/cmdline 2>/dev/null | head -1 | sed -E 's/^root=//')
+    if [ -z "$RUNNING_ROOT" ]; then
+        RUNNING_ROOT=$(findmnt -n -o SOURCE / 2>/dev/null)
+    fi
+    RUNNING_ROOT_REAL=$(readlink -f "$RUNNING_ROOT" 2>/dev/null || echo "$RUNNING_ROOT")
+    EXPECTED_DEV_REAL=$(readlink -f "$EXPECTED_DEV" 2>/dev/null || echo "$EXPECTED_DEV")
+
+    if [ -z "$RUNNING_ROOT_REAL" ] || [ "$RUNNING_ROOT_REAL" != "$EXPECTED_DEV_REAL" ]; then
+        echo "ArtifactCommit_Enter: REFUSING commit — running root ($RUNNING_ROOT_REAL) does not match OTA target ($EXPECTED_DEV_REAL) from $BOOT_PART_FILE"
+        cleanup
+        exit 1
+    fi
+
+    # Preserve the OLD slot's cmdline (the one we're switching FROM — still
+    # what cmdline.txt holds right now, since the try boot never touched it)
+    # as a manual rollback breadcrumb, ONCE.
+    [ -f "$MNT/cmdline_prev.txt" ] || cp -f "$MNT/cmdline.txt" "$MNT/cmdline_prev.txt"
+
+    # Permanently point root= at the running (new) slot, using the ORIGINAL
+    # argument list — no rootdelay=20/panic=15 (those were TRY-only edits
+    # made by ArtifactReboot_Enter_01 to cmdline_tryboot.txt, never to this
+    # file).
+    CUR=$(cat "$MNT/cmdline.txt")
+    NEW=$(printf '%s' "$CUR" | sed -E "s#root=[^ ]+#root=${EXPECTED_DEV}#")
+    printf '%s\n' "$NEW" > "$MNT/cmdline.txt.new" && mv -f "$MNT/cmdline.txt.new" "$MNT/cmdline.txt"
+
+    # The try is now permanent — remove the TRY files so a stray reset can't
+    # re-trigger a tryboot into a now-stale TRY config.
+    rm -f "$MNT/tryboot.txt" "$MNT/cmdline_tryboot.txt"
+    sync
+    echo "ArtifactCommit_Enter: committed cmdline.txt root=${EXPECTED_DEV} on ${FAT_DEV} (prev saved to cmdline_prev.txt, try files removed)"
+    cleanup
+    exit 0
+fi
+
+# ── Dragon Q6A / systemd-boot: cheap self-heal, otapulse-boot-confirm owns
+#    the try-count reset ──────────────────────────────────────────────────
+if [ -d "$MNT/loader/entries" ]; then
+    RUNNING_SLOT=""
+    if grep -q 'root=PARTLABEL=rootfs_a' /proc/cmdline 2>/dev/null; then
+        RUNNING_SLOT="a"
+    elif grep -q 'root=PARTLABEL=rootfs_b' /proc/cmdline 2>/dev/null; then
+        RUNNING_SLOT="b"
+    fi
+
+    if [ -z "$RUNNING_SLOT" ]; then
+        echo "ArtifactCommit_Enter: systemd-boot platform but could not determine running slot from /proc/cmdline — nothing to do"
+        cleanup
+        exit 0
+    fi
+
+    if [ -f "$MNT/loader/loader.conf" ]; then
+        CURRENT_DEFAULT=$(grep -E '^default ' "$MNT/loader/loader.conf" 2>/dev/null | head -1)
+        if printf '%s' "$CURRENT_DEFAULT" | grep -q "slot-${RUNNING_SLOT}"; then
+            echo "ArtifactCommit_Enter: loader.conf default already points at running slot-${RUNNING_SLOT} (${CURRENT_DEFAULT}) — nothing to do"
+        else
+            sed -i "s/^default .*/default slot-${RUNNING_SLOT}*/" "$MNT/loader/loader.conf"
+            sync
+            echo "ArtifactCommit_Enter: self-heal — loader.conf default was '${CURRENT_DEFAULT}', repointed to running slot-${RUNNING_SLOT} (otapulse-boot-confirm.service owns the try-count reset)"
+        fi
+    else
+        echo "ArtifactCommit_Enter: systemd-boot platform but no loader.conf found — nothing to do"
+    fi
+    cleanup
+    exit 0
+fi
+
+# ── All other platforms: nothing to do. NEVER exit non-zero here — only the
+#    RPi4 wrong-slot guard above is allowed to fail the commit. ────────────
+echo "ArtifactCommit_Enter: not an RPi4 or systemd-boot platform — nothing to do"
+cleanup
+exit 0

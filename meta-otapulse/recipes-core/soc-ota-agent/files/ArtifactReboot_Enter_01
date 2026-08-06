@@ -5,35 +5,30 @@
 #   (1) otapulse_testagent/framework/state_scripts/ArtifactReboot_Enter_01  [test-repo / artifact re-bake]
 #   (2) multiboard_yocto/sources/OTA-Pulse/meta-otapulse/recipes-core/soc-ota-agent/files/ArtifactReboot_Enter_01  [Yocto image build]
 # Section 1 (RPi4 VideoCore boot) was previously diverged (test-repo kept the dead
-# tryboot one-shot); it is now ALIGNED (both permanent cmdline.txt rewrite) and IS
-# checked by the sync hook — leaving it diverged broke E2E-001 p3->p2 because the
-# test embeds THIS copy into its on-the-fly artifact (BUG-074).
+# tryboot one-shot); it is now ALIGNED and IS checked by the sync hook — leaving it
+# diverged broke E2E-001 p3->p2 because the test embeds THIS copy into its
+# on-the-fly artifact (BUG-074).
 # After editing either copy run:  scripts/check-state-script-sync.sh
 # The pre-commit hook enforces this automatically.
 #
 # Runs (from the incoming artifact) right after an OTA install, just before the
-# reboot. Two responsibilities, checked in order:
+# reboot. Responsibilities, checked in order:
 #
-# 1. RPi4 direct-boot (VideoCore) A/B slot switch: PERMANENTLY point the next boot
-#    at the new slot by rewriting root= in cmdline.txt, then plain-reboot. We mount
-#    the FAT boot partition EXPLICITLY (by label) and derive the target slot from
-#    /data/ota/mender_boot_part — we do NOT rely on /boot being mounted (it is not,
-#    in fstab). The firmware ALWAYS reads root= from cmdline.txt, so this reliably
-#    switches the slot.
-#      - cmdline_prev.txt   saved copy of the original cmdline (old slot) = manual
-#                           rollback target; otapulse-tryboot-commit removes it on
-#                           the first good boot of the new slot.
-#      - cmdline.txt        rewritten root=<new slot>.
-#    NOTE: this replaces the earlier VideoCore "tryboot" one-shot (reboot "0 tryboot"
-#    + tryboot.txt-as-config). That mechanism proved non-functional on this image —
-#    systemd's reboot did not engage tryboot and the device booted back to the
-#    original slot every time (BUG-074). Permanent rewrite trades firmware
-#    auto-rollback for a switch that actually takes; hardware auto-rollback would
-#    require an autoboot.txt tryboot_a_b two-boot-partition layout (separate change).
+# 1. RPi4 direct-boot (VideoCore) A/B slot switch (BUG-245): build a TRY
+#    configuration and reboot into it via the firmware's tryboot one-shot, WITHOUT
+#    touching the permanent config.txt/cmdline.txt. See the section-1 comment
+#    block below for the full history and rationale. The switch is made permanent
+#    later, by ArtifactCommit_Enter_01, only after the new slot has booted and the
+#    agent has confirmed it healthy.
 #
 # 2. FAT boot-env sync (iMX8MP and any boot.scr board): copy
 #    /data/ota/mender_boot_part to the FAT boot partition so U-Boot's boot.scr
 #    can read the target slot on the next boot.
+#
+# 3. extlinux.conf slot switch (Rockchip RK3588 U-Boot distroboot).
+#
+# 4. systemd-boot / EFI ABA slot switch (Dragon Q6A) — see BUG-245/BUG-097 note
+#    in that section: the OLD slot's entry is kept bootable as the fallback.
 
 BOOT_PART_FILE="/data/ota/mender_boot_part"
 
@@ -67,8 +62,55 @@ fi
 
 cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; }
 
-# ── 1. RPi4 direct-boot (VideoCore) permanent slot switch ───────────────────
+# ── 1. RPi4 direct-boot (VideoCore) tryboot one-shot, commit-after-verified-boot
+# ─────────────────────────────────────────────────────────────────────────────
 # VideoCore direct-boot platform = config.txt + cmdline.txt on the FAT boot part.
+#
+# HISTORY: this section used to PERMANENTLY rewrite cmdline.txt's root= at
+# install time (BUG-074 — an earlier tryboot attempt never actually engaged the
+# firmware one-shot on this image, so permanent-rewrite was adopted as the only
+# switch that reliably took). BUG-245: that scheme has no failure path — a
+# validly-signed but unbootable image bricks the board, because the switch is
+# committed before the new rootfs has ever booted, with no way back to the old
+# slot short of physically editing the SD card.
+#
+# NEW SCHEME (BUG-245): build a TRY configuration (tryboot.txt + cmdline_tryboot.txt)
+# that the VideoCore firmware boots via ITS OWN tryboot one-shot, entirely
+# without touching the permanent config.txt/cmdline.txt:
+#   - tryboot.txt        a copy of config.txt with `cmdline=cmdline_tryboot.txt`
+#                        (replacing any existing cmdline= line rather than
+#                        duplicating it).
+#   - cmdline_tryboot.txt the current cmdline.txt content with root= pointed at
+#                        the new slot, `rootwait` replaced by `rootdelay=20`,
+#                        and ` panic=15` appended if no panic= is already
+#                        present. rootwait waits forever for the root device —
+#                        it would hang the TRY boot instead of letting it fail
+#                        and reset; panic=15 turns a kernel panic into a reset,
+#                        which is what clears the firmware's one-shot flag and
+#                        falls back to config.txt/cmdline.txt (the OLD slot).
+#                        These TRY-only edits never reach the PERMANENT
+#                        cmdline.txt — ArtifactCommit_Enter_01 writes that from
+#                        the ORIGINAL argument list, unmodified.
+#
+# One-shot semantics this relies on: the firmware clears the tryboot flag on
+# ANY reset (panic, watchdog, power cycle). A failed try therefore boots
+# config.txt/cmdline.txt = the OLD slot on the very next boot; the agent there
+# finds an uncommitted update and rolls back — the deployment reports failed,
+# the device keeps running. A try that reaches a healthy, agent-confirmed boot
+# is made permanent by ArtifactCommit_Enter_01 (see that script), which is the
+# ONLY thing that ever writes to the permanent cmdline.txt again.
+#
+# NOTE for otapulse-tryboot-watchdog/otapulse-tryboot-commit (meta-custom
+# otapulse-rpi4-tryboot recipe, installed on raspberrypi4-64 only): those
+# services' "Role 2" (boot-count watchdog keyed on cmdline_prev.txt) is a real
+# safety net for step (c)'s LAST-RESORT fallback below, which still uses the old
+# permanent-rewrite + cmdline_prev.txt scheme. Their "Role 1" (promote
+# cmdline_tryboot.txt -> cmdline.txt as soon as tryboot.txt is seen at
+# basic.target) has been DISABLED as part of BUG-245 — it fired long before any
+# health check and would have permanently committed the TRY-only cmdline
+# arguments (rootdelay=20/panic=15) instead of leaving the commit to
+# ArtifactCommit_Enter_01. See that recipe's otapulse-tryboot-watchdog script
+# for the disabled block.
 if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FILE" ]; then
     TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
     if [ -n "$TARGET_PART" ] && grep -q 'root=' "$MNT/cmdline.txt"; then
@@ -81,25 +123,109 @@ if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FIL
         DISK_PREFIX=$(printf '%s' "$FAT_REAL" | sed -E 's/[0-9]+$//')
         TARGET_DEV="${DISK_PREFIX}${TARGET_PART}"
 
-        # Preserve the ORIGINAL cmdline (old slot) as a manual rollback target, ONCE
-        # (don't clobber a backup from an earlier write in this same OTA cycle).
-        [ -f "$MNT/cmdline_prev.txt" ] || cp -f "$MNT/cmdline.txt" "$MNT/cmdline_prev.txt"
+        # Build tryboot.txt from config.txt, pointing its cmdline= at the TRY file.
+        if grep -q '^cmdline=' "$MNT/config.txt" 2>/dev/null; then
+            sed -E 's/^cmdline=.*/cmdline=cmdline_tryboot.txt/' "$MNT/config.txt" > "$MNT/tryboot.txt.new"
+        else
+            cp -f "$MNT/config.txt" "$MNT/tryboot.txt.new"
+            printf 'cmdline=cmdline_tryboot.txt\n' >> "$MNT/tryboot.txt.new"
+        fi
+        mv -f "$MNT/tryboot.txt.new" "$MNT/tryboot.txt"
 
-        # Permanently point root= at the new slot. The firmware always honours
-        # cmdline.txt, so the next boot lands on the new slot.
+        # Build cmdline_tryboot.txt: TRY-only argument list (see comment block above).
         CUR=$(cat "$MNT/cmdline.txt")
         NEW=$(printf '%s' "$CUR" | sed -E "s#root=[^ ]+#root=${TARGET_DEV}#")
-        printf '%s\n' "$NEW" > "$MNT/cmdline.txt.new" && mv -f "$MNT/cmdline.txt.new" "$MNT/cmdline.txt"
-
-        # Remove any stale files from the abandoned tryboot one-shot scheme so the
-        # firmware can't pick them up.
-        rm -f "$MNT/tryboot.txt" "$MNT/cmdline_tryboot.txt"
+        NEW=$(printf '%s' "$NEW" | sed -E 's/(^| )rootwait( |$)/\1rootdelay=20\2/')
+        case " $NEW " in
+            *' panic='*) : ;;
+            *) NEW="$NEW panic=15" ;;
+        esac
+        printf '%s\n' "$NEW" > "$MNT/cmdline_tryboot.txt"
         sync
-        echo "ArtifactReboot_Enter: switched cmdline.txt root=${TARGET_DEV} on ${FAT_DEV} (prev saved to cmdline_prev.txt)"
+
+        echo "ArtifactReboot_Enter: built tryboot.txt/cmdline_tryboot.txt for root=${TARGET_DEV} on ${FAT_DEV} (permanent cmdline.txt left untouched; see ArtifactCommit_Enter_01)"
         cleanup
-        # Plain reboot — the firmware reads the rewritten cmdline.txt → new slot.
-        # nohup+sleep so the agent can log the state transition first.
-        nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &
+
+        # Defer the reboot attempts so the agent can log the state transition first
+        # (existing pattern). The whole retry chain runs from a standalone script
+        # file (rather than inline in this nohup command) to avoid fragile nested
+        # quoting around the embedded python3 fallback — everything still runs
+        # inside the deferred shell so ordering is preserved even though a
+        # successful tryboot never returns.
+        DEFER="/tmp/.otapulse_reboot_defer_$$.sh"
+        cat > "$DEFER" <<'DEFER_EOF'
+#!/bin/sh
+sleep 2
+
+# (a) systemd >= 246: --reboot-argument reaches the reboot(2) syscall as the
+#     RESTART2 string "0 tryboot", which the VideoCore firmware reads to engage
+#     its one-shot tryboot. systemctl reboot RETURNS 0 IMMEDIATELY once the
+#     request is accepted -- the actual reboot happens asynchronously as
+#     systemd tears the system down cleanly. That is success, not "did not
+#     return" -- falling through to (b)/(c) after a successful (a) would race
+#     the in-flight clean shutdown with a raw unclean reboot (b) or, worse,
+#     let (c) permanently rewrite cmdline.txt and delete tryboot.txt while a
+#     tryboot is already armed and mid-teardown, which can silently commit
+#     the switch with firmware auto-rollback disarmed. So: a ZERO exit from
+#     (a) means the clean reboot is in flight -- stop here and just wait to be
+#     killed by it. Only a NON-ZERO exit (rejected/unavailable) may fall
+#     through to (b).
+if systemctl reboot --reboot-argument="0 tryboot" 2>/dev/null; then
+    sleep 60
+    exit 0
+fi
+
+# (b) Bypass systemd entirely: issue the reboot(2) syscall directly via python3
+#     ctypes (python3 is present on these images). Same RESTART2 "0 tryboot"
+#     argument as (a). Only reached if (a) is unavailable or was rejected.
+#     glibc's reboot() wrapper only exposes the simple RB_* command set, not
+#     the 4-argument raw syscall RESTART2 needs, so this calls syscall()
+#     directly with a per-arch __NR_reboot number; unknown arches are skipped
+#     (falls through to (c)) rather than guessing.
+#     Unlike systemctl reboot, the raw RESTART2 syscall does NOT sync
+#     filesystems or stop services first -- it is immediate and unclean. The
+#     agent has just written mender-store state under /data and this script
+#     just wrote the FAT try files, so force a sync (and give it a moment to
+#     land) right before issuing it, or unsynced pages can be lost and desync
+#     the agent's state machine across the try boot. This path is a
+#     best-effort fallback only -- (a) is the clean path.
+sync
+sleep 1
+python3 -c '
+import ctypes, ctypes.util, platform
+_SYS_REBOOT = {"aarch64": 142, "armv7l": 88, "armv6l": 88, "x86_64": 169, "i686": 88}
+_nr = _SYS_REBOOT.get(platform.machine())
+if _nr is not None:
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    libc.syscall(ctypes.c_long(_nr), ctypes.c_uint32(0xfee1dead), ctypes.c_uint32(0x28121969),
+                 ctypes.c_uint32(0xA1B2C3D4), b"0 tryboot")
+' 2>/dev/null
+
+# (c) LAST RESORT: neither (a) nor (b) engaged tryboot. Fall back to the exact
+#     pre-BUG-245 behavior -- permanently rewrite cmdline.txt (with
+#     cmdline_prev.txt save) and plain-reboot. Firmware auto-rollback is NOT
+#     armed for this update, but the switch still takes -- this can never
+#     regress a switch that used to succeed before BUG-245.
+logger -t otapulse-reboot-enter "tryboot engagement failed -- LAST RESORT permanent cmdline.txt rewrite, firmware auto-rollback NOT armed for this update" 2>/dev/null
+
+MNT2="/tmp/.otapulse_fat_fallback_$$"
+mkdir -p "$MNT2"
+if mount "__FAT_DEV__" "$MNT2" 2>/dev/null; then
+    [ -f "$MNT2/cmdline_prev.txt" ] || cp -f "$MNT2/cmdline.txt" "$MNT2/cmdline_prev.txt"
+    CUR2=$(cat "$MNT2/cmdline.txt")
+    NEW2=$(printf '%s' "$CUR2" | sed -E "s#root=[^ ]+#root=__TARGET_DEV__#")
+    printf '%s\n' "$NEW2" > "$MNT2/cmdline.txt.new" && mv -f "$MNT2/cmdline.txt.new" "$MNT2/cmdline.txt"
+    rm -f "$MNT2/tryboot.txt" "$MNT2/cmdline_tryboot.txt"
+    sync
+    umount "$MNT2" 2>/dev/null
+fi
+rmdir "$MNT2" 2>/dev/null
+
+reboot
+DEFER_EOF
+        sed -i "s#__FAT_DEV__#${FAT_DEV}#g; s#__TARGET_DEV__#${TARGET_DEV}#g" "$DEFER"
+        chmod +x "$DEFER"
+        nohup sh "$DEFER" >/dev/null 2>&1 &
         exit 0
     fi
 fi
@@ -167,10 +293,20 @@ fi
 # ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────
 # UEFI + systemd-boot Automatic Boot Assessment: loader/entries/ holds
 # slot-a+N.conf and/or slot-b+N.conf. The +N suffix is the remaining boot-count;
-# systemd-boot selects the entry with the highest positive count. To switch slots:
-# exhaust the current slot entry (rename to +0 — systemd-boot skips +0 entries)
-# and restore/create the target slot entry with +3 tries. otapulse-boot-confirm
-# resets the winning entry to +3 on every successful boot (no extra work here).
+# systemd-boot selects the entry with the highest positive count. otapulse-boot-
+# confirm resets the winning entry back to +3 on every successful boot.
+#
+# BUG-245/BUG-097: this section used to EXHAUST the current (old) slot's entry
+# (rename it to +0) before pointing `default` at the target. That leaves BOTH
+# entries bad if the target's 3 tries all fail — systemd-boot has no good entry
+# left to fall back to, and the board bricks (the documented RB-004/BP-001 brick
+# history). The old slot is, by definition, the one currently running and known
+# bootable; it MUST remain the fallback. So: create/restore the target entry at
+# +3 and repoint `default` at it (that alone selects the new slot among GOOD
+# entries), but leave the current entry's try-count exactly as found (restoring
+# it to +3 only if some earlier version of this script, or an interrupted OTA,
+# left it at +0). After 3 failed tries of the target, systemd-boot's Automatic
+# Boot Assessment excludes it and falls back to the still-good old entry.
 if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
     TARGET_PART=$(cat "$BOOT_PART_FILE")
     PART_B=""
@@ -191,9 +327,16 @@ if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
     TARGET_CONF=$(find "$ENTRIES" -maxdepth 1 -name "slot-${TARGET_SLOT}+*.conf" 2>/dev/null \
                   | sort -r | head -1)
     if [ -n "$CURRENT_CONF" ]; then
-        # Exhaust current slot: rename to +0 (systemd-boot will not select a +0 entry)
-        CURRENT_0="$ENTRIES/slot-${CURRENT_SLOT}+0.conf"
-        [ "$CURRENT_CONF" != "$CURRENT_0" ] && mv "$CURRENT_CONF" "$CURRENT_0"
+        # Keep the current (old) slot bootable: restore it to +3 if it is
+        # sitting at +0 for any reason, otherwise leave its count as found.
+        # Never exhaust it here — see the section comment above (BUG-245).
+        CURRENT_3="$ENTRIES/slot-${CURRENT_SLOT}+3.conf"
+        if [ "$CURRENT_CONF" != "$CURRENT_3" ]; then
+            OLD_NAME=$(basename "$CURRENT_CONF")
+            mv "$CURRENT_CONF" "$CURRENT_3"
+            CURRENT_CONF="$CURRENT_3"
+            echo "ArtifactReboot_Enter: restored current slot-${CURRENT_SLOT} entry to +3 (was ${OLD_NAME})"
+        fi
         TARGET_3="$ENTRIES/slot-${TARGET_SLOT}+3.conf"
         if [ -n "$TARGET_CONF" ]; then
             # Target entry already exists (e.g. +0 left from an earlier reverse OTA) — restore to +3
@@ -201,7 +344,7 @@ if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
         else
             # No target entry yet — generate from the current template, swapping root=PARTLABEL=
             sed "s/root=PARTLABEL=${CURRENT_LABEL}/root=PARTLABEL=${TARGET_LABEL}/g" \
-                "$CURRENT_0" > "$TARGET_3"
+                "$CURRENT_CONF" > "$TARGET_3"
         fi
         sync
         # systemd-boot honours loader.conf's `default` pin OVER the ABA try-counts,
@@ -210,7 +353,7 @@ if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
             sed -i "s/^default .*/default slot-${TARGET_SLOT}*/" "$MNT/loader/loader.conf"
             sync
         fi
-        echo "ArtifactReboot_Enter: EFI ABA -> slot-${TARGET_SLOT}+3.conf (root=PARTLABEL=${TARGET_LABEL})"
+        echo "ArtifactReboot_Enter: EFI ABA -> slot-${TARGET_SLOT}+3.conf (root=PARTLABEL=${TARGET_LABEL}), old slot-${CURRENT_SLOT} kept bootable as fallback (BUG-245)"
     else
         echo "ArtifactReboot_Enter: EFI ABA: no slot-${CURRENT_SLOT}+*.conf in loader/entries — skip"
     fi

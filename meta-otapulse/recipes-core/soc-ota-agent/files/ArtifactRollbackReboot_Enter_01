@@ -21,6 +21,14 @@
 # chain used on install, so every supported boot-media scheme gets reverted
 # symmetrically with the forward path.
 #
+# BUG-245: switch-boot-slot.sh (u-boot-env-config) only ever updates the
+# file-based /data/ota/ markers — it does not touch RPi4's cmdline.txt or
+# Dragon Q6A's systemd-boot loader.conf/entries, the same two boot-media
+# schemes ArtifactReboot_Enter_01 has to handle directly by mounting the FAT
+# boot partition itself. So this script now does the same for the ROLLBACK
+# direction, in addition to (not instead of) the generic switch-boot-slot.sh
+# call above. See the two new sections below.
+#
 # Hardware/arch independent: derives the target slot letter from GPT partlabels
 # (rootfs_a/rootfs_b) only, never hardcodes a board, bus, or partition number.
 # No-ops cleanly if switch-boot-slot.sh is absent (boards that don't ship
@@ -33,38 +41,144 @@ log() {
 
 BOOT_PART_FILE="/data/ota/mender_boot_part"
 
-if [ ! -x /usr/sbin/switch-boot-slot.sh ]; then
-    log "switch-boot-slot.sh not present, nothing to do"
-    exit 0
-fi
+if [ -x /usr/sbin/switch-boot-slot.sh ] && [ -f "$BOOT_PART_FILE" ]; then
+    TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+    if [ -n "$TARGET_PART" ]; then
+        PART_B=""
+        if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+            PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+        fi
 
-if [ ! -f "$BOOT_PART_FILE" ]; then
-    log "no $BOOT_PART_FILE, nothing to do"
-    exit 0
-fi
+        if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+            TARGET_SLOT="B"
+        else
+            TARGET_SLOT="A"
+        fi
 
-TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
-if [ -z "$TARGET_PART" ]; then
-    log "$BOOT_PART_FILE is empty, nothing to do"
-    exit 0
-fi
-
-PART_B=""
-if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
-    PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
-fi
-
-if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
-    TARGET_SLOT="B"
+        log "reverting boot media to slot $TARGET_SLOT (partition $TARGET_PART) via switch-boot-slot.sh"
+        /usr/sbin/switch-boot-slot.sh "$TARGET_SLOT"
+        RESULT=$?
+        if [ $RESULT -ne 0 ]; then
+            log "switch-boot-slot.sh returned $RESULT (some methods may not apply to this board's boot scheme; continuing)"
+        fi
+    else
+        log "$BOOT_PART_FILE is empty, skipping switch-boot-slot.sh"
+    fi
 else
-    TARGET_SLOT="A"
+    log "switch-boot-slot.sh not present or no $BOOT_PART_FILE recorded, skipping generic revert"
 fi
 
-log "reverting boot media to slot $TARGET_SLOT (partition $TARGET_PART) via switch-boot-slot.sh"
-/usr/sbin/switch-boot-slot.sh "$TARGET_SLOT"
-RESULT=$?
-if [ $RESULT -ne 0 ]; then
-    log "switch-boot-slot.sh returned $RESULT (some methods may not apply to this board's boot scheme; continuing)"
+# ── RPi4 / Dragon Q6A: mount the FAT boot partition directly (BUG-245) ──────
+# switch-boot-slot.sh above does not cover either of these boot-media schemes;
+# same find_fat_boot/mount/cleanup pattern as ArtifactReboot_Enter_01 and
+# ArtifactCommit_Enter_01 (sh, not bash).
+if [ ! -f "$BOOT_PART_FILE" ]; then
+    log "no $BOOT_PART_FILE, nothing more to do"
+    exit 0
 fi
 
+find_fat_boot() {
+    for dev in /dev/disk/by-partlabel/boot /dev/mmcblk*p1 /dev/nvme*n1p1 /dev/sd?1; do
+        [ -b "$dev" ] || continue
+        FSTYPE=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+        LABEL=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+        if [ "$FSTYPE" = "vfat" ] && [ "$LABEL" = "boot" ]; then
+            echo "$dev"; return 0
+        fi
+    done
+    return 1
+}
+
+FAT_DEV=$(find_fat_boot)
+if [ -z "$FAT_DEV" ]; then
+    log "no FAT boot partition found, nothing more to do"
+    exit 0
+fi
+
+MNT="/tmp/.otapulse_rollback_fat_$$"
+mkdir -p "$MNT"
+if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
+    log "WARNING: failed to mount $FAT_DEV, nothing more to do"
+    rmdir "$MNT" 2>/dev/null || true
+    exit 0
+fi
+
+cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; }
+
+# ── RPi4 direct-boot (VideoCore) rollback ────────────────────────────────────
+if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ]; then
+    TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+    if [ -n "$TARGET_PART" ]; then
+        FAT_REAL=$(readlink -f "$FAT_DEV" 2>/dev/null || echo "$FAT_DEV")
+        DISK_PREFIX=$(printf '%s' "$FAT_REAL" | sed -E 's/[0-9]+$//')
+        ROLLBACK_DEV="${DISK_PREFIX}${TARGET_PART}"
+        ROLLBACK_DEV_REAL=$(readlink -f "$ROLLBACK_DEV" 2>/dev/null || echo "$ROLLBACK_DEV")
+
+        CUR_ROOT=$(grep -oE 'root=[^ ]+' "$MNT/cmdline.txt" 2>/dev/null | head -1 | sed -E 's/^root=//')
+        CUR_ROOT_REAL=$(readlink -f "$CUR_ROOT" 2>/dev/null || echo "$CUR_ROOT")
+
+        if [ -n "$CUR_ROOT_REAL" ] && [ "$CUR_ROOT_REAL" = "$ROLLBACK_DEV_REAL" ]; then
+            # Uncommitted case: the failed update was only ever tried via the
+            # tryboot one-shot (ArtifactReboot_Enter_01 section 1) — cmdline.txt
+            # was never touched and already points at the rollback target.
+            # Removing the TRY files IS the rollback.
+            rm -f "$MNT/tryboot.txt" "$MNT/cmdline_tryboot.txt"
+            sync
+            log "cmdline.txt already points at rollback target ${ROLLBACK_DEV} — removed leftover tryboot TRY files, nothing else to revert"
+        else
+            # Committed case: cmdline.txt currently points at the FAILED target
+            # (a commit already happened — via ArtifactCommit_Enter_01, or via
+            # ArtifactReboot_Enter_01's LAST-RESORT permanent-rewrite fallback).
+            # Restore it.
+            if [ -f "$MNT/cmdline_prev.txt" ]; then
+                cp -f "$MNT/cmdline_prev.txt" "$MNT/cmdline.txt.new" && mv -f "$MNT/cmdline.txt.new" "$MNT/cmdline.txt"
+                rm -f "$MNT/cmdline_prev.txt"
+                log "restored cmdline.txt from cmdline_prev.txt (was committed to the failed target ${CUR_ROOT_REAL})"
+            else
+                # No breadcrumb available — rewrite root= directly to the
+                # rollback target recorded in mender_boot_part, which
+                # Rollback() has already set to the old/rollback partition by
+                # the time this state fires (see file header).
+                NEW=$(sed -E "s#root=[^ ]+#root=${ROLLBACK_DEV}#" "$MNT/cmdline.txt")
+                printf '%s\n' "$NEW" > "$MNT/cmdline.txt.new" && mv -f "$MNT/cmdline.txt.new" "$MNT/cmdline.txt"
+                log "no cmdline_prev.txt breadcrumb — rewrote cmdline.txt root=${ROLLBACK_DEV} directly from ${BOOT_PART_FILE}"
+            fi
+            rm -f "$MNT/tryboot.txt" "$MNT/cmdline_tryboot.txt"
+            sync
+        fi
+    fi
+fi
+
+# ── Dragon Q6A / systemd-boot EFI ABA rollback ───────────────────────────────
+if [ -d "$MNT/loader/entries" ]; then
+    TARGET_PART=$(cat "$BOOT_PART_FILE" 2>/dev/null)
+    PART_B=""
+    if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+        PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
+    fi
+    if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
+        RB_SLOT="b"; RB_LABEL="rootfs_b"
+    else
+        RB_SLOT="a"; RB_LABEL="rootfs_a"
+    fi
+
+    ENTRIES="$MNT/loader/entries"
+    RB_CONF=$(find "$ENTRIES" -maxdepth 1 -name "slot-${RB_SLOT}+*.conf" 2>/dev/null | sort -r | head -1)
+    RB_3="$ENTRIES/slot-${RB_SLOT}+3.conf"
+    if [ -n "$RB_CONF" ]; then
+        # Ensure the rollback-target slot's entry is bootable (+3), and repoint
+        # default at it — mirrors ArtifactReboot_Enter_01 section 4's
+        # BUG-245/BUG-097 fallback reasoning, just in the rollback direction.
+        [ "$RB_CONF" != "$RB_3" ] && mv "$RB_CONF" "$RB_3"
+        if [ -f "$MNT/loader/loader.conf" ]; then
+            sed -i "s/^default .*/default slot-${RB_SLOT}*/" "$MNT/loader/loader.conf"
+        fi
+        sync
+        log "Dragon EFI ABA rollback -> slot-${RB_SLOT}+3.conf (root=PARTLABEL=${RB_LABEL}) restored as default"
+    else
+        log "Dragon EFI ABA rollback: no slot-${RB_SLOT}+*.conf found in loader/entries — skip"
+    fi
+fi
+
+cleanup
 exit 0

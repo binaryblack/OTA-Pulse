@@ -67,6 +67,7 @@ SRC_URI = " \
     file://soc-ota-provision \
     file://ArtifactReboot_Enter_01 \
     file://ArtifactRollbackReboot_Enter_01 \
+    file://ArtifactCommit_Enter_01 \
 "
 
 # Signature verification configuration.
@@ -264,6 +265,14 @@ do_install() {
     # does not call. Self-gates on /usr/sbin/switch-boot-slot.sh being present
     # and on there being a recorded rollback target; see the script header.
     install -m 0755 ${FILESDIR}/ArtifactRollbackReboot_Enter_01 ${D}${datadir}/otapulse/state-scripts/ArtifactRollbackReboot_Enter_01
+
+    # BUG-245: ArtifactCommit_Enter_01 makes the RPi4/Dragon Q6A slot switch
+    # permanent ONLY after the new slot has booted and the agent has decided
+    # to commit (i.e. this state fires). ArtifactReboot_Enter_01's RPi4
+    # section 1 no longer rewrites the permanent cmdline.txt itself -- it
+    # boots the new slot via the firmware tryboot one-shot instead, so an
+    # unverified/failed try never touches the permanent config at all.
+    install -m 0755 ${FILESDIR}/ArtifactCommit_Enter_01 ${D}${datadir}/otapulse/state-scripts/ArtifactCommit_Enter_01
 
     # Install identity script (to new OTAPulse path with new naming)
     install -d ${D}${datadir}/otapulse/identity
