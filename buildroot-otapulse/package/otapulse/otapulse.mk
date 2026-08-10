@@ -415,13 +415,16 @@ OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_TUNNELD
 endif
 
 # ==============================================================================
-# Shell-access layer installation (sudoers allowlist + gateway key) — BUG-215
+# Shell-access layer installation (sudoers allowlist + gateway key) — BUG-215,
+# extended with the root/elevated-tier key — BUG-262/BUG-276
 # ==============================================================================
 # Mirrors meta-otapulse/recipes-core/soc-shell-access/soc-shell-access_1.0.0.bb
 # do_install(). The 'support' user itself is created by OTAPULSE_USERS above
 # (processed by Buildroot's mkusers at rootfs-finalize time, which also
 # chowns /home/support and everything under it to support:support — so no
-# explicit chown is needed here for the .ssh files below).
+# explicit chown is needed here for the .ssh files below). Step 4 below adds
+# the elevated/break-glass tier's root key, which BUG-215 never covered
+# (it was explicitly support-tier-only in scope).
 ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
 define OTAPULSE_INSTALL_SHELL_ACCESS
 	# ------------------------------------------------------------------
@@ -465,6 +468,26 @@ define OTAPULSE_INSTALL_SHELL_ACCESS
 	$(INSTALL) -d -m 0700 $(TARGET_DIR)/home/support/.ssh
 	$(INSTALL) -m 0600 $(OTAPULSE_PKGDIR)/gateway-authorized-key \
 		$(TARGET_DIR)/home/support/.ssh/authorized_keys
+
+	# ------------------------------------------------------------------
+	# 4. Root (elevated/break-glass tier) authorized key — BUG-262/BUG-276.
+	#    The gateway's elevated_ssh_user/breakglass_ssh_user both default
+	#    to "root" (socMonitoring/server/gateway/app/config.py), and it
+	#    presents the SAME key as 'support' (gateway_ssh_key_path is one
+	#    key for all three tiers — only the target username differs). This
+	#    was never wired for Buildroot: BUG-215's shell-access layer above
+	#    was explicitly support-tier-only in scope, so an elevated-tier
+	#    session on a Buildroot board had no credential to authenticate
+	#    against, ever (confirmed via BUG-262's investigation — not a
+	#    regression, a gap that predates this fix). /root already exists
+	#    (Buildroot's target skeleton, root:root, 0700) so no directory
+	#    ownership fixup is needed beyond creating .ssh under it.
+	#    0700/0600, same rationale as support's: authorized_keys must not
+	#    be group/world-readable, doubly so for root's.
+	# ------------------------------------------------------------------
+	$(INSTALL) -d -m 0700 $(TARGET_DIR)/root/.ssh
+	$(INSTALL) -m 0600 $(OTAPULSE_PKGDIR)/gateway-authorized-key \
+		$(TARGET_DIR)/root/.ssh/authorized_keys
 endef
 OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_SHELL_ACCESS
 endif
