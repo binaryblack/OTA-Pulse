@@ -12,5 +12,10 @@ tmpfs                /var/volatile        tmpfs      defaults              0  0
 # Uses GPT partition label for auto-detection across all platforms (eMMC, SD, NVMe, virtio).
 # nofail: boot continues even if data partition doesn't exist yet (first boot before
 #         otapulse-partition-setup creates it on dynamic-partition images).
-# x-systemd.device-timeout=10: don't wait too long if partition is missing.
-/dev/disk/by-partlabel/data  /data  ext4  defaults,nofail,x-systemd.device-timeout=10  0  2
+# x-systemd.device-timeout=60: BUG-281 — 10s lost the udev-coldplug race for the
+#         by-partlabel alias on slow SD first boots (symlink appeared moments after
+#         the unit's 10s timeout), failing data.mount and forcing the
+#         otapulse-partition-setup rescue branch to run with /data unmounted. 60s
+#         stays bounded and nofail still keeps boot alive if the partition is truly
+#         absent.
+/dev/disk/by-partlabel/data  /data  ext4  defaults,nofail,x-systemd.device-timeout=60  0  2

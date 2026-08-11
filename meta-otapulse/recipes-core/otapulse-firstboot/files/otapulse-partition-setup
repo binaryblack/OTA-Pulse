@@ -361,7 +361,10 @@ setup_data_partition_static_gpt() {
     # /data entry. nofail + a bounded device-timeout keep boot from hanging
     # if the device is ever briefly unavailable.
     sed -i '/^[^#].* \/data /d' /etc/fstab
-    echo "/dev/disk/by-partlabel/$partlabel /data ext4 defaults,nofail,x-systemd.device-timeout=10 0 0" >> /etc/fstab
+    # BUG-281: 10s device-timeout lost the udev-coldplug race on slow SD first
+    # boots; 60s matches the fstab template's timeout (nofail still keeps boot
+    # alive if the partition is genuinely absent).
+    echo "/dev/disk/by-partlabel/$partlabel /data ext4 defaults,nofail,x-systemd.device-timeout=60 0 0" >> /etc/fstab
     log "Updated /etc/fstab: removed stale /data entries, added $partlabel partition mount"
 
     return 0

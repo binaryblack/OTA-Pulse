@@ -59,6 +59,10 @@ type statusType struct {
 	Status  string
 	Aborted bool
 	Called  bool
+	// RespondCode, when non-zero, makes statusReq answer with this exact
+	// HTTP status instead of the normal Aborted/success logic. Used to
+	// exercise BUG-283's 404/410/other-error handling in tests.
+	RespondCode int
 }
 
 type logType struct {
@@ -366,6 +370,11 @@ func (cts *ClientTestServer) statusReq(w http.ResponseWriter, r *http.Request, i
 	}
 
 	if !cts.verifyAuth(w, r) {
+		return
+	}
+
+	if cts.Status.RespondCode != 0 {
+		w.WriteHeader(cts.Status.RespondCode)
 		return
 	}
 

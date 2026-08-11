@@ -81,6 +81,19 @@ func (u *StatusClient) Report(api ApiRequester, url string, report StatusReport)
 	case r.StatusCode == http.StatusConflict:
 		log.Warnf("Status report rejected, deployment aborted at the backend")
 		return NewAPIError(ErrDeploymentAborted, r)
+	case r.StatusCode == http.StatusNotFound || r.StatusCode == http.StatusGone:
+		// BUG-283: a deployment that the backend no longer knows about (404,
+		// or 410 for backends that answer deletions explicitly) can never
+		// come back. Treat it the same as an explicit abort (409) instead of
+		// a transient error, so the caller marks the update
+		// failed/aborted locally and stops retrying, rather than burning the
+		// sending-attempt budget on a report that will never succeed.
+		log.Warnf(
+			"Status report for deployment %s: deployment gone server-side "+
+				"(HTTP %v) — treating as aborted, not retrying",
+			report.DeploymentID, r.StatusCode,
+		)
+		return NewAPIError(ErrDeploymentAborted, r)
 	case r.StatusCode != http.StatusNoContent:
 		log.Errorf("Got unexpected HTTP status when reporting status: %v", r.StatusCode)
 		return NewAPIError(errors.Errorf("reporting status failed, bad status %v", r.StatusCode), r)

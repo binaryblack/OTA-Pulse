@@ -36,3 +36,55 @@ func TestMenderState(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, MenderStateInit, s)
 }
+
+// TestUpdateInfoStatusReportRetryAttemptsRoundTrip covers BUG-283's
+// persisted sending-attempt budget: the field must round-trip through the
+// same JSON marshal/unmarshal path used by StoreStateData/LoadStateData.
+func TestUpdateInfoStatusReportRetryAttemptsRoundTrip(t *testing.T) {
+	orig := UpdateInfo{
+		ID:                        "deployment-1",
+		StatusReportRetryAttempts: 7,
+	}
+
+	data, err := json.Marshal(StateData{
+		Version:    StateDataVersion,
+		Name:       MenderStateStatusReportRetry,
+		UpdateInfo: orig,
+	})
+	assert.NoError(t, err)
+
+	var restored StateData
+	err = json.Unmarshal(data, &restored)
+	assert.NoError(t, err)
+	assert.Equal(t, 7, restored.UpdateInfo.StatusReportRetryAttempts)
+}
+
+// TestUpdateInfoStatusReportRetryAttemptsBackwardCompat covers BUG-283's
+// backward-compatibility requirement: state data persisted by an agent
+// build that predates this field (and therefore never wrote it) must still
+// load, with the new field defaulting to zero rather than erroring or
+// leaving garbage.
+func TestUpdateInfoStatusReportRetryAttemptsBackwardCompat(t *testing.T) {
+	// A pre-fix StateData blob for an update-retry-report state, built by
+	// hand to guarantee it has no "StatusReportRetryAttempts" key at all
+	// (not just a zero value) -- this is what an old agent's datastore
+	// actually contains.
+	preFixBlob := []byte(`{
+		"Version": 2,
+		"Name": "update-retry-report",
+		"UpdateInfo": {
+			"Artifact": {"PayloadTypes": ["rootfs-image"]},
+			"ID": "deployment-1",
+			"RebootRequested": ["reboot-type-custom"],
+			"SupportsRollback": "rollback-supported",
+			"StateDataStoreCount": 3,
+			"HasDBSchemaUpdate": false
+		}
+	}`)
+
+	var restored StateData
+	err := json.Unmarshal(preFixBlob, &restored)
+	assert.NoError(t, err)
+	assert.Equal(t, "deployment-1", restored.UpdateInfo.ID)
+	assert.Equal(t, 0, restored.UpdateInfo.StatusReportRetryAttempts)
+}
