@@ -297,6 +297,15 @@ type UpdateInfo struct {
 	// data and discover that it is a different version. See also the
 	// StateDataKeyUncommitted key.
 	HasDBSchemaUpdate bool
+
+	// How many status-report sending attempts have already been spent from
+	// the updateStatusReportRetryState maxSendingAttempts() budget (see
+	// app/state.go). Persisted so that a service restart while wedged in
+	// update-status-report/update-retry-report resumes counting instead of
+	// resetting to zero, which would otherwise extend the wedge on every
+	// restart (BUG-283). Absent in state data written before this field
+	// existed, which decodes to the zero value.
+	StatusReportRetryAttempts int
 }
 
 func (ur *UpdateInfo) CompatibleDevices() []string {

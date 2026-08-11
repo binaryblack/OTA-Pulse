@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path"
 	"syscall"
@@ -412,6 +413,55 @@ func TestMenderReportStatus(t *testing.T) {
 	)
 	assert.NotNil(t, err)
 	assert.True(t, err.IsFatal())
+
+	// 4. BUG-283: deployment was deleted server-side (404) — treated as
+	// permanent/aborted, same as an explicit 409, not a transient error
+	// that would keep retrying against a deployment that can never come
+	// back.
+	srv.Reset()
+	srv.Auth.Authorize = true
+	srv.Auth.Token = []byte("tokendata")
+	srv.Auth.Verify = true
+	srv.Status.RespondCode = http.StatusNotFound
+	err = mender.ReportUpdateStatus(
+		&datastore.UpdateInfo{
+			ID: "foobar",
+		},
+		client.StatusSuccess,
+	)
+	assert.NotNil(t, err)
+	assert.True(t, err.IsFatal())
+
+	// 5. BUG-283: same for 410 Gone.
+	srv.Reset()
+	srv.Auth.Authorize = true
+	srv.Auth.Token = []byte("tokendata")
+	srv.Auth.Verify = true
+	srv.Status.RespondCode = http.StatusGone
+	err = mender.ReportUpdateStatus(
+		&datastore.UpdateInfo{
+			ID: "foobar",
+		},
+		client.StatusSuccess,
+	)
+	assert.NotNil(t, err)
+	assert.True(t, err.IsFatal())
+
+	// 6. A 500 remains transient — behavior unchanged, still retried by
+	// callers (IsFatal() == false).
+	srv.Reset()
+	srv.Auth.Authorize = true
+	srv.Auth.Token = []byte("tokendata")
+	srv.Auth.Verify = true
+	srv.Status.RespondCode = http.StatusInternalServerError
+	err = mender.ReportUpdateStatus(
+		&datastore.UpdateInfo{
+			ID: "foobar",
+		},
+		client.StatusSuccess,
+	)
+	assert.NotNil(t, err)
+	assert.False(t, err.IsFatal())
 }
 
 func TestMenderLogUpload(t *testing.T) {

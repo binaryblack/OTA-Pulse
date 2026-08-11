@@ -417,7 +417,7 @@ func (i *initState) getNextState(ctx *StateContext, sd *datastore.StateData,
 	case datastore.MenderStateUpdateStatusReport,
 		datastore.MenderStateStatusReportRetry:
 
-		return NewUpdateStatusReportState(&sd.UpdateInfo, client.StatusFailure), false
+		return newResumedUpdateStatusReportState(&sd.UpdateInfo, client.StatusFailure), false
 
 	// Historical state. This state is not used anymore in current
 	// clients. In the past it was used at the very end of the update
@@ -1451,6 +1451,21 @@ func NewUpdateStatusReportState(update *datastore.UpdateInfo, status string) Sta
 	}
 }
 
+// newResumedUpdateStatusReportState is like NewUpdateStatusReportState, but
+// used specifically when resuming update-status-report/update-retry-report
+// after a service restart (see initState.getNextState). It seeds the
+// sending-attempt counter from the persisted
+// UpdateInfo.StatusReportRetryAttempts, so the maxSendingAttempts() budget
+// continues from where it left off instead of resetting to zero (BUG-283).
+func newResumedUpdateStatusReportState(update *datastore.UpdateInfo, status string) State {
+	return &updateStatusReportState{
+		updateState: NewUpdateState(datastore.MenderStateUpdateStatusReport,
+			ToNone, update),
+		status:             status,
+		triesSendingReport: update.StatusReportRetryAttempts,
+	}
+}
+
 func sendDeploymentLogs(update *datastore.UpdateInfo, sentTries *int,
 	logs []byte, c Controller) menderError {
 	if logs == nil {
@@ -1479,8 +1494,19 @@ func sendDeploymentStatus(update *datastore.UpdateInfo, status string,
 	// check if the report was already sent
 	*tries++
 	if err := c.ReportUpdateStatus(update, status); err != nil {
+		// This attempt failed, so the caller is about to enter (or
+		// remain in) updateStatusReportRetryState. Mirror the running
+		// attempt count onto the persisted UpdateInfo itself, so that
+		// when the next TransitionState() call persists it, a subsequent
+		// service restart can resume counting from here instead of
+		// resetting to zero (BUG-283).
+		update.StatusReportRetryAttempts = *tries
 		return err
 	}
+	// Report landed; this sending sequence is over. Clear any attempt
+	// count left over from an earlier failed sequence so it isn't
+	// mistaken for one still in progress.
+	update.StatusReportRetryAttempts = 0
 	return nil
 }
 

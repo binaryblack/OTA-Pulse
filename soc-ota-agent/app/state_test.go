@@ -446,6 +446,64 @@ func TestStateUpdateReportStatus(t *testing.T) {
 	assert.IsType(t, States.Idle, s)
 }
 
+// TestStateInitResumesStatusReportRetryAttempts covers BUG-283's
+// restart-persistence fix: resuming update-retry-report from persisted
+// state data must continue consuming the SAME maxSendingAttempts() budget
+// instead of resetting the attempt counter to zero, which would otherwise
+// let every service restart buy the wedged agent another full retry
+// window.
+func TestStateInitResumesStatusReportRetryAttempts(t *testing.T) {
+	tempDir, _ := ioutil.TempDir("", "logs")
+	DeploymentLogger = NewDeploymentLogManager(tempDir)
+	defer func() {
+		DeploymentLogger = nil
+		os.RemoveAll(tempDir)
+	}()
+
+	ms := store.NewMemStore()
+	ctx := &StateContext{Store: ms}
+	sc := &stateTestController{}
+
+	// Simulate state data left behind by a previous run that had already
+	// spent 9 attempts trying (and failing) to send the status report,
+	// then restarted while still in update-retry-report.
+	update := datastore.UpdateInfo{
+		ID:                        "foobar",
+		StatusReportRetryAttempts: 9,
+	}
+	err := datastore.StoreStateData(ms, datastore.StateData{
+		Name:       datastore.MenderStateStatusReportRetry,
+		UpdateInfo: update,
+	}, false)
+	assert.NoError(t, err)
+
+	is := &initState{}
+	s, cancelled := is.Handle(ctx, sc)
+	assert.False(t, cancelled)
+
+	usr, ok := s.(*updateStatusReportState)
+	assert.True(t, ok, "expected *updateStatusReportState, got %T", s)
+	// The resumed state must carry the persisted count forward, not reset
+	// to zero (which is what NewUpdateStatusReportState would give it).
+	assert.Equal(t, 9, usr.triesSendingReport)
+
+	// With the default (zero) retry/poll intervals on stateTestController,
+	// maxSendingAttempts() returns minReportSendRetries (3), so the retry
+	// state's ceiling is 3+1=4 attempts. A resumed counter already at 9
+	// must exhaust that budget on the very next failure -- proving the
+	// restart did NOT grant a fresh budget.
+	sc.reportError = NewTransientError(errors.New("still failing (deployment gone)"))
+	s, cancelled = s.Handle(ctx, sc)
+	assert.False(t, cancelled)
+	retry, ok := s.(*updateStatusReportRetryState)
+	assert.True(t, ok, "expected *updateStatusReportRetryState, got %T", s)
+	assert.Equal(t, 10, retry.triesSending)
+
+	s, cancelled = s.Handle(ctx, sc)
+	assert.False(t, cancelled)
+	assert.IsType(t, States.Idle, s)
+}
+
 func TestStateIdle(t *testing.T) {
 	i := idleState{}
 

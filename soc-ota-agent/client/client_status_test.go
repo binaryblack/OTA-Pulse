@@ -91,4 +91,37 @@ func TestStatusClient(t *testing.T) {
 	})
 	errCause := errors.Cause(err)
 	assert.Equal(t, errCause, ErrDeploymentAborted)
+
+	// BUG-283: a 404 for a deployment that no longer exists server-side
+	// must be classified the same as an explicit 409 abort — permanent,
+	// not transient — so the caller does not burn its retry budget on a
+	// deployment that can never come back.
+	responder.httpStatus = http.StatusNotFound
+	err = client.Report(ac, ts.URL, StatusReport{
+		DeploymentID: "deployment1",
+		Status:       StatusSuccess,
+	})
+	errCause = errors.Cause(err)
+	assert.Equal(t, errCause, ErrDeploymentAborted)
+
+	// BUG-283: same for 410 Gone, which some backends use to explicitly
+	// distinguish "deleted" from "never existed".
+	responder.httpStatus = http.StatusGone
+	err = client.Report(ac, ts.URL, StatusReport{
+		DeploymentID: "deployment1",
+		Status:       StatusSuccess,
+	})
+	errCause = errors.Cause(err)
+	assert.Equal(t, errCause, ErrDeploymentAborted)
+
+	// A 500 remains a plain transient error — not reclassified as
+	// permanent/aborted, so the existing retry behavior is unchanged.
+	responder.httpStatus = http.StatusInternalServerError
+	err = client.Report(ac, ts.URL, StatusReport{
+		DeploymentID: "deployment1",
+		Status:       StatusSuccess,
+	})
+	assert.Error(t, err)
+	errCause = errors.Cause(err)
+	assert.NotEqual(t, errCause, ErrDeploymentAborted)
 }
