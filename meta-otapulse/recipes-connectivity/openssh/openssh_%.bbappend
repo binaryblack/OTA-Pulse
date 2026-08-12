@@ -1,7 +1,20 @@
 # QEMU/test-only OpenSSH configuration
 # DO NOT upstream to OTA-Pulse — these workarounds are specific to emulated ARM64 QEMU.
 #
-# Problems solved:
+# GAP-SEC-F5: this bbappend used to apply to EVERY machine (openssh_%, no
+# override) — every real hardware board shared IDENTICAL baked-in
+# ssh_host_*_key across the whole fleet, and (if OTAPULSE_SSH_PUBKEY was ever
+# set for a non-test build) would install a fleet-wide root authorized_keys.
+# Now scoped to :qemuall — the MACHINEOVERRIDES poky's own
+# conf/machine/include/qemu.inc adds for every qemu* MACHINE (qemuarm64,
+# qemux86-64 in this project; matches the same pattern poky itself uses in
+# recipes-connectivity/connman/connman-conf.bb's do_install:append:qemuall).
+# Every other machine gets openssh's stock, unmodified behavior:
+# sshdgenkeys.service runs sshd_check_keys at first boot and generates
+# unique per-device host keys (RSA + ECDSA + ED25519), and no root
+# authorized_keys is installed.
+#
+# Problems solved (QEMU only):
 #   1. 'sshd -G' (used by sshdgenkeys.service) hangs indefinitely on emulated ARM64.
 #      sshdgenkeys is overridden to a no-op, and host keys are pre-generated here on
 #      the fast x86_64 build host instead.
@@ -13,7 +26,7 @@
 
 OTAPULSE_SSH_PUBKEY ?= ""
 
-do_install:append() {
+do_install:append:qemuall() {
     # --- Authorized keys for test SSH access ---
     if [ -n "${OTAPULSE_SSH_PUBKEY}" ] && [ -f "${OTAPULSE_SSH_PUBKEY}" ]; then
         install -d -m 0700 ${D}${ROOT_HOME}/.ssh
@@ -86,14 +99,15 @@ EOF
     ln -sf /dev/null ${D}${sysconfdir}/systemd/system/sshd.socket
 }
 
-FILES:${PN} += "${ROOT_HOME}/.ssh \
-                ${sysconfdir}/ssh/ssh_host_ecdsa_key \
-                ${sysconfdir}/ssh/ssh_host_ecdsa_key.pub \
-                ${sysconfdir}/ssh/ssh_host_ed25519_key \
-                ${sysconfdir}/ssh/ssh_host_ed25519_key.pub \
-                ${sysconfdir}/ssh/sshd_config.d \
-                ${sysconfdir}/systemd/system/sshdgenkeys.service.d \
-                ${sysconfdir}/systemd/system/sshd.service \
-                ${sysconfdir}/systemd/system/multi-user.target.wants/sshd.service \
-                ${sysconfdir}/systemd/system/sshd.socket \
-                "
+FILES:${PN}:append:qemuall = " \
+    ${ROOT_HOME}/.ssh \
+    ${sysconfdir}/ssh/ssh_host_ecdsa_key \
+    ${sysconfdir}/ssh/ssh_host_ecdsa_key.pub \
+    ${sysconfdir}/ssh/ssh_host_ed25519_key \
+    ${sysconfdir}/ssh/ssh_host_ed25519_key.pub \
+    ${sysconfdir}/ssh/sshd_config.d \
+    ${sysconfdir}/systemd/system/sshdgenkeys.service.d \
+    ${sysconfdir}/systemd/system/sshd.service \
+    ${sysconfdir}/systemd/system/multi-user.target.wants/sshd.service \
+    ${sysconfdir}/systemd/system/sshd.socket \
+    "
