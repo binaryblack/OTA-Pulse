@@ -54,6 +54,11 @@ func TestInstall(t *testing.T) {
 }
 
 func TestInstallSigned(t *testing.T) {
+	// defaultLockdown (signature_lockdown.go) is process-global state shared
+	// across every test in this binary; reset it so an earlier test's
+	// signature failures can't leak into this one's failure count.
+	t.Cleanup(ResetSignatureLockdown)
+
 	updateProducers := AllModules{
 		DualRootfs: new(fDevice),
 	}
@@ -85,6 +90,8 @@ func TestInstallSigned(t *testing.T) {
 }
 
 func TestInstallNoSignature(t *testing.T) {
+	t.Cleanup(ResetSignatureLockdown)
+
 	updateProducers := AllModules{
 		DualRootfs: new(fDevice),
 	}

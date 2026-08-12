@@ -112,6 +112,17 @@ func ReadHeaders(art io.ReadCloser, dt string, keys []*conf.VerificationKey, scr
 	var installers []PayloadUpdatePerformer
 	var err error
 
+	// GAP-SEC-F2: refuse to even attempt reading a new artifact while a
+	// prior run of consecutive signature-verification failures has tripped
+	// lockdown (signature_lockdown.go). Only meaningful when verification
+	// keys are actually configured — an unsigned build has nothing to lock
+	// down.
+	if len(keys) > 0 {
+		if err = defaultLockdown.checkNotLockedDown(); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// if there is a verification key artifact must be signed
 	if len(keys) > 0 {
 		ar = areader.NewReaderSigned(art)
@@ -198,7 +209,21 @@ func ReadHeaders(art io.ReadCloser, dt string, keys []*conf.VerificationKey, scr
 
 	// read the artifact
 	if err = ar.ReadArtifactHeaders(); err != nil {
+		// GAP-SEC-F2: only count an actual signature-verification failure
+		// toward lockdown, not every error this call can return — it also
+		// covers device-type incompatibility, corrupt/malformed artifacts,
+		// unsupported update types, etc., none of which are a
+		// verification failure and must not spuriously trip a security
+		// lockdown (isSignatureFailure matches only the two known
+		// signature-specific error signatures: a missing signature file,
+		// or VerifySignatureCallback's own "no key verified" error above).
+		if len(keys) > 0 && isSignatureFailure(err) {
+			defaultLockdown.recordFailure()
+		}
 		return nil, installers, errors.Wrap(err, "installer: failed to read Artifact")
+	}
+	if len(keys) > 0 {
+		defaultLockdown.recordSuccess()
 	}
 
 	if err = scr.Finalize(ar.GetInfo().Version); err != nil {

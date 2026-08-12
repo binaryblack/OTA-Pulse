@@ -75,4 +75,6 @@ For questions about firmware signing:
 - [Security Guide](../../../../docs/SECURITY.md) (`docs/SECURITY.md` from the repo root) —
   covers key generation, artifact signing, verification-key deployment and the key
   rotation procedure.
-- [Proposed runtime signature-verification design](../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md)
+- [Runtime signature verification + lockdown](../../../../soc-ota-agent/docs/SIGNATURE_VERIFICATION.md) —
+  covers the fail-closed enforcement and consecutive-failure lockdown that run on top of the
+  artifact signing described above.
