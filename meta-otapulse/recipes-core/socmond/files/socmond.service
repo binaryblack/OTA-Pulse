@@ -32,5 +32,29 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=socmond
 
+# -----------------------------------------------------------------------
+# Hardening (GAP-SEC-F6)
+# -----------------------------------------------------------------------
+# socmond is network-facing (curls the OTA server, ingests coredumps,
+# jq-parses responses) and previously ran with no sandboxing at all.
+# Mirrors soc-ota-tunneld.service's ProtectSystem=full + ProtectHome=yes +
+# PrivateTmp=yes + ReadWritePaths=/data pattern. Stays User=root (default,
+# no User= line) — it manages /data mounts and coredump ingestion; unlike
+# soc-ota-tunneld it does not exec a child process needing a privileged
+# port, so NoNewPrivileges=yes is safe here (tunneld explicitly cannot use
+# it, socmond can).
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# /var/lib/socmond, /var/log/socmond, /run/socmond are not protected by
+# ProtectSystem=full (only /usr, /boot, /etc are) so they need no explicit
+# ReadWritePaths. /data is a separate top-level mount (the ExecStartPre
+# lines above create/symlink /data/ota) and does need it, same as
+# soc-ota-tunneld.service.
+ReadWritePaths=/data
+
 [Install]
 WantedBy=multi-user.target
