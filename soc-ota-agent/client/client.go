@@ -550,10 +550,29 @@ func dialOpenSSL(
 	return conn, err
 }
 
+// modernCipherList is a TLS 1.2 ECDHE-only, AEAD-only cipher selection
+// (Mozilla's "intermediate" OpenSSL cipher string) — no NULL/EXPORT/DES/
+// RC4/MD5, forward secrecy only. GAP-SEC-F4.
+const modernCipherList = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:" +
+	"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:" +
+	"ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
+
 func newOpenSSLCtx(conf Config) (*openssl.Ctx, error) {
-	ctx, err := openssl.NewCtx()
+	// GAP-SEC-F4: openssl.NewCtx() (AnyVersion + NoSSLv2|NoSSLv3) still
+	// negotiates TLS 1.0/1.1. The vendored binding has no SetMinProtoVersion
+	// (verified: no such method exists anywhere in the module) — its real
+	// mechanism for a version floor is NewCtxWithVersion with a specific
+	// method, and TLSv1_2 is the newest version this binding exposes (no
+	// TLSv1_3 constant/shim exists, so "prefer 1.3" isn't reachable through
+	// this library). TLSv1_2_method pins the connection to exactly TLS 1.2 —
+	// stricter than a true floor, but the only real option here, and it
+	// closes the actual gap (TLS 1.0/1.1 negotiation).
+	ctx, err := openssl.NewCtxWithVersion(openssl.TLSv1_2)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "failed to create a TLS 1.2 context")
+	}
+	if err = ctx.SetCipherList(modernCipherList); err != nil {
+		return nil, errors.Wrap(err, "failed to set the TLS cipher list")
 	}
 
 	ctx, err = loadServerTrust(ctx, &conf)
