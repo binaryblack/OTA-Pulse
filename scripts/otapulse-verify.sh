@@ -449,6 +449,22 @@ else
                 warn "ServerURL does not start with http:// or https://: ${server_url}"
             fi
         fi
+
+        # GAP-SEC-F1: if the config was built with verify keys embedded, the
+        # agent must also be told to fail closed independent of Mender
+        # internals — RequireArtifactVerification must be present and true
+        # (soc-ota-agent/conf/config.go:385-421). A signed build that is
+        # missing this flag would silently accept unsigned artifacts if
+        # ArtifactVerifyKeys ever resolved empty at runtime.
+        if echo "$conf_content" | grep -qi '"ArtifactVerifyKeys"'; then
+            if echo "$conf_content" | grep -qiE '"RequireArtifactVerification"\s*:\s*true'; then
+                pass "RequireArtifactVerification is set (fail-closed independent of Mender internals)"
+            else
+                fail "ArtifactVerifyKeys is embedded but RequireArtifactVerification is not true"
+                info "  A signed build must set both — otherwise a runtime bug that empties"
+                info "  ArtifactVerifyKeys would silently fall back to unsigned installs"
+            fi
+        fi
     fi
 fi
 
