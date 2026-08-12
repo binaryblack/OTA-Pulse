@@ -93,7 +93,7 @@ func (l *signatureLockdown) checkNotLockedDown() error {
 	defer l.mu.Unlock()
 	if l.active {
 		return errors.Errorf(
-			"installer: signature verification lockdown active after %d consecutive failures — refusing further installs until ResetSignatureLockdown is called",
+			"installer: signature verification lockdown active after %d consecutive failures — refusing further installs until the agent is restarted or ResetSignatureLockdown is called (not currently exposed via CLI/D-Bus)",
 			l.failureCount)
 	}
 	return nil
