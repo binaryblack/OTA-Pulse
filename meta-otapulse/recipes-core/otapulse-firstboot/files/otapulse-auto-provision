@@ -317,7 +317,11 @@ elif [ ! -f "$TUNNEL_MARKER" ] && [ -f "$TUNNEL_CRED" ]; then
     # provisioning run) — treat as needing a mint pass so we end up with a
     # consistent, trustworthy marker.
     NEED_TUNNEL_REMINT=1
-elif [ -f "$TUNNEL_CONF" ] && [ ! -f "$TUNNEL_CRED" ]; then
+elif [ -f "$TUNNEL_CONF" ] && [ ! -s "$TUNNEL_CRED" ]; then
+    # -s (not -f): also catches a PRESENT but EMPTY credential file — e.g. a
+    # write that was interrupted mid-printf (disk full) after the marker was
+    # already written, which -f alone would treat as "already provisioned"
+    # forever since soc-ota-tunneld's ConditionFileNotEmpty would never pass.
     # Tunnel-capable image (tunnel.conf is baked in) but no credential has
     # ever been minted — e.g. the device was main-provisioned on a
     # pre-remote-SSH image and then OTA'd onto one with tunnel bits added.
