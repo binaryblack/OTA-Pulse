@@ -138,6 +138,95 @@ print(next((x.get('id', '') for x in items if x.get('device_id') == device_id), 
     echo "$uuid"
 }
 
+# Write a freshly-minted sotc_ tunnel credential to disk, patch tunnel.conf's
+# proxyName to $1 (device_id), write the tunnel marker, and (re)start
+# soc-ota-tunneld. Shared by both tunnel-provisioning call sites (the
+# provisioning-token fast path below and the admin-JWT rotate path further
+# down) so the write/patch/restart sequence has exactly one implementation.
+# $1 = sotc_ token, $2 = device_id, $3 = device_uuid (for the marker).
+# Returns 1 (non-fatal — caller must not treat this as fatal under set -e)
+# if the token is missing/malformed; never fails the caller otherwise.
+write_tunnel_credential() {
+    local sotc="$1" device_id="$2" device_uuid="$3"
+
+    if [ -z "$sotc" ]; then
+        log "Tunnel provisioning failed — no tunnel_token given"
+        return 1
+    elif ! echo "$sotc" | grep -q '^sotc_'; then
+        log "Tunnel provisioning failed — tunnel_token has wrong prefix"
+        return 1
+    fi
+
+    # Write /data/frp/credential mode 0600, no trailing newline
+    mkdir -p "$(dirname "$TUNNEL_CRED")"
+    printf '%s' "$sotc" > "$TUNNEL_CRED"
+    chmod 0600 "$TUNNEL_CRED"
+    chown root:root "$TUNNEL_CRED" 2>/dev/null || true
+    log "Wrote $TUNNEL_CRED (mode 0600)"
+
+    # Patch proxyName in /etc/otapulse/tunnel.conf via JSON round-trip.
+    # proxyName is set to the device's CURRENT identity ($device_id) purely
+    # so it's a stable, per-device-UNIQUE name on the shared frps server (two
+    # boards must never collide on the same proxy name). It is NOT relied on
+    # to match any backend row's device_id — on live boards $device_id
+    # (sourced from SoCDeviceID) is frequently a backend-row UUID, not a
+    # dev-XXXX canonical id. Routing the canonical row's tunnel_id correctly
+    # is handled independently by socmond's heartbeat, which reports the
+    # actual rendered frpc proxy name and is applied by the backend to
+    # whichever row the heartbeat's own API-key auth resolves to
+    # (self-aligning; see socmond send_heartbeat()).
+    if [ -f "$TUNNEL_CONF" ]; then
+        python3 - "$TUNNEL_CONF" "$device_id" <<'PY' || log "tunnel.conf patch failed (non-fatal)"
+import json, sys
+path, device_id = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+cfg["proxyName"] = device_id
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+        log "Patched proxyName=$device_id in $TUNNEL_CONF"
+    else
+        log "No $TUNNEL_CONF present yet — proxyName patch deferred"
+    fi
+
+    # Write marker only on full success
+    mkdir -p "$(dirname "$TUNNEL_MARKER")"
+    {
+        echo "device_id=$device_id"
+        echo "device_uuid=$device_uuid"
+        echo "provisioned_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } > "$TUNNEL_MARKER"
+    log "Tunnel provisioning complete (marker $TUNNEL_MARKER written)"
+
+    # If soc-ota-tunneld is already running (self-heal on an already-booted
+    # board, not a fresh boot) it must be restarted to pick up the new
+    # credential + proxyName — it only reads both at process start.
+    #
+    # --no-block is REQUIRED: soc-ota-tunneld.service's
+    # After=/Wants=otapulse-auto-provision.service means a BLOCKING
+    # restart/start called from inside this unit's own still-running
+    # ExecStart deadlocks against systemd's job ordering until
+    # TimeoutStartSec kills this unit — confirmed live on RPi4 2026-07-22
+    # (unit reported Result=timeout/failed even though the tunnel itself
+    # recovered once the kill released the queued job).
+    if systemctl is-active --quiet soc-ota-tunneld 2>/dev/null; then
+        log "Restarting soc-ota-tunneld to pick up re-minted credential..."
+        systemctl --no-block restart soc-ota-tunneld || true
+    else
+        # Not running — e.g. this is exactly the DEFECT-1 upgrade-path case
+        # where the credential never existed until just now, so
+        # ConditionPathExists=/data/frp/credential previously failed and the
+        # unit was never started this boot. 'start' re-evaluates conditions
+        # instead of no-op'ing like 'restart' would on an inactive unit.
+        log "soc-ota-tunneld is not active — attempting to start it now that the credential exists..."
+        systemctl --no-block start soc-ota-tunneld || true
+    fi
+
+    return 0
+}
+
 # Get device identity
 get_device_id() {
     # 1. Prefer the identity soc-ota-agent itself resolves to at runtime: the
@@ -353,21 +442,65 @@ ORG_ID=""
 DEVICE_UUID=""
 API_KEY=""
 
+TUNNEL_PROVISIONED_VIA_TOKEN=""
+
 if [ "$MAIN_PROVISION_DONE" -eq 0 ]; then
     # === Full first-time provisioning: registration + API key =============
     log "Attempting device registration..."
 
-    # Method 1: Try to use existing device auth (if device was pre-registered)
-    # This calls the check endpoint which doesn't need auth
-    RESPONSE=$(curl -s --max-time 30 \
-        -H "X-Device-ID: $DEVICE_ID" \
-        "${SERVER_URL}/api/devices/v1/check" 2>/dev/null || echo '{"error": "request failed"}')
+    # Method 0: Provisioning-token registration (preferred — no admin session
+    # involved at all, so it works regardless of whether the org's admin
+    # account has MFA enabled; see BUG-286). OTAPULSE_PROVISIONING_TOKEN is a
+    # fleet-scoped spt_ token, minted ONCE out-of-band by an operator (with
+    # an already-MFA-completed admin session — exactly what a provisioning
+    # token is for) via POST /api/provisioning-tokens, then baked into every
+    # device's provision.env. One call does registration + API key + tunnel
+    # credential together, so on success this also satisfies the tunnel
+    # section below directly (TUNNEL_PROVISIONED_VIA_TOKEN short-circuits it).
+    if [ -n "$OTAPULSE_PROVISIONING_TOKEN" ]; then
+        log "Attempting provisioning-token registration..."
+        PROV_RESPONSE=$(curl -s --max-time 30 \
+            -X POST "${SERVER_URL}/api/v1/provision" \
+            -H "X-Provisioning-Token: $OTAPULSE_PROVISIONING_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"device_id\": \"$DEVICE_ID\",
+                \"hardware_version\": \"$HARDWARE_VERSION\",
+                \"firmware_version\": \"$FIRMWARE_VERSION\"
+            }" 2>/dev/null || echo '{}')
 
-    if echo "$RESPONSE" | grep -q '"api_key"'; then
-        # Server returned an API key (auto-registration succeeded)
-        API_KEY=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_key',''))" 2>/dev/null || true)
+        API_KEY=$(echo "$PROV_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_key',''))" 2>/dev/null || true)
+
         if [ -n "$API_KEY" ]; then
-            log "Received API key from server"
+            log "Provisioning-token registration succeeded"
+            PROV_DEVICE_UUID=$(echo "$PROV_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('device_id',''))" 2>/dev/null || true)
+            PROV_TUNNEL_TOKEN=$(echo "$PROV_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tunnel_token') or '')" 2>/dev/null || true)
+            if [ -n "$PROV_TUNNEL_TOKEN" ]; then
+                if write_tunnel_credential "$PROV_TUNNEL_TOKEN" "$DEVICE_ID" "$PROV_DEVICE_UUID"; then
+                    TUNNEL_PROVISIONED_VIA_TOKEN=1
+                fi
+            else
+                log "Provisioning response carried no tunnel_token (unexpected for a new device) — tunnel credential deferred"
+            fi
+        else
+            log "Provisioning-token registration failed: $PROV_RESPONSE"
+        fi
+    fi
+
+    # Method 1: Try to use existing device auth (if device was pre-registered)
+    # This calls the check endpoint which doesn't need auth. Skipped once
+    # Method 0 already obtained a key — no point in an extra round-trip.
+    if [ -z "$API_KEY" ]; then
+        RESPONSE=$(curl -s --max-time 30 \
+            -H "X-Device-ID: $DEVICE_ID" \
+            "${SERVER_URL}/api/devices/v1/check" 2>/dev/null || echo '{"error": "request failed"}')
+
+        if echo "$RESPONSE" | grep -q '"api_key"'; then
+            # Server returned an API key (auto-registration succeeded)
+            API_KEY=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_key',''))" 2>/dev/null || true)
+            if [ -n "$API_KEY" ]; then
+                log "Received API key from server"
+            fi
         fi
     fi
 
@@ -548,7 +681,9 @@ fi
 # fast-path checks above. Proceeds only if JWT_TOKEN/ORG_ID/DEVICE_UUID were
 # actually resolved (by either the first-time registration flow or the
 # self-heal resolution flow above).
-if [ -z "$JWT_TOKEN" ] || [ -z "$ORG_ID" ] || [ -z "$DEVICE_UUID" ]; then
+if [ -n "$TUNNEL_PROVISIONED_VIA_TOKEN" ]; then
+    : # Already handled by the provisioning-token fast path (Method 0) above.
+elif [ -z "$JWT_TOKEN" ] || [ -z "$ORG_ID" ] || [ -z "$DEVICE_UUID" ]; then
     log "Tunnel provisioning skipped — missing JWT_TOKEN/ORG_ID/DEVICE_UUID"
 else
     log "Minting tunnel credential for device $DEVICE_UUID..."
@@ -558,82 +693,11 @@ else
         -H "Content-Type: application/json" \
         -d "{}" 2>/dev/null || echo '{}')
     SOTC=$(echo "$ROTATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tunnel_token',''))" 2>/dev/null || true)
-
     if [ -z "$SOTC" ]; then
         log "Tunnel provisioning failed — no tunnel_token in response: $ROTATE_RESP"
         # Do not exit non-zero; systemd must not crash-loop the unit
-    elif ! echo "$SOTC" | grep -q '^sotc_'; then
-        log "Tunnel provisioning failed — tunnel_token has wrong prefix"
     else
-        # Write /data/frp/credential mode 0600, no trailing newline
-        mkdir -p "$(dirname "$TUNNEL_CRED")"
-        printf '%s' "$SOTC" > "$TUNNEL_CRED"
-        chmod 0600 "$TUNNEL_CRED"
-        chown root:root "$TUNNEL_CRED" 2>/dev/null || true
-        log "Wrote $TUNNEL_CRED (mode 0600)"
-
-        # Patch proxyName in /etc/otapulse/tunnel.conf via JSON round-trip.
-        # proxyName is set to the device's CURRENT identity ($DEVICE_ID)
-        # purely so it's a stable, per-device-UNIQUE name on the shared frps
-        # server (two boards must never collide on the same proxy name).
-        # It is NOT relied on to match any backend row's device_id — on live
-        # boards $DEVICE_ID (sourced from SoCDeviceID) is frequently a
-        # backend-row UUID, not a dev-XXXX canonical id. Routing the
-        # canonical row's tunnel_id correctly is handled independently by
-        # socmond's heartbeat, which reports the actual rendered frpc proxy
-        # name and is applied by the backend to whichever row the heartbeat's
-        # own API-key auth resolves to (self-aligning; see socmond
-        # send_heartbeat()).
-        if [ -f "$TUNNEL_CONF" ]; then
-            python3 - "$TUNNEL_CONF" "$DEVICE_ID" <<'PY' || log "tunnel.conf patch failed (non-fatal)"
-import json, sys
-path, device_id = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    cfg = json.load(f)
-cfg["proxyName"] = device_id
-with open(path, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
-PY
-            log "Patched proxyName=$DEVICE_ID in $TUNNEL_CONF"
-        else
-            log "No $TUNNEL_CONF present yet — proxyName patch deferred"
-        fi
-
-        # Write marker only on full success
-        mkdir -p "$(dirname "$TUNNEL_MARKER")"
-        {
-            echo "device_id=$DEVICE_ID"
-            echo "device_uuid=$DEVICE_UUID"
-            echo "provisioned_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-        } > "$TUNNEL_MARKER"
-        log "Tunnel provisioning complete (marker $TUNNEL_MARKER written)"
-
-        # If soc-ota-tunneld is already running (self-heal on an already-booted
-        # board, not a fresh boot) it must be restarted to pick up the new
-        # credential + proxyName — it only reads both at process start.
-        #
-        # --no-block is REQUIRED (see the identical comment at the other
-        # restart/start site above): soc-ota-tunneld.service's
-        # After=/Wants=otapulse-auto-provision.service means a BLOCKING
-        # restart/start called from inside this unit's own still-running
-        # ExecStart deadlocks against systemd's job ordering until
-        # TimeoutStartSec kills this unit — confirmed live on RPi4
-        # 2026-07-22 (unit reported Result=timeout/failed even though the
-        # tunnel itself recovered once the kill released the queued job).
-        if systemctl is-active --quiet soc-ota-tunneld 2>/dev/null; then
-            log "Restarting soc-ota-tunneld to pick up re-minted credential..."
-            systemctl --no-block restart soc-ota-tunneld || true
-        else
-            # Not running — e.g. this is exactly the DEFECT-1 upgrade-path
-            # case where the credential never existed until just now, so
-            # ConditionPathExists=/data/frp/credential previously failed and
-            # the unit was never started this boot. 'start' re-evaluates
-            # conditions instead of no-op'ing like 'restart' would on an
-            # inactive unit.
-            log "soc-ota-tunneld is not active — attempting to start it now that the credential exists..."
-            systemctl --no-block start soc-ota-tunneld || true
-        fi
+        write_tunnel_credential "$SOTC" "$DEVICE_ID" "$DEVICE_UUID" || true
     fi
 fi
 # --- End tunnel credential provisioning ---
