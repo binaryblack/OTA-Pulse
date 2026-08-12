@@ -33,12 +33,21 @@
 #           Mirrors buildroot-otapulse/package/otapulse/otapulse.mk, which
 #           hard-errors on a missing verification key. Never set this for a
 #           production image.
+#
+#   OTAPULSE_ALLOW_INSECURE_URL (default: '0')
+#     '1' — explicit dev escape hatch: allow the 'server' check to pass with
+#           a plain http:// OTA_SERVER_URL instead of failing the build.
+#           The tenant token / device API key and all API traffic go over
+#           cleartext HTTP when this is set — only for LAN/self-signed dev
+#           setups that cannot use TLS. Never set this for a production
+#           image (GAP-SEC-F3).
 
 
 # ─── Check behaviour ──────────────────────────────────────────────────────────
-OTAPULSE_SANITY_LEVEL   ?= "error"
-OTAPULSE_SANITY_SKIP    ?= ""
-OTAPULSE_ALLOW_UNSIGNED ?= "0"
+OTAPULSE_SANITY_LEVEL       ?= "error"
+OTAPULSE_SANITY_SKIP        ?= ""
+OTAPULSE_ALLOW_UNSIGNED     ?= "0"
+OTAPULSE_ALLOW_INSECURE_URL ?= "0"
 
 # ─── Placeholder detection lists ──────────────────────────────────────────────
 # These lists are defined as BitBake variables so projects can extend them:
@@ -181,7 +190,26 @@ python otapulse_sanity_check() {
                 "Provide a full URL including the scheme:\n"
                 "  OTA_SERVER_URL = \"https://your-actual-ota-server.com\"")
             failed += 1
+        elif url.startswith('http://') and (d.getVar('OTAPULSE_ALLOW_INSECURE_URL', True) or '0').strip() != '1':
+            # GAP-SEC-F3: the placeholder-URL check above only catches the
+            # documentation examples; a real, custom http:// URL must also
+            # be rejected by default — tenant tokens and device API keys
+            # would otherwise go over cleartext.
+            otapulse_sanity_msg(d, 'server',
+                "OTA_SERVER_URL uses plain http:// — device API keys and tenant "
+                "tokens would be sent over cleartext: %s" % url,
+                "Use an https:// URL:\n"
+                "  OTA_SERVER_URL = \"https://your-actual-ota-server.com\"\n"
+                "\n"
+                "Or, for a LAN/self-signed dev setup that cannot use TLS, set the "
+                "explicit dev escape hatch:\n"
+                "  OTAPULSE_ALLOW_INSECURE_URL = \"1\"")
+            failed += 1
         else:
+            if url.startswith('http://'):
+                bb.warn("OTAPulse Sanity [server]: OTA_SERVER_URL uses plain http:// "
+                        "(%s) — allowed because OTAPULSE_ALLOW_INSECURE_URL=1. "
+                        "Never set this for a production image." % url)
             bb.note("OTAPulse Sanity [server]: OK (%s)" % url)
             passed += 1
 
