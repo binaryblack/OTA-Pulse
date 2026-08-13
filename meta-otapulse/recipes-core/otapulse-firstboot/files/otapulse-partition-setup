@@ -521,6 +521,22 @@ wait_for_device_ready() {
 repair_gpt_if_needed() {
     local device="$1"
     local last_sector device_sectors
+
+    # This repair is GPT-specific — meaningless on an MBR-partitioned disk,
+    # where there is no GPT backup structure to relocate. Real boards
+    # (orange-pi-zero2w, odroid-c4) are deliberately MBR (see flash-sd.sh
+    # comments), and sgdisk -E/-e on an MBR disk with a last partition that
+    # already reaches the physical end of the device auto-converts MBR->GPT
+    # in memory and returns a nonsensical last-usable-sector value instead
+    # of erroring — which otherwise cascades into a permanently
+    # crash-looping first boot (BUG-290). Detect and skip cleanly.
+    local _pttype
+    _pttype=$(blkid -o value -s PTTYPE "$device" 2>/dev/null || true)
+    if [ "$_pttype" = "dos" ]; then
+        log "Disk is MBR (dos) — skipping GPT backup repair (not applicable)"
+        return 0
+    fi
+
     last_sector=$(sgdisk -E "$device" 2>/dev/null | tail -1)
     last_sector="${last_sector:-0}"
     device_sectors=$(blockdev --getsz "$device" 2>/dev/null)
@@ -694,7 +710,58 @@ if check_all_partitions_ready; then
     exit 0
 fi
 
-# --- Past this point, partitions need to be created. sgdisk is required. ---
+# Determine whether rootfs_b/data already exist as partitions (regardless of
+# format state) before doing any free-space math or attempting to create
+# them. Checked as RAW BLOCK DEVICES, not via /dev/disk/by-partlabel/* the
+# way check_all_partitions_ready() above does: on MBR boards
+# (orange-pi-zero2w, odroid-c4) there are no GPT partition names, so
+# partlabel symlinks only appear once udev's 99-otapulse-bsp-aliases.rules
+# sees a filesystem LABEL — i.e. AFTER formatting. A raw, unformatted data
+# partition that physically exists (e.g. an interrupted prior provisioning
+# run) would therefore look identical to "doesn't exist yet" via partlabel,
+# sending this script down the from-scratch creation path below even though
+# the partition table entry is already there — which then blows up in the
+# free-space calculation (BUG-290: GPT-only sgdisk tooling misapplied to an
+# MBR disk returns a nonsensical last-usable-sector value once the last
+# partition already reaches the physical end of the device — this crash-
+# looped first-boot partitioning on a real Orange Pi Zero 2W whose rootfs_b
+# already existed and was formatted, but /data was still a raw partition).
+ROOTFS_B_PART_NUM=$((ROOT_PART_NUM + 1))
+DATA_PART_NUM=$((ROOT_PART_NUM + 2))
+if [ -e "${BASE_DEV}p${ROOTFS_B_PART_NUM}" ]; then
+    ROOTFS_B_DEV="${BASE_DEV}p${ROOTFS_B_PART_NUM}"
+    DATA_DEV="${BASE_DEV}p${DATA_PART_NUM}"
+else
+    ROOTFS_B_DEV="${BASE_DEV}${ROOTFS_B_PART_NUM}"
+    DATA_DEV="${BASE_DEV}${DATA_PART_NUM}"
+fi
+
+PARTITIONS_EXIST=0
+if [ -b "$ROOTFS_B_DEV" ] && [ -b "$DATA_DEV" ]; then
+    log "rootfs_b and data partitions already exist on disk — skipping partition creation (will format below if needed)"
+    PARTITIONS_EXIST=1
+fi
+
+# Detect partition-table type so we use the right tool: sgdisk for GPT, sfdisk
+# for MBR (DOS). Amlogic/ODROID-C4 boots from an MBR medium because the FIP at
+# sector 1 would corrupt a GPT (see odroid-c4.wks). On MBR there are no
+# partition names — identification is via filesystem LABELs aliased to
+# /dev/disk/by-partlabel by 99-otapulse-bsp-aliases.rules. Crucially, sfdisk
+# only rewrites the sector-0 MBR table and never the FIP, so growing the table
+# at firstboot is safe. Default to gpt when blkid can't tell (every other board).
+# Computed unconditionally (not just when PARTITIONS_EXIST=0) — the GPT
+# partition-name-maintenance and boot-env-init logic further down also
+# branch on it (BUG-290: this used to be computed only inside the
+# create-partitions branch, so it stayed unset whenever partitions already
+# existed, silently taking the wrong — and on MBR, disk-corrupting — branch
+# there).
+PTTYPE=$(blkid -o value -s PTTYPE "$BASE_DEV" 2>/dev/null || true)
+[ -z "$PTTYPE" ] && PTTYPE="gpt"
+log "Partition table type: $PTTYPE"
+
+# --- Past this point, partitions may need to be created. sgdisk is required. ---
+
+if [ "$PARTITIONS_EXIST" -eq 0 ]; then
 
 # Check if sgdisk is available
 if ! command -v sgdisk &> /dev/null; then
@@ -703,7 +770,8 @@ fi
 
 # Repair GPT first if the WIC image was flashed to a larger disk than it
 # was sized for. Without this, sgdisk -E returns the WIC's last sector and
-# free-space math goes negative.
+# free-space math goes negative. (No-op on MBR disks — see
+# repair_gpt_if_needed's own PTTYPE check, BUG-290.)
 repair_gpt_if_needed "$BASE_DEV"
 
 # Wait for device to be fully ready before reading GPT.
@@ -716,30 +784,13 @@ wait_for_device_ready "$BASE_DEV" || true
 log "Current partition layout:"
 sgdisk -p "$BASE_DEV" || true
 
-# Check if rootfs_b already exists and is formatted (partial setup)
-if [ -e "/dev/disk/by-partlabel/rootfs_b" ]; then
-    ROOTFS_B_FSTYPE=$(lsblk -no FSTYPE /dev/disk/by-partlabel/rootfs_b 2>/dev/null || true)
-    if [ -n "$ROOTFS_B_FSTYPE" ]; then
-        log "rootfs_b partition already exists and formatted ($ROOTFS_B_FSTYPE)"
-        # Continue to check/create data partition
-    else
-        log "rootfs_b partition exists but not formatted, will format it"
-    fi
+if [ -b "$ROOTFS_B_DEV" ]; then
+    ROOTFS_B_FSTYPE=$(lsblk -no FSTYPE "$ROOTFS_B_DEV" 2>/dev/null || true)
+    log "rootfs_b partition already exists ($ROOTFS_B_DEV), formatted=${ROOTFS_B_FSTYPE:-no}"
 fi
 
 # Get sector size (always works regardless of GPT state)
 SECTOR_SIZE=$(blockdev --getss "$BASE_DEV")
-
-# Detect partition-table type so we use the right tool: sgdisk for GPT, sfdisk
-# for MBR (DOS). Amlogic/ODROID-C4 boots from an MBR medium because the FIP at
-# sector 1 would corrupt a GPT (see odroid-c4.wks). On MBR there are no
-# partition names — identification is via filesystem LABELs aliased to
-# /dev/disk/by-partlabel by 99-otapulse-bsp-aliases.rules. Crucially, sfdisk
-# only rewrites the sector-0 MBR table and never the FIP, so growing the table
-# at firstboot is safe. Default to gpt when blkid can't tell (every other board).
-PTTYPE=$(blkid -o value -s PTTYPE "$BASE_DEV" 2>/dev/null || true)
-[ -z "$PTTYPE" ] && PTTYPE="gpt"
-log "Partition table type: $PTTYPE"
 
 # Get rootfs_a size (in sectors). sgdisk -i may return empty when the primary
 # GPT header CRC is invalid, so fall back to /sys/class/block which the kernel
@@ -763,15 +814,25 @@ log "rootfs_a size: ${ROOTFS_A_SIZE_MB}MB"
 DEVICE_SIZE_SECTORS=$(blockdev --getsz "$BASE_DEV" 2>/dev/null)
 DEVICE_SIZE_SECTORS="${DEVICE_SIZE_SECTORS:-0}"
 
-# Last usable sector: try sgdisk -E first; fall back to device_size - 34
-# (GPT reserves 33 LBAs + 1 protective MBR = 34 LBAs at the end of disk).
-# sgdisk -E returns empty when the primary GPT header is invalid, which is
+# Last usable sector. MBR has no GPT backup structure reserved at the end of
+# the disk, so every sector through the device's last sector is usable —
+# compute it directly rather than asking sgdisk (a GPT-only tool). On MBR,
+# sgdisk -E auto-converts the disk to GPT in memory and, whenever the last
+# partition already reaches the physical end of the device, returns a
+# nonsensical last-usable-sector value instead of erroring (BUG-290). On
+# GPT, fall back to device_size - 34 (GPT reserves 33 LBAs + 1 protective
+# MBR = 34 LBAs at the end of disk) when sgdisk -E returns nothing, which is
 # expected on first boot after flashing a WIC image to a larger card.
-LAST_SECTOR=$(sgdisk -E "$BASE_DEV" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
-LAST_SECTOR="${LAST_SECTOR:-0}"
-if [ "$LAST_SECTOR" -eq 0 ] && [ "$DEVICE_SIZE_SECTORS" -gt 0 ]; then
-    LAST_SECTOR=$((DEVICE_SIZE_SECTORS - 34))
-    log "sgdisk -E unavailable, calculated last usable sector: $LAST_SECTOR"
+if [ "$PTTYPE" = "dos" ]; then
+    LAST_SECTOR=$((DEVICE_SIZE_SECTORS - 1))
+    log "MBR disk — last usable sector: $LAST_SECTOR"
+else
+    LAST_SECTOR=$(sgdisk -E "$BASE_DEV" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
+    LAST_SECTOR="${LAST_SECTOR:-0}"
+    if [ "$LAST_SECTOR" -eq 0 ] && [ "$DEVICE_SIZE_SECTORS" -gt 0 ]; then
+        LAST_SECTOR=$((DEVICE_SIZE_SECTORS - 34))
+        log "sgdisk -E unavailable, calculated last usable sector: $LAST_SECTOR"
+    fi
 fi
 
 log "Device total sectors: $DEVICE_SIZE_SECTORS"
@@ -801,17 +862,21 @@ FREE_SIZE_MB=$((FREE_SECTORS * SECTOR_SIZE / 1024 / 1024))
 log "Free space starts at sector: $FREE_START"
 log "Free space: ${FREE_SIZE_MB}MB"
 
-# Check if we have enough space for rootfs_b + data
+# Check if we have enough space. If rootfs_b already exists (only data is
+# missing — the case that motivated this fix, BUG-290) it won't be
+# recreated below, so only data's minimum size is actually required;
+# previously this always required rootfs_a's full size again too, which
+# could reject a disk that legitimately only has room left for /data.
 MIN_DATA_SIZE_MB=1024  # Minimum 1GB for data partition
-REQUIRED_MB=$((ROOTFS_A_SIZE_MB + MIN_DATA_SIZE_MB))
+if [ -b "$ROOTFS_B_DEV" ]; then
+    REQUIRED_MB=$MIN_DATA_SIZE_MB
+else
+    REQUIRED_MB=$((ROOTFS_A_SIZE_MB + MIN_DATA_SIZE_MB))
+fi
 
 if [ "$FREE_SIZE_MB" -lt "$REQUIRED_MB" ]; then
     error "Not enough free space. Need ${REQUIRED_MB}MB, have ${FREE_SIZE_MB}MB"
 fi
-
-# Calculate partition numbers
-ROOTFS_B_PART_NUM=$((ROOT_PART_NUM + 1))
-DATA_PART_NUM=$((ROOT_PART_NUM + 2))
 
 # Calculate partition boundaries
 ROOTFS_B_START=$FREE_START
@@ -819,48 +884,51 @@ ROOTFS_B_END=$((ROOTFS_B_START + ROOTFS_A_SIZE - 1))
 DATA_START=$((ROOTFS_B_END + 1))
 DATA_END=$LAST_SECTOR
 
-# Check if partitions already exist (from previous interrupted run)
-PARTITIONS_EXIST=0
-if [ -e "/dev/disk/by-partlabel/rootfs_b" ] && { [ -e "/dev/disk/by-partlabel/data" ] || [ -e "/dev/disk/by-partlabel/userdata" ]; }; then
-    log "Partitions already exist, skipping creation"
-    PARTITIONS_EXIST=1
+# NOTE (known remaining gap, BUG-290): if rootfs_b already exists as a raw
+# partition but at a DIFFERENT location than freshly-computed
+# ROOTFS_B_START/END (only possible if data's partition table entry is
+# missing outright, not just unformatted — not the scenario this fix was
+# reproduced against), the sfdisk/sgdisk calls below still unconditionally
+# attempt to (re)create rootfs_b too, which could conflict with the
+# existing entry. Not handled here — this fix targets the reproduced,
+# confirmed failure (both partition table entries already present, data
+# just unformatted), where PARTITIONS_EXIST above already skips this whole
+# block entirely.
+log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
+log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
+
+log "Creating rootfs_b and data partitions ($PTTYPE)..."
+if [ "$PTTYPE" = "dos" ]; then
+    # MBR: append two Linux (type 83) primary partitions with sfdisk. This
+    # only touches the sector-0 partition table — never the FIP at sector 1.
+    # Partition names don't exist on MBR; the ext4 LABELs set when formatting
+    # below drive /dev/disk/by-partlabel via 99-otapulse-bsp-aliases.rules.
+    printf 'start=%s, size=%s, type=83\nstart=%s, type=83\n' \
+        "$ROOTFS_B_START" "$ROOTFS_A_SIZE" "$DATA_START" \
+        | sfdisk --append --force "$BASE_DEV"
+else
+    # GPT: create named, typed partitions with sgdisk (unchanged path).
+    sgdisk \
+           -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
+           -c "$ROOTFS_B_PART_NUM:rootfs_b" \
+           -t "$ROOTFS_B_PART_NUM:8300" \
+           -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
+           -c "$DATA_PART_NUM:data" \
+           -t "$DATA_PART_NUM:8300" \
+           "$BASE_DEV"
 fi
 
-if [ "$PARTITIONS_EXIST" -eq 0 ]; then
-    log "Creating rootfs_b: partition $ROOTFS_B_PART_NUM, sectors $ROOTFS_B_START-$ROOTFS_B_END"
-    log "Creating data: partition $DATA_PART_NUM, sectors $DATA_START-$DATA_END"
+# Inform kernel of partition changes
+log "Updating kernel partition table..."
+# Use partx (util-linux) as partprobe may not be available
+if command -v partprobe &> /dev/null; then
+    partprobe "$BASE_DEV" || true
+else
+    # partx -u updates the kernel's partition table
+    partx -u "$BASE_DEV" || true
+fi
+sleep 2
 
-    log "Creating rootfs_b and data partitions ($PTTYPE)..."
-    if [ "$PTTYPE" = "dos" ]; then
-        # MBR: append two Linux (type 83) primary partitions with sfdisk. This
-        # only touches the sector-0 partition table — never the FIP at sector 1.
-        # Partition names don't exist on MBR; the ext4 LABELs set when formatting
-        # below drive /dev/disk/by-partlabel via 99-otapulse-bsp-aliases.rules.
-        printf 'start=%s, size=%s, type=83\nstart=%s, type=83\n' \
-            "$ROOTFS_B_START" "$ROOTFS_A_SIZE" "$DATA_START" \
-            | sfdisk --append --force "$BASE_DEV"
-    else
-        # GPT: create named, typed partitions with sgdisk (unchanged path).
-        sgdisk \
-               -n "$ROOTFS_B_PART_NUM:$ROOTFS_B_START:$ROOTFS_B_END" \
-               -c "$ROOTFS_B_PART_NUM:rootfs_b" \
-               -t "$ROOTFS_B_PART_NUM:8300" \
-               -n "$DATA_PART_NUM:$DATA_START:$DATA_END" \
-               -c "$DATA_PART_NUM:data" \
-               -t "$DATA_PART_NUM:8300" \
-               "$BASE_DEV"
-    fi
-
-    # Inform kernel of partition changes
-    log "Updating kernel partition table..."
-    # Use partx (util-linux) as partprobe may not be available
-    if command -v partprobe &> /dev/null; then
-        partprobe "$BASE_DEV" || true
-    else
-        # partx -u updates the kernel's partition table
-        partx -u "$BASE_DEV" || true
-    fi
-    sleep 2
 fi
 
 # Wait for partition devices to appear
