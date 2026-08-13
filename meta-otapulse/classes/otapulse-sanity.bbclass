@@ -244,7 +244,7 @@ python otapulse_sanity_check() {
                 "    OTAPULSE_TENANT_TOKEN = \"eyJhbGciOi...<your-real-token>\"\n"
                 "\n"
                 "  Option B — OTAPulse provisioning token:\n"
-                "    OTAPULSE_PROVISIONING_TOKEN = \"prov_<your-real-token>\"\n"
+                "    OTAPULSE_PROVISIONING_TOKEN = \"spt_<your-real-token>\"\n"
                 "\n"
                 "  Option C — Monitoring API key:\n"
                 "    SOC_MONITORING_API_KEY = \"<your-api-key>\"\n"
