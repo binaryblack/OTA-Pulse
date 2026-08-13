@@ -20,5 +20,5 @@
 
     "UseSoCMonitoring": true,
 
-    "UpdateLogPath": "/var/lib/otapulse/update.log"@ARTIFACT_VERIFY_KEYS_LINE@
+    "UpdateLogPath": "/var/lib/otapulse/update.log"@ARTIFACT_VERIFICATION_BLOCK@
 }

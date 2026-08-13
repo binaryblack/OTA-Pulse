@@ -47,6 +47,12 @@ MACHINE = "CHANGE_ME"
 #   packages  systemd  image-size  networking
 # OTAPULSE_SANITY_SKIP = ""
 
+# Allow a plain http:// OTA_SERVER_URL instead of requiring https:// (GAP-SEC-F3).
+# Device API keys and tenant tokens go over cleartext when this is set — only
+# for a LAN/self-signed dev setup that cannot use TLS. Never set this for a
+# production image.
+# OTAPULSE_ALLOW_INSECURE_URL = "1"
+
 # How often the device polls for new OTA updates (seconds, default 1800 = 30 min)
 # OTAPULSE_UPDATE_POLL_INTERVAL = "1800"
 

@@ -186,7 +186,13 @@ do_install() {
 
     # Determine signature verification settings
     if [ "${SIG_VERIFY}" = "1" ]; then
-        # Signature verification enabled - include ArtifactVerifyKeys line
+        # Signature verification enabled - include ArtifactVerifyKeys AND
+        # RequireArtifactVerification. The latter (GAP-SEC-F1) makes runtime
+        # enforcement fail-closed independent of stock Mender's own reader
+        # behavior: if ArtifactVerifyKeys ever resolves empty at runtime
+        # (mis-templated config, tampered file, future refactor), the agent
+        # hard-fails GetVerificationKeys instead of silently accepting an
+        # unsigned artifact. See soc-ota-agent/conf/config.go:385-421.
         # Build JSON array of verification key paths
         VERIFY_KEY_FILES="${SOC_OTA_VERIFY_KEY_FILES}"
         KEYS_JSON=""
@@ -196,9 +202,9 @@ do_install() {
             fi
             KEYS_JSON="${KEYS_JSON}\"${SIGNING_KEYS_DIR}/active/${keyfile}\""
         done
-        VERIFY_KEYS_LINE=",\n\n    \"ArtifactVerifyKeys\": [${KEYS_JSON}]"
+        VERIFY_KEYS_LINE=",\n\n    \"ArtifactVerifyKeys\": [${KEYS_JSON}],\n    \"RequireArtifactVerification\": true"
     else
-        # Signature verification disabled - no ArtifactVerifyKeys line
+        # Signature verification disabled - no ArtifactVerifyKeys/RequireArtifactVerification lines
         VERIFY_KEYS_LINE=""
     fi
 
@@ -221,7 +227,7 @@ do_install() {
     sed -e "s|@SERVER_URL@|${SERVER_URL}|g" \
         -e "s|@SKIP_TLS_VERIFY@|${SKIP_VERIFY}|g" \
         -e "s|@TENANT_TOKEN@|${TENANT_TOKEN}|g" \
-        -e "s|@ARTIFACT_VERIFY_KEYS_LINE@|${VERIFY_KEYS_LINE}|g" \
+        -e "s|@ARTIFACT_VERIFICATION_BLOCK@|${VERIFY_KEYS_LINE}|g" \
         ${FILESDIR}/otapulse.conf.in > ${D}${sysconfdir}/otapulse/otapulse.conf
 
     chmod 0600 ${D}${sysconfdir}/otapulse/otapulse.conf
