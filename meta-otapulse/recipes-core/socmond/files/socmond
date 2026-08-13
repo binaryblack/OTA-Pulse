@@ -19,6 +19,12 @@ PID_FILE="/run/socmond/socmond.pid"
 API_KEY_FILE="/var/lib/socmond/api_key"
 SERVER_DEVICE_ID_FILE="/var/lib/socmond/server_device_id"
 
+# Set by upload_metrics (BUG-288) when the server rejects our API key
+# (401/403) so it's no longer accepted for this device — signals the main
+# loop to re-provision immediately instead of waiting for the
+# interval-gated retry, which only fires while provisioned=false.
+NEEDS_REPROVISION_FILE="/var/lib/socmond/.needs_reprovision"
+
 # Ensure directories exist
 # NOTE: OTA functionality moved to soc-ota-agent
 mkdir -p "${METRICS_DIR}" "${COREDUMP_DIR}" "${LOG_DIR}" "$(dirname "${SOCKET_PATH}")" "$(dirname "${API_KEY_FILE}")"
@@ -364,7 +370,8 @@ upload_metrics() {
         if [ -n "${API_KEY}" ] && [ -n "${SERVER_URL}" ] && [ -n "${DEVICE_ID}" ]; then
             # Use correct API endpoint and headers for SoC Monitoring server
             # X-Device-ID must be the hardware device_id (not the server UUID)
-            if curl -s -X POST \
+            local upload_http_code
+            upload_http_code=$(curl -s -X POST \
                 -H "Content-Type: application/json" \
                 -H "X-API-Key: ${API_KEY}" \
                 -H "X-Device-ID: ${DEVICE_ID}" \
@@ -373,11 +380,29 @@ upload_metrics() {
                 --connect-timeout 30 \
                 --max-time 60 \
                 -o /dev/null \
-                -w "%{http_code}" | grep -q "^2"; then
+                -w "%{http_code}")
+            if printf '%s' "${upload_http_code}" | grep -q "^2"; then
                 rm -f "${file}"
                 count=$((count + 1))
             else
-                log "Failed to upload metrics from ${file}"
+                log "Failed to upload metrics from ${file} (HTTP ${upload_http_code})"
+                if [ "${upload_http_code}" = "401" ] || [ "${upload_http_code}" = "403" ]; then
+                    # This API key is no longer accepted for this device (rotated
+                    # or revoked out from under us — socmond has no other reload
+                    # trigger once it has loaded a key at startup/last
+                    # provisioning, so without this it would retry the same
+                    # rejected key forever, BUG-288). Remove it so
+                    # provision_device()'s "skip if already provisioned" check
+                    # (it only looks at whether API_KEY_FILE is non-empty, not
+                    # whether the server still accepts it) doesn't just hand
+                    # the same rejected key straight back, and flag for
+                    # immediate re-provisioning instead of waiting on the
+                    # interval-gated retry in the main loop, which only fires
+                    # when provisioned=false.
+                    log "API key rejected (HTTP ${upload_http_code}) — clearing it and flagging for re-provisioning"
+                    rm -f "${API_KEY_FILE}"
+                    touch "${NEEDS_REPROVISION_FILE}"
+                fi
             fi
         else
             # No API key configured, just rotate old files (keep last 100)
@@ -641,6 +666,16 @@ main() {
 
         # Pet the watchdog
         pet_watchdog
+
+        # upload_metrics flagged our API key as rejected (401/403) since the
+        # last iteration — force the reprovision branch below to run now
+        # rather than waiting up to reprovision_interval (BUG-288).
+        if [ -f "${NEEDS_REPROVISION_FILE}" ]; then
+            rm -f "${NEEDS_REPROVISION_FILE}"
+            provisioned=false
+            last_reprovision_attempt=0
+            log "Re-provisioning triggered by a rejected API key"
+        fi
 
         # Retry provisioning if still not provisioned. Provisioning state
         # lives on the rootfs and is wiped by every A/B slot switch, so
