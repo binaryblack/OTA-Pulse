@@ -26,10 +26,34 @@ pub enum HttpError {
     AuthError,
     #[error("Rate limited, retry after {retry_after} seconds")]
     RateLimited { retry_after: u64 },
+    #[error("Billing required, retry after {retry_after} seconds")]
+    BillingRequired { retry_after: u64 },
     #[error("Network error: {0}")]
     NetworkError(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+}
+
+/// Result of a successful upload attempt (successful HTTP-wise; the server may
+/// still have declined to store the payload — see `QuotaExceeded`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadOutcome {
+    /// Server stored the payload.
+    Uploaded,
+    /// Server returned HTTP 200 with `{"status":"quota_exceeded",...}` — the
+    /// org's data-point/coredump-byte ceiling is hit with overage off. This is
+    /// NOT an HTTP error: the request succeeded, the server just didn't keep
+    /// the data. The batch must be dropped, not retried (resending the same
+    /// data will hit the same ceiling again).
+    QuotaExceeded,
+}
+
+/// Shape shared by the `/metrics` and `/coredump` endpoints' 200-OK body when
+/// the org is over its data-point/coredump-byte ceiling with overage off.
+#[derive(Debug, Deserialize)]
+struct UploadStatusResponse {
+    #[serde(default)]
+    status: String,
 }
 
 /// OTA update check response (matches server API)
@@ -222,6 +246,18 @@ impl HttpClient {
                     .unwrap_or(60);
                 Err(HttpError::RateLimited { retry_after })
             }
+            StatusCode::PAYMENT_REQUIRED => {
+                // Org is billing_required (disabled). The server sends
+                // Retry-After: 3600 on this response (device_api.py); 3600 is
+                // also the fallback if it's ever missing or malformed.
+                let retry_after = response
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3600);
+                Err(HttpError::BillingRequired { retry_after })
+            }
             _ => {
                 let message = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
                 Err(HttpError::ServerError {
@@ -233,10 +269,10 @@ impl HttpClient {
     }
 
     /// Upload metrics batch
-    pub async fn upload_metrics(&self, batch: &MetricsBatch) -> Result<(), HttpError> {
+    pub async fn upload_metrics(&self, batch: &MetricsBatch) -> Result<UploadOutcome, HttpError> {
         if self.api_key.is_empty() {
             debug!("No API key configured, skipping metrics upload");
-            return Ok(());
+            return Ok(UploadOutcome::Uploaded);
         }
 
         let url = self.url("metrics");
@@ -253,10 +289,22 @@ impl HttpClient {
             .send()
             .await?;
 
-        self.handle_response(response).await?;
+        let response = self.handle_response(response).await?;
+        let body = response.bytes().await?;
+
+        if let Ok(parsed) = serde_json::from_slice::<UploadStatusResponse>(&body) {
+            if parsed.status == "quota_exceeded" {
+                warn!(
+                    "Metrics upload rejected: data-point quota exceeded, {} metrics dropped (will not retry this batch)",
+                    batch.metrics.len()
+                );
+                return Ok(UploadOutcome::QuotaExceeded);
+            }
+        }
+
         info!("Successfully uploaded {} metrics", batch.metrics.len());
 
-        Ok(())
+        Ok(UploadOutcome::Uploaded)
     }
 
     /// Upload coredump file
@@ -266,10 +314,10 @@ impl HttpClient {
         process_name: Option<&str>,
         signal: Option<i32>,
         executable: Option<&str>,
-    ) -> Result<(), HttpError> {
+    ) -> Result<UploadOutcome, HttpError> {
         if self.api_key.is_empty() {
             debug!("No API key configured, skipping coredump upload");
-            return Ok(());
+            return Ok(UploadOutcome::Uploaded);
         }
 
         let coredump_path = coredump_path.as_ref();
@@ -318,10 +366,22 @@ impl HttpClient {
             .send()
             .await?;
 
-        self.handle_response(response).await?;
+        let response = self.handle_response(response).await?;
+        let body = response.bytes().await?;
+
+        if let Ok(parsed) = serde_json::from_slice::<UploadStatusResponse>(&body) {
+            if parsed.status == "quota_exceeded" {
+                warn!(
+                    "Coredump upload rejected: crash-reporting quota exceeded, dropping {:?} (will not retry this file)",
+                    coredump_path
+                );
+                return Ok(UploadOutcome::QuotaExceeded);
+            }
+        }
+
         info!("Successfully uploaded coredump: {:?}", coredump_path);
 
-        Ok(())
+        Ok(UploadOutcome::Uploaded)
     }
 
     /// Report the reason for the last reboot
@@ -620,14 +680,23 @@ impl RetryPolicy {
                         return Err(e);
                     }
 
-                    // Check if error is retryable
-                    let should_retry = matches!(
-                        &e,
-                        HttpError::NetworkError(_)
-                            | HttpError::RequestError(_)
-                            | HttpError::RateLimited { .. }
-                            | HttpError::ServerError { status, .. } if *status >= 500
-                    );
+                    // Check if error is retryable. Written as separate arms
+                    // (not a single guarded or-pattern) because `status` is
+                    // only bound by the ServerError alternative — Rust
+                    // requires identical bindings across every alternative of
+                    // an or-pattern, so a combined
+                    // `A | B | ServerError { status, .. } if *status >= 500`
+                    // pattern does not compile (E0408). BillingRequired is
+                    // deliberately absent here: a 402 must never be retried
+                    // by this exponential-backoff policy — the caller pauses
+                    // the upload loop for the server's Retry-After instead.
+                    let should_retry = match &e {
+                        HttpError::NetworkError(_) => true,
+                        HttpError::RequestError(_) => true,
+                        HttpError::RateLimited { .. } => true,
+                        HttpError::ServerError { status, .. } => *status >= 500,
+                        _ => false,
+                    };
 
                     if !should_retry {
                         return Err(e);

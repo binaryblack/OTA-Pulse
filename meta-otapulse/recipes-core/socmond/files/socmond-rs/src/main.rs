@@ -18,7 +18,7 @@ mod watchdog;
 
 use crate::config::Config;
 use crate::coredump::{CoredumpManager, CoredumpUploader};
-use crate::http::{HttpClient, RetryPolicy};
+use crate::http::{HttpClient, HttpError, RetryPolicy, UploadOutcome};
 use crate::ipc::{IpcMessage, IpcServer};
 use crate::metrics::{MetricsBatch, MetricsBuffer, MetricsCollector};
 use crate::ota::OtaManager;
@@ -73,6 +73,14 @@ struct DaemonState {
     hardware_version: String,
     metrics_buffer: MetricsBuffer,
     connected: RwLock<bool>,
+    /// Set when a metrics 402 billing_required is seen; the upload_interval
+    /// tick skips attempting an upload entirely until this deadline (server's
+    /// Retry-After), while collection_interval keeps filling metrics_buffer.
+    metrics_upload_paused_until: RwLock<Option<std::time::Instant>>,
+    /// True after the most recent metrics upload attempt was told
+    /// quota_exceeded (200, batch knowingly dropped). Agent-side operational
+    /// telemetry flag, mirroring `connected`.
+    metrics_quota_exceeded: RwLock<bool>,
 }
 
 impl DaemonState {
@@ -88,6 +96,8 @@ impl DaemonState {
             firmware_version,
             hardware_version,
             connected: RwLock::new(false),
+            metrics_upload_paused_until: RwLock::new(None),
+            metrics_quota_exceeded: RwLock::new(false),
         }
     }
 }
@@ -234,23 +244,59 @@ async fn main() -> Result<()> {
             // Upload metrics and coredumps
             _ = upload_interval.tick() => {
                 // Upload metrics
-                if config.metrics.enabled && !state.metrics_buffer.is_empty().await {
-                    let metrics = state.metrics_buffer.drain().await;
-                    let batch = MetricsBatch { metrics };
+                let metrics_paused = {
+                    let guard = state.metrics_upload_paused_until.read().await;
+                    matches!(*guard, Some(until) if std::time::Instant::now() < until)
+                };
 
-                    let retry_policy = RetryPolicy::new(config.metrics.retry_max_attempts);
-                    match retry_policy.execute(|| async {
-                        http_client.upload_metrics(&batch).await
-                    }).await {
-                        Ok(()) => {
-                            *state.connected.write().await = true;
-                            debug!("Metrics uploaded successfully");
-                        }
-                        Err(e) => {
-                            warn!("Failed to upload metrics: {}", e);
-                            *state.connected.write().await = false;
-                            // Re-add metrics to buffer for retry
-                            state.metrics_buffer.add(batch.metrics).await;
+                if metrics_paused {
+                    debug!("Metrics upload paused (billing_required backoff in effect), skipping this tick; still collecting metrics");
+                } else {
+                    if state.metrics_upload_paused_until.read().await.is_some() {
+                        *state.metrics_upload_paused_until.write().await = None;
+                    }
+
+                    if config.metrics.enabled && !state.metrics_buffer.is_empty().await {
+                        let metrics = state.metrics_buffer.drain().await;
+                        let batch = MetricsBatch { metrics };
+
+                        let retry_policy = RetryPolicy::new(config.metrics.retry_max_attempts);
+                        match retry_policy.execute(|| async {
+                            http_client.upload_metrics(&batch).await
+                        }).await {
+                            Ok(UploadOutcome::Uploaded) => {
+                                *state.connected.write().await = true;
+                                *state.metrics_quota_exceeded.write().await = false;
+                                debug!("Metrics uploaded successfully");
+                            }
+                            Ok(UploadOutcome::QuotaExceeded) => {
+                                // Server accepted the request but definitively
+                                // will not store this data (over the
+                                // data-point ceiling). Requeuing would just
+                                // repeat the same drop forever, so the batch
+                                // is discarded knowingly; newly collected
+                                // metrics still get a normal attempt next tick.
+                                *state.connected.write().await = true;
+                                *state.metrics_quota_exceeded.write().await = true;
+                            }
+                            Err(HttpError::BillingRequired { retry_after }) => {
+                                warn!(
+                                    "Metrics upload blocked: org billing disabled (402); pausing uploads for {}s per server Retry-After, will keep collecting",
+                                    retry_after
+                                );
+                                *state.connected.write().await = false;
+                                *state.metrics_upload_paused_until.write().await =
+                                    Some(std::time::Instant::now() + Duration::from_secs(retry_after));
+                                // Whole org is blocked, not this specific
+                                // batch — requeue so it's retried once unpaused.
+                                state.metrics_buffer.add(batch.metrics).await;
+                            }
+                            Err(e) => {
+                                warn!("Failed to upload metrics: {}", e);
+                                *state.connected.write().await = false;
+                                // Re-add metrics to buffer for retry
+                                state.metrics_buffer.add(batch.metrics).await;
+                            }
                         }
                     }
                 }
