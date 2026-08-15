@@ -25,6 +25,21 @@ SERVER_DEVICE_ID_FILE="/var/lib/socmond/server_device_id"
 # interval-gated retry, which only fires while provisioned=false.
 NEEDS_REPROVISION_FILE="/var/lib/socmond/.needs_reprovision"
 
+# TASK-S42-013: 402 billing_required means the ORG is blocked, so uploads
+# pause entirely (per product) until the server's Retry-After deadline
+# rather than retrying every UPLOAD_INTERVAL forever; collect_metrics keeps
+# running on its own schedule regardless of either pause. These persist
+# across daemon restarts on purpose — if the org is disabled and socmond
+# restarts, it should still honor the deadline rather than immediately
+# hammering the server again.
+METRICS_UPLOAD_PAUSED_UNTIL_FILE="/var/lib/socmond/.metrics_upload_paused_until"
+COREDUMP_UPLOAD_PAUSED_UNTIL_FILE="/var/lib/socmond/.coredump_upload_paused_until"
+# Set when the most recent metrics upload attempt was told quota_exceeded
+# (200, batch knowingly dropped); cleared on the next real success. Agent-side
+# operational telemetry flag, matching the touch/rm convention already used
+# by NEEDS_REPROVISION_FILE above.
+METRICS_QUOTA_EXCEEDED_FILE="/var/lib/socmond/.metrics_quota_exceeded"
+
 # Ensure directories exist
 # NOTE: OTA functionality moved to soc-ota-agent
 mkdir -p "${METRICS_DIR}" "${COREDUMP_DIR}" "${LOG_DIR}" "$(dirname "${SOCKET_PATH}")" "$(dirname "${API_KEY_FILE}")"
@@ -363,6 +378,20 @@ EOF
 
 # Upload metrics to server
 upload_metrics() {
+    # Whole org is billing_required (402) as of a previous attempt — skip
+    # uploading entirely until the server's Retry-After deadline. New metrics
+    # still get collected on COLLECTION_INTERVAL's own schedule; only the
+    # upload attempt is paused.
+    if [ -f "${METRICS_UPLOAD_PAUSED_UNTIL_FILE}" ]; then
+        local metrics_paused_until metrics_now
+        metrics_paused_until=$(cat "${METRICS_UPLOAD_PAUSED_UNTIL_FILE}" 2>/dev/null || echo 0)
+        metrics_now=$(date +%s)
+        if [ "${metrics_now}" -lt "${metrics_paused_until}" ]; then
+            return
+        fi
+        rm -f "${METRICS_UPLOAD_PAUSED_UNTIL_FILE}"
+    fi
+
     local count=0
     for file in "${METRICS_DIR}"/metrics_*.json; do
         [ -f "${file}" ] || continue
@@ -370,7 +399,9 @@ upload_metrics() {
         if [ -n "${API_KEY}" ] && [ -n "${SERVER_URL}" ] && [ -n "${DEVICE_ID}" ]; then
             # Use correct API endpoint and headers for SoC Monitoring server
             # X-Device-ID must be the hardware device_id (not the server UUID)
-            local upload_http_code
+            local upload_http_code body_file header_file
+            body_file=$(mktemp)
+            header_file=$(mktemp)
             upload_http_code=$(curl -s -X POST \
                 -H "Content-Type: application/json" \
                 -H "X-API-Key: ${API_KEY}" \
@@ -379,11 +410,52 @@ upload_metrics() {
                 "${SERVER_URL}/api/v1/metrics" \
                 --connect-timeout 30 \
                 --max-time 60 \
-                -o /dev/null \
+                -D "${header_file}" \
+                -o "${body_file}" \
                 -w "%{http_code}")
             if printf '%s' "${upload_http_code}" | grep -q "^2"; then
+                # HTTP success does not guarantee the server stored the data:
+                # TASK-S42-006 uses 200 with {"status":"quota_exceeded"} when
+                # the org is over its data-point ceiling with overage off.
+                # Treat that as a knowing drop, not a successful upload —
+                # resending the identical batch would just hit the same
+                # ceiling again, so it is discarded (not retried).
+                local resp_status
+                resp_status=$(jq -r '.status // ""' "${body_file}" 2>/dev/null)
+                if [ "${resp_status}" = "quota_exceeded" ]; then
+                    log "Metrics upload rejected: data-point quota exceeded, dropping ${file} (will not retry this batch)"
+                    touch "${METRICS_QUOTA_EXCEEDED_FILE}"
+                else
+                    rm -f "${METRICS_QUOTA_EXCEEDED_FILE}"
+                    count=$((count + 1))
+                fi
                 rm -f "${file}"
-                count=$((count + 1))
+            elif [ "${upload_http_code}" = "402" ]; then
+                # Org is billing_required (disabled) — this is not a
+                # per-batch problem, so unlike quota_exceeded the file is
+                # kept for retry once unpaused. Every other pending file
+                # would hit the same 402, so stop this round entirely rather
+                # than hammering the server once per file.
+                local retry_after
+                retry_after=$(grep -i '^Retry-After:' "${header_file}" | tail -1 | sed 's/^[Rr]etry-[Aa]fter:[ \t]*//' | tr -d '\r\n')
+                # A leading zero (e.g. "08") is a valid all-digit string but
+                # POSIX $(( )) arithmetic treats a leading-zero literal as
+                # octal, and "08"/"09" aren't valid octal digits at all —
+                # busybox ash/dash abort with "arithmetic syntax error"
+                # (fatal, even under set +e, since this is a non-interactive
+                # shell); bash instead just returns 1 from the whole
+                # command substitution, silently skipping the pause. A value
+                # like "0060" would silently compute 48 instead of 60
+                # (octal). Reject any leading zero up front so it falls
+                # through to the safe 3600 default instead of ever reaching
+                # $(( )).
+                case "${retry_after}" in
+                    ''|0*|*[!0-9]*) retry_after=3600 ;;
+                esac
+                log "Metrics upload blocked: org billing disabled (402); pausing uploads for ${retry_after}s per server Retry-After, will keep collecting"
+                echo "$(($(date +%s) + retry_after))" > "${METRICS_UPLOAD_PAUSED_UNTIL_FILE}"
+                rm -f "${body_file}" "${header_file}"
+                break
             else
                 log "Failed to upload metrics from ${file} (HTTP ${upload_http_code})"
                 if [ "${upload_http_code}" = "401" ] || [ "${upload_http_code}" = "403" ]; then
@@ -404,6 +476,7 @@ upload_metrics() {
                     touch "${NEEDS_REPROVISION_FILE}"
                 fi
             fi
+            rm -f "${body_file}" "${header_file}"
         else
             # No API key configured, just rotate old files (keep last 100)
             local file_count
@@ -421,12 +494,32 @@ upload_metrics() {
 
 # Upload pending coredumps
 upload_coredumps() {
+    # Crash-reporting is a different billing product from metrics, so it
+    # pauses independently — see METRICS_UPLOAD_PAUSED_UNTIL_FILE above.
+    if [ -f "${COREDUMP_UPLOAD_PAUSED_UNTIL_FILE}" ]; then
+        local coredump_paused_until coredump_now
+        coredump_paused_until=$(cat "${COREDUMP_UPLOAD_PAUSED_UNTIL_FILE}" 2>/dev/null || echo 0)
+        coredump_now=$(date +%s)
+        if [ "${coredump_now}" -lt "${coredump_paused_until}" ]; then
+            return
+        fi
+        rm -f "${COREDUMP_UPLOAD_PAUSED_UNTIL_FILE}"
+    fi
+
     for meta_file in "${COREDUMP_DIR}"/*.meta; do
         [ -f "${meta_file}" ] || continue
 
         local uploaded
         uploaded=$(jq -r '.uploaded' "${meta_file}")
         [ "${uploaded}" = "false" ] || continue
+
+        # Server returned 200 quota_exceeded for this specific file on a
+        # previous attempt: the crash-reporting ceiling was hit, so this
+        # exact payload will never be accepted — dropped knowingly, not
+        # retried (unlike `uploaded`, the server never actually got it).
+        local quota_dropped
+        quota_dropped=$(jq -r '.quota_dropped // false' "${meta_file}")
+        [ "${quota_dropped}" = "false" ] || continue
 
         local coredump_file process_name signal_num executable
         coredump_file=$(jq -r '.coredump_file' "${meta_file}")
@@ -439,7 +532,9 @@ upload_coredumps() {
         [ -f "${coredump_file}" ] || continue
 
         if [ -n "${API_KEY}" ] && [ -n "${SERVER_URL}" ] && [ -n "${DEVICE_ID}" ]; then
-            local http_code curl_status
+            local http_code curl_status body_file header_file
+            body_file=$(mktemp)
+            header_file=$(mktemp)
             http_code=$(curl -s -X POST \
                 -H "X-API-Key: ${API_KEY}" \
                 -H "X-Device-ID: ${DEVICE_ID}" \
@@ -450,13 +545,47 @@ upload_coredumps() {
                 "${SERVER_URL}/api/v1/coredump" \
                 --connect-timeout 30 \
                 --max-time 300 \
-                -o /dev/null \
+                -D "${header_file}" \
+                -o "${body_file}" \
                 -w "%{http_code}")
             curl_status=$?
             if [ ${curl_status} -eq 0 ] && echo "${http_code}" | grep -q "^2"; then
-                # Mark as uploaded
-                jq '.uploaded = true' "${meta_file}" > "${meta_file}.tmp" && mv "${meta_file}.tmp" "${meta_file}"
-                log "Uploaded coredump: ${coredump_file}"
+                local resp_status
+                resp_status=$(jq -r '.status // ""' "${body_file}" 2>/dev/null)
+                if [ "${resp_status}" = "quota_exceeded" ]; then
+                    log "Coredump upload rejected: crash-reporting quota exceeded, dropping ${coredump_file} (will not retry this file)"
+                    jq '.quota_dropped = true' "${meta_file}" > "${meta_file}.tmp" && mv "${meta_file}.tmp" "${meta_file}"
+                else
+                    # Mark as uploaded
+                    jq '.uploaded = true' "${meta_file}" > "${meta_file}.tmp" && mv "${meta_file}.tmp" "${meta_file}"
+                    log "Uploaded coredump: ${coredump_file}"
+                fi
+            elif [ ${curl_status} -eq 0 ] && [ "${http_code}" = "402" ]; then
+                # Whole org is blocked for crash-reporting — every remaining
+                # pending file would hit the same 402, so stop this round
+                # rather than hammering the server once per file. This file
+                # stays pending (no failure recorded) for the next unpaused
+                # round.
+                local retry_after
+                retry_after=$(grep -i '^Retry-After:' "${header_file}" | tail -1 | sed 's/^[Rr]etry-[Aa]fter:[ \t]*//' | tr -d '\r\n')
+                # A leading zero (e.g. "08") is a valid all-digit string but
+                # POSIX $(( )) arithmetic treats a leading-zero literal as
+                # octal, and "08"/"09" aren't valid octal digits at all —
+                # busybox ash/dash abort with "arithmetic syntax error"
+                # (fatal, even under set +e, since this is a non-interactive
+                # shell); bash instead just returns 1 from the whole
+                # command substitution, silently skipping the pause. A value
+                # like "0060" would silently compute 48 instead of 60
+                # (octal). Reject any leading zero up front so it falls
+                # through to the safe 3600 default instead of ever reaching
+                # $(( )).
+                case "${retry_after}" in
+                    ''|0*|*[!0-9]*) retry_after=3600 ;;
+                esac
+                log "Coredump upload blocked: org billing disabled (402) for crash-reporting; pausing coredump uploads for ${retry_after}s per server Retry-After, will keep capturing new coredumps"
+                echo "$(($(date +%s) + retry_after))" > "${COREDUMP_UPLOAD_PAUSED_UNTIL_FILE}"
+                rm -f "${body_file}" "${header_file}"
+                break
             else
                 # BUG-179: a failing upload used to leave zero diagnostic trace
                 # anywhere (no log line, no meta bookkeeping), which is exactly
@@ -468,6 +597,7 @@ upload_coredumps() {
                     '.last_upload_error = {"message": $msg, "timestamp": $ts} | .upload_attempts = ((.upload_attempts // 0) + 1)' \
                     "${meta_file}" > "${meta_file}.tmp" && mv "${meta_file}.tmp" "${meta_file}"
             fi
+            rm -f "${body_file}" "${header_file}"
         fi
     done
 }

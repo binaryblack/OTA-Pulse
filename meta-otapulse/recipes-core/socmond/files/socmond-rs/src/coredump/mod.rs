@@ -3,7 +3,7 @@
 //! Manages coredump capture, storage, and upload.
 
 use crate::config::CrashConfig;
-use crate::http::HttpClient;
+use crate::http::{HttpClient, UploadOutcome};
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -45,6 +45,12 @@ pub struct CoredumpMetadata {
     pub coredump_size: u64,
     pub compressed: bool,
     pub uploaded: bool,
+    /// Server returned 200 quota_exceeded for this specific file: the
+    /// crash-reporting ceiling was hit, so this exact payload will never be
+    /// accepted by the server — it is dropped knowingly, not retried, and
+    /// (unlike `uploaded`) never actually reached the server.
+    #[serde(default)]
+    pub quota_dropped: bool,
     #[serde(default)]
     pub upload_attempts: u32,
     #[serde(default)]
@@ -169,6 +175,7 @@ impl CoredumpManager {
             coredump_size: compressed_size,
             compressed: true,
             uploaded: false,
+            quota_dropped: false,
             upload_attempts: 0,
             last_upload_error: None,
             kernel_version,
@@ -203,7 +210,7 @@ impl CoredumpManager {
             if path.extension().map_or(false, |e| e == "meta") {
                 let metadata: CoredumpMetadata = serde_json::from_str(&fs::read_to_string(&path)?)?;
 
-                if !metadata.uploaded {
+                if !metadata.uploaded && !metadata.quota_dropped {
                     let coredump_path = PathBuf::from(&metadata.coredump_file);
                     if coredump_path.exists() {
                         pending.push((coredump_path, path));
@@ -224,6 +231,23 @@ impl CoredumpManager {
         let mut metadata: CoredumpMetadata = serde_json::from_str(&content)?;
 
         metadata.uploaded = true;
+        metadata.upload_attempts += 1;
+        metadata.last_upload_error = None;
+
+        let json = serde_json::to_string_pretty(&metadata)?;
+        fs::write(metadata_path, json)?;
+
+        Ok(())
+    }
+
+    /// Mark a coredump as knowingly dropped because the server reported the
+    /// crash-reporting quota exceeded for this specific file. Distinct from
+    /// `mark_uploaded`: the server never stored this payload.
+    pub fn mark_quota_dropped(&self, metadata_path: &Path) -> Result<(), CoredumpError> {
+        let content = fs::read_to_string(metadata_path)?;
+        let mut metadata: CoredumpMetadata = serde_json::from_str(&content)?;
+
+        metadata.quota_dropped = true;
         metadata.upload_attempts += 1;
         metadata.last_upload_error = None;
 
@@ -325,6 +349,10 @@ pub struct CoredumpUploader {
     manager: CoredumpManager,
     http_client: HttpClient,
     max_retries: u32,
+    /// Set when a 402 billing_required is seen; uploads are skipped entirely
+    /// until this deadline (server's Retry-After), while new coredumps still
+    /// get captured to disk by `save_coredump` independently of this loop.
+    paused_until: tokio::sync::RwLock<Option<std::time::Instant>>,
 }
 
 impl CoredumpUploader {
@@ -333,11 +361,23 @@ impl CoredumpUploader {
             manager,
             http_client,
             max_retries,
+            paused_until: tokio::sync::RwLock::new(None),
         }
     }
 
     /// Upload all pending coredumps
     pub async fn upload_pending(&self) -> Result<u32, CoredumpError> {
+        {
+            let guard = self.paused_until.read().await;
+            if let Some(until) = *guard {
+                if std::time::Instant::now() < until {
+                    debug!("Coredump uploads paused (billing_required backoff in effect), skipping this round");
+                    return Ok(0);
+                }
+            }
+        }
+        *self.paused_until.write().await = None;
+
         let pending = self.manager.list_pending()?;
         let mut uploaded_count = 0;
 
@@ -354,11 +394,39 @@ impl CoredumpUploader {
                 continue;
             }
 
-            match self.http_client.upload_coredump(&coredump_path, &metadata_path).await {
-                Ok(()) => {
+            let process_name = Some(metadata.executable.as_str());
+            let executable = Some(metadata.executable.as_str());
+            let signal = Some(metadata.signal);
+
+            match self
+                .http_client
+                .upload_coredump(&coredump_path, process_name, signal, executable)
+                .await
+            {
+                Ok(UploadOutcome::Uploaded) => {
                     self.manager.mark_uploaded(&metadata_path)?;
                     uploaded_count += 1;
                     info!("Uploaded coredump: {}", coredump_path.display());
+                }
+                Ok(UploadOutcome::QuotaExceeded) => {
+                    warn!(
+                        "Coredump upload rejected: crash-reporting quota exceeded, dropping {} (will not retry this file)",
+                        coredump_path.display()
+                    );
+                    self.manager.mark_quota_dropped(&metadata_path)?;
+                }
+                Err(crate::http::HttpError::BillingRequired { retry_after }) => {
+                    warn!(
+                        "Coredump upload blocked: org billing disabled (402) for crash-reporting; pausing coredump uploads for {}s per server Retry-After, will keep capturing new coredumps",
+                        retry_after
+                    );
+                    *self.paused_until.write().await =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(retry_after));
+                    // Whole org is blocked — every remaining pending file
+                    // would hit the same 402, so stop this round rather than
+                    // hammering the server once per file. Files stay pending
+                    // (no failure recorded) and are retried once unpaused.
+                    break;
                 }
                 Err(e) => {
                     error!("Failed to upload coredump {}: {}", coredump_path.display(), e);
