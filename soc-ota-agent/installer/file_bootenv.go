@@ -76,6 +76,18 @@ type FileBasedBootEnv struct {
 
 // NewFileBasedBootEnv creates a new file-based boot environment handler.
 // This is an alternative to U-Boot environment that works with any bootloader.
+//
+// rootfsPartA/rootfsPartB are resolved via maybeResolveLink before being
+// stored, mirroring NewDualRootfsDevice (dual_rootfs_device.go). Without
+// this, a board configured with unresolved by-partlabel/by-partuuid paths
+// (e.g. /dev/disk/by-partlabel/rootfs_a) stores a value with no trailing
+// partition digits; extractPartitionNumber then returns "" and
+// partitionNumberToSlot/ReconcileToBootedSlot can never match the running
+// partition, permanently breaking this board's boot-slot bookkeeping and
+// the uncommitted-update rollback safety net (see ReconcileToBootedSlot's
+// "does not match configured rootfs A/B pair" warning). Resolving here,
+// once, at construction guarantees every caller (including tests) gets a
+// FileBasedBootEnv whose rootfsPartA/B can never hold an unresolvable path.
 func NewFileBasedBootEnv(cmd system.Commander, rootfsPartA, rootfsPartB string) *FileBasedBootEnv {
 	f := &FileBasedBootEnv{
 		Commander:          cmd,
@@ -83,8 +95,8 @@ func NewFileBasedBootEnv(cmd system.Commander, rootfsPartA, rootfsPartB string) 
 		bootCountFile:      DefaultBootCountFile,
 		upgradeAvailFile:   DefaultUpgradeAvailFile,
 		menderBootPartFile: DefaultMenderBootPartFile,
-		rootfsPartA:        rootfsPartA,
-		rootfsPartB:        rootfsPartB,
+		rootfsPartA:        maybeResolveLink(rootfsPartA),
+		rootfsPartB:        maybeResolveLink(rootfsPartB),
 	}
 	f.detectFn = f.detectCurrentPartitionNumber
 	return f
@@ -399,6 +411,50 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
 	if bootFile == "" {
 		log.Warn("FileBasedBootEnv: Could not find or mount boot partition for boot slot sync")
 		return errors.New("could not find or mount boot partition for boot slot sync")
+	}
+
+	// Persist the OLD (pre-switch) slot value as mender_boot_part_prev, next to
+	// mender_boot_part on the SAME FAT boot partition, BEFORE it is overwritten
+	// below. This is the file-based-boot analogue of the direct-boot
+	// cmdline_prev.txt backup (see updateBootCmdline) and is the rollback target
+	// consumed by otapulse-boot-health.service's file-based-boot branch
+	// (GAP-OTA-006 follow-up): a board like Orange Pi Zero 2W has NO working
+	// U-Boot env (has_uboot_env: false) and NO cmdline.txt (not VideoCore
+	// direct-boot), so without this record a slot that never boots the agent is
+	// unrecoverable — there is nothing to revert TO.
+	//
+	// Deliberately written on the FAT boot partition, NOT /data: /data is
+	// exactly the thing a disk-fill scenario (large_artifact.py LA-002) can
+	// leave full or (BUG-235) unmounted, and it is also where the OLD
+	// (pre-this-fix) bookkeeping lived — losing it to an ENOSPC-truncated write
+	// during the very install that needs the rollback net is the root cause
+	// this closes.
+	//
+	// "Write once per cycle" — same doctrine as updateBootCmdline's
+	// cmdline_prev.txt: never clobber a backup already written earlier in this
+	// OTA cycle (e.g. a retried WriteEnv call), and never write a value equal to
+	// the new target (that would record "previous == current", making a later
+	// revert a no-op). Best-effort: a failure to read/write the prev marker must
+	// not abort the slot switch itself — it only means a subsequent revert has
+	// nothing to restore, no worse than before this fix existed.
+	prevFile := filepath.Join(filepath.Dir(bootFile), "mender_boot_part_prev")
+	if oldData, statErr := os.ReadFile(bootFile); statErr == nil {
+		oldPart := strings.TrimSpace(string(oldData))
+		if oldPart != "" && oldPart != partNum {
+			if _, prevStatErr := os.Stat(prevFile); os.IsNotExist(prevStatErr) {
+				// Best-effort, direct write (not the generic f.writeFile retry
+				// helper below — that helper's remount-rw fallback targets
+				// /data specifically, not this FAT boot mount). A failure here
+				// only means a later revert has nothing to restore; it must
+				// never abort the slot switch itself.
+				if werr := os.WriteFile(prevFile, []byte(oldPart+"\n"), 0644); werr != nil {
+					log.Warnf("FileBasedBootEnv: Failed to write mender_boot_part_prev rollback backup: %v", werr)
+				} else {
+					syscall.Sync()
+					log.Infof("FileBasedBootEnv: Recorded mender_boot_part_prev=%s (rollback target) before switching to %s", oldPart, partNum)
+				}
+			}
+		}
 	}
 
 	// Write to boot partition
@@ -783,6 +839,19 @@ func (f *FileBasedBootEnv) readFile(path, defaultVal string) (string, error) {
 
 // writeFile writes content to a file, creating parent directories if needed.
 // Includes retry logic for transient filesystem issues (e.g., after large OTA writes).
+//
+// Writes ATOMICALLY via writeFileAtomic: content lands in a temp file in the
+// same directory, is fsync'd, then rename(2)'d over the target. This closes a
+// real data-loss hole: the previous implementation called os.WriteFile
+// (O_TRUNC) directly against the target, so a write that failed PARTWAY
+// (classically ENOSPC on a near-full /data — e.g. large_artifact.py's LA-002,
+// which deliberately fills /data to ~10 MiB free) left the file TRUNCATED TO
+// 0 BYTES: the target was truncated by O_TRUNC before the failing write ever
+// completed. A state script or boot-health check that later reads that file
+// (e.g. /data/ota/mender_boot_part) then sees an empty value instead of
+// either the old or the new slot. rename(2) within one filesystem is atomic,
+// so the target now either keeps its OLD content or gets the FULLY-WRITTEN
+// new content — never a partial one.
 func (f *FileBasedBootEnv) writeFile(path, content string) error {
 	// Ensure directory exists
 	dir := filepath.Dir(path)
@@ -792,7 +861,8 @@ func (f *FileBasedBootEnv) writeFile(path, content string) error {
 
 	// Retry logic for transient filesystem issues
 	// After large writes (6GB OTA image), the filesystem may temporarily
-	// appear read-only due to buffer pressure or pending syncs.
+	// appear read-only OR out of space due to buffer pressure or pending
+	// syncs (or a deliberately near-full /data — see the doc comment above).
 	// The eMMC controller may need significant time to flush all writes.
 	maxRetries := 15
 	retryDelay := 2 * time.Second
@@ -816,22 +886,71 @@ func (f *FileBasedBootEnv) writeFile(path, content string) error {
 			}
 		}
 
-		lastErr = os.WriteFile(path, []byte(content+"\n"), 0644)
+		lastErr = writeFileAtomic(path, dir, content+"\n", 0644)
 		if lastErr == nil {
 			if i > 0 {
 				log.Infof("FileBasedBootEnv: Successfully wrote to %s on attempt %d", path, i+1)
 			}
-			// Sync to ensure the write is persisted
+			// Sync to ensure the write (and its rename) is persisted
 			syscall.Sync()
 			return nil
 		}
 
-		// Check if error is EROFS (read-only filesystem) - worth retrying
-		if !errors.Is(lastErr, syscall.EROFS) {
-			// Not a read-only error, don't retry
+		// Retry on EROFS (read-only filesystem) or ENOSPC (out of space) — both
+		// are the transient conditions this loop exists for. Previously only
+		// EROFS was retried: an ENOSPC write returned immediately on the FIRST
+		// attempt even though the surrounding comment already documented the
+		// buffer-pressure/large-OTA-write scenario as exactly what this loop
+		// should ride out, and even though ENOSPC is the realistic failure mode
+		// on a near-full /data (e.g. LA-002), not EROFS.
+		if !errors.Is(lastErr, syscall.EROFS) && !errors.Is(lastErr, syscall.ENOSPC) {
+			// Not a retryable error, don't retry
 			break
 		}
 	}
 
 	return lastErr
+}
+
+// writeFileAtomic writes content to a temp file inside dir, fsyncs it, then
+// rename(2)s it over path. Never partially overwrites an existing path: the
+// rename either lands in full (path now holds the complete new content) or it
+// doesn't happen at all (path is untouched) — unlike os.WriteFile's O_TRUNC,
+// which can leave path truncated to zero bytes if the write fails partway.
+// dir MUST be on the same filesystem as path (every caller passes
+// filepath.Dir(path)) — rename(2) is only atomic within one filesystem.
+func writeFileAtomic(path, dir, content string, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(dir, ".tmp-"+filepath.Base(path)+"-")
+	if err != nil {
+		return errors.Wrapf(err, "failed to create temp file in %s", dir)
+	}
+	tmpPath := tmp.Name()
+	// Best-effort cleanup of the temp file on any path that returns before a
+	// successful rename (a successful rename moves the temp file away, so this
+	// Remove then simply no-ops with ENOENT).
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return errors.Wrapf(err, "failed to write temp file %s", tmpPath)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return errors.Wrapf(err, "failed to chmod temp file %s", tmpPath)
+	}
+	// fsync the temp file's data BEFORE rename, so an unclean
+	// shutdown/power-cut between the rename and the next full sync can never
+	// leave the renamed target holding unflushed (i.e. possibly incomplete)
+	// content.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return errors.Wrapf(err, "failed to fsync temp file %s", tmpPath)
+	}
+	if err := tmp.Close(); err != nil {
+		return errors.Wrapf(err, "failed to close temp file %s", tmpPath)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return errors.Wrapf(err, "failed to rename %s to %s", tmpPath, path)
+	}
+	return nil
 }
