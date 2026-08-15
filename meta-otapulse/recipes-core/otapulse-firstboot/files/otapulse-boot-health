@@ -1,33 +1,55 @@
 #!/bin/sh
 # OTAPulse State Script: otapulse-boot-health
 #
-# Pre-agent brick-prevention for DIRECT-BOOT boards (GAP-OTA-006).
+# Pre-agent brick-prevention for boards with NO in-agent boot-count fallback
+# (GAP-OTA-006), covering TWO board classes:
+#
+#   (A) DIRECT-BOOT boards (no U-Boot env at all — e.g. Raspberry Pi VideoCore
+#       firmware reads root= straight from cmdline.txt on the FAT boot
+#       partition).
+#   (B) FILE-BASED-BOOT boards with no U-Boot env either, but no cmdline.txt
+#       scheme (e.g. Orange Pi Zero 2W / Allwinner boot.scr + mender_boot_part
+#       on the FAT boot partition, has_uboot_env: false in the board profile).
 #
 # Problem this closes:
-#   On direct-boot boards (no U-Boot env — e.g. Raspberry Pi VideoCore firmware
-#   reads root= straight from cmdline.txt), an OTA slot switch PERMANENTLY
-#   rewrites cmdline.txt's root= to the new slot (see file_bootenv.go
-#   updateBootCmdline + ArtifactReboot_Enter_01 section 1) and keeps only a
-#   manual cmdline_prev.txt backup. The only in-agent fallback,
-#   HandleBootCountFallback() in dual_rootfs_device.go, runs once inside the Go
-#   agent's own daemon.Run() at startup — so if the NEW slot never gets the OTA
-#   agent running (kernel panic, broken rootfs, sshd/network down, agent
-#   crash-loop) that fallback never fires and the device is permanently stuck on
-#   a bad slot: a hard brick from a software point of view (no automatic revert).
-#   Additionally, nothing ever INCREMENTS boot_count on file-based boards, so the
-#   in-agent fallback could never trigger anyway.
+#   On both classes, an OTA slot switch PERMANENTLY commits the new slot (A:
+#   file_bootenv.go updateBootCmdline rewrites cmdline.txt's root=; B:
+#   file_bootenv.go syncBootSlotToBootPartition rewrites mender_boot_part) with
+#   only a manual rollback backup (A: cmdline_prev.txt; B: mender_boot_part_prev
+#   — see syncBootSlotToBootPartition's "write once per cycle" comment). The
+#   only in-agent fallback, HandleBootCountFallback() in dual_rootfs_device.go,
+#   runs once inside the Go agent's own daemon.Run() at startup — so if the NEW
+#   slot never gets the OTA agent running (kernel panic, broken rootfs,
+#   sshd/network down, agent crash-loop) that fallback never fires and the
+#   device is permanently stuck on a bad slot: a hard brick from a software
+#   point of view (no automatic revert). Additionally, nothing else ever
+#   INCREMENTS boot_count on either class of board, so the in-agent fallback
+#   could never trigger anyway even on a slot that DOES eventually boot.
 #
 # What this does (runs from systemd BEFORE soc-ota-agent.service, so it works
 # even when the agent never starts):
-#   1. If this is not a direct-boot board (no FAT boot partition carrying
-#      cmdline.txt) -> no-op, exit 0.
-#   2. If no upgrade is pending (upgrade_available != 1) -> exit 0 (defensively
-#      reset boot_count to 0 and drop any stale cmdline_prev.txt — pure hygiene).
-#   3. Otherwise increment boot_count and persist it.
-#   4. If boot_count >= MAX_BOOT_RETRIES: revert to the previous slot by restoring
-#      cmdline_prev.txt over cmdline.txt, clear upgrade_available + boot_count,
-#      then reboot onto the known-good slot.
-#   5. Otherwise exit 0 and let the boot continue (the agent, if it comes up,
+#   0. If neither class applies (no FAT boot partition, or a U-Boot-env board,
+#      or an extlinux/systemd-boot board — those manage their own fallback
+#      elsewhere) -> no-op, exit 0.
+#   1. If no upgrade is pending (upgrade_available != 1) -> exit 0 (defensively
+#      reset boot_count to 0 and drop any stale rollback backup — pure hygiene).
+#   2. Otherwise increment boot_count and persist it.
+#      - Class A persists boot_count in /data/ota (unchanged, pre-existing
+#        behavior) — a direct-boot board's rollback trigger (cmdline_prev.txt)
+#        already lives on the FAT, and /data/ota/boot_count is also what
+#        HandleBootCountFallback (the in-agent path) reads on this class.
+#      - Class B persists boot_count ON THE FAT boot partition itself
+#        (mender_boot_part board's own "boot_count" file), NOT /data. /data is
+#        exactly the partition a disk-fill scenario (large_artifact.py LA-002)
+#        can leave nearly full or (BUG-235) unmounted — the counter that
+#        decides whether this board bricks must not depend on the same
+#        resource the test deliberately constrains.
+#   3. If boot_count >= MAX_BOOT_RETRIES: revert to the previous slot (A:
+#      restore cmdline_prev.txt over cmdline.txt; B: restore
+#      mender_boot_part_prev over mender_boot_part, and the marker file on
+#      marker-scheme boards), clear upgrade_available + boot_count, then
+#      reboot onto the known-good slot.
+#   4. Otherwise exit 0 and let the boot continue (the agent, if it comes up,
 #      will CommitUpdate and clear the flags).
 #
 # Hardware/architecture independent: the FAT boot partition is located by GPT/FS
@@ -44,6 +66,8 @@ BOOT_COUNT_FILE="$OTA_DIR/boot_count"
 # MAX_BOOT_RETRIES mirrors DefaultMaxBootRetries in
 # installer/dual_rootfs_device.go (currently 3). There is no clean way to share
 # a single constant across Go and /bin/sh here — KEEP THESE TWO IN SYNC BY HAND.
+# Shared by both the direct-boot (cmdline.txt) and file-based-boot (boot.scr)
+# branches below.
 MAX_BOOT_RETRIES=3
 
 MNT=""
@@ -98,6 +122,123 @@ write_ota() {
     return 0
 }
 
+# Class B: file-based-boot board (boot.scr + mender_boot_part on the FAT boot
+# partition, no cmdline.txt, no working U-Boot env — e.g. Orange Pi Zero 2W).
+#
+# The FAT is already mounted at $MNT (caller's responsibility) when this is
+# called. Unlike Class A, the retry counter and rollback target are persisted
+# ON THE FAT ($MNT/boot_count, $MNT/mender_boot_part_prev) rather than under
+# $OTA_DIR (/data/ota) — see the module header comment for why: /data is
+# exactly the partition large_artifact.py's LA-002 deliberately fills nearly
+# full, and the counter that decides whether this board bricks must not
+# depend on the resource the test is constraining. upgrade_available itself
+# is still read from $OTA_DIR — it is the OTA orchestrator's own
+# "install pending" signal and is set/cleared by the agent regardless of
+# boot-state scheme; a best-effort read (defaulting to "0"/not-pending on any
+# read failure) means a genuinely unreadable /data never trips a revert based
+# on a guess.
+#
+# mender_boot_part_prev is written by file_bootenv.go's
+# syncBootSlotToBootPartition, once per OTA cycle, BEFORE it overwrites
+# mender_boot_part with the new target — this function only ever consumes it.
+#
+# Always exits the whole script (reboot on revert, plain exit 0 otherwise) —
+# never returns to the Class A logic below it.
+file_based_boot_health() {
+    FAT_BOOT_COUNT_FILE="$MNT/boot_count"
+    FAT_PREV_PART_FILE="$MNT/mender_boot_part_prev"
+
+    UPGRADE_AVAIL=$(read_ota "$UPGRADE_AVAIL_FILE" "0")
+    if [ "$UPGRADE_AVAIL" != "1" ]; then
+        # No pending upgrade. Defensive hygiene: reset a stray non-zero FAT
+        # boot_count and drop any stale mender_boot_part_prev (a good boot's
+        # backup that CommitUpdate/ClearDirectBootBackup-equivalent cleanup
+        # may not have reached). Leaving a stale prev marker around would make
+        # the NEXT OTA's revert restore the WRONG (already-current) slot.
+        if [ -f "$FAT_BOOT_COUNT_FILE" ]; then
+            FAT_BC=$(tr -dc '0-9' < "$FAT_BOOT_COUNT_FILE" 2>/dev/null || true)
+            if [ -n "$FAT_BC" ] && [ "$FAT_BC" != "0" ]; then
+                printf '0' > "$FAT_BOOT_COUNT_FILE" 2>/dev/null && sync && \
+                    log "No pending upgrade — reset FAT boot_count to 0"
+            fi
+        fi
+        if [ -f "$FAT_PREV_PART_FILE" ]; then
+            rm -f "$FAT_PREV_PART_FILE"
+            sync
+            log "No pending upgrade — removed stale mender_boot_part_prev"
+        fi
+        cleanup
+        exit 0
+    fi
+
+    # ── Upgrade pending: count this boot attempt (FAT-resident counter) ────
+    # NOTE: persistence of the incremented count is best-effort (fallback to
+    # in-memory on write failure), mirroring Class A's rationale — the revert
+    # decision below must not be skipped by an unguarded failing write under
+    # `set -e`.
+    FAT_BC=$(tr -dc '0-9' < "$FAT_BOOT_COUNT_FILE" 2>/dev/null || true)
+    FAT_BC=${FAT_BC:-0}
+    FAT_BC=$((FAT_BC + 1))
+    if ! printf '%s' "$FAT_BC" > "$FAT_BOOT_COUNT_FILE" 2>/dev/null; then
+        log "WARNING: failed to persist FAT boot_count=$FAT_BC (continuing on in-memory value)"
+    fi
+    sync
+    log "Pending upgrade (file-based-boot): boot attempt $FAT_BC/$MAX_BOOT_RETRIES"
+
+    if [ "$FAT_BC" -ge "$MAX_BOOT_RETRIES" ]; then
+        log "boot_count=$FAT_BC >= $MAX_BOOT_RETRIES — reverting to previous slot (file-based-boot)"
+
+        if [ -s "$FAT_PREV_PART_FILE" ] && \
+           PREV_PART=$(tr -dc '0-9' < "$FAT_PREV_PART_FILE" 2>/dev/null) && \
+           [ -n "$PREV_PART" ]; then
+            printf '%s' "$PREV_PART" > "$MNT/mender_boot_part"
+            rm -f "$FAT_PREV_PART_FILE"
+
+            # Marker-scheme boards (see ArtifactReboot_Enter_01 section 2):
+            # some vendor U-Boots ignore the numeric mender_boot_part and
+            # instead select Slot B *iff* mender_boot_slot_b is PRESENT
+            # (absent => Slot A). Flip the marker too if this boot.scr uses
+            # that scheme, so the revert takes on those boards as well; a
+            # no-op on numeric-scheme boards (detected directly from boot.scr
+            # content, mirroring ArtifactReboot_Enter_01).
+            if grep -q mender_boot_slot_b "$MNT/boot.scr" 2>/dev/null; then
+                PART_B=""
+                if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
+                    PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b 2>/dev/null | grep -oE '[0-9]+$')
+                fi
+                if [ -n "$PART_B" ] && [ "$PREV_PART" = "$PART_B" ]; then
+                    printf 'b' > "$MNT/mender_boot_slot_b"
+                    rm -f "$MNT/mender_boot_slot_a"
+                else
+                    rm -f "$MNT/mender_boot_slot_b"
+                    printf 'a' > "$MNT/mender_boot_slot_a"
+                fi
+            fi
+            sync
+            log "Restored mender_boot_part=$PREV_PART from mender_boot_part_prev (rollback to known-good slot)"
+        else
+            log "WARNING: no valid mender_boot_part_prev to restore — clearing flags anyway to stop the boot loop"
+        fi
+
+        # Clear the pending-upgrade state so we do not loop on the reverted
+        # slot. Best-effort (|| true): mender_boot_part is ALREADY reverted
+        # above, so even if these flag writes fail we must still reboot onto
+        # it rather than let `set -e` abort before the reboot.
+        write_ota "$UPGRADE_AVAIL_FILE" "0" || log "WARNING: failed to clear upgrade_available"
+        printf '0' > "$FAT_BOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT boot_count"
+        sync
+
+        log "Rebooting onto the previous slot (file-based-boot)"
+        cleanup
+        reboot
+        exit 0
+    fi
+
+    # ── Still within the retry budget — let the boot continue ──────────────
+    cleanup
+    exit 0
+}
+
 # ── 1. Direct-boot board detection ──────────────────────────────────────────
 FAT_DEV=$(find_fat_boot || true)
 if [ -z "$FAT_DEV" ]; then
@@ -115,16 +256,28 @@ if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
 fi
 trap cleanup EXIT INT TERM
 
-# Only VideoCore-style direct-boot boards carry cmdline.txt on the FAT boot
-# partition. Anything else (U-Boot boot.scr / extlinux / EFI) is handled by the
-# in-agent fallback and the bootloader itself — this script is a no-op there.
+# VideoCore-style direct-boot boards carry cmdline.txt on the FAT boot
+# partition — handle those with the original (Class A) logic below. A board
+# with no cmdline.txt but a boot.scr + mender_boot_part (Class B — e.g. Orange
+# Pi Zero 2W) gets its own branch (see file-based-boot section further down).
+# Anything else (extlinux / systemd-boot EFI) is handled by the bootloader's
+# own Automatic Boot Assessment (see ArtifactReboot_Enter_01 sections 3/4) —
+# this script is a no-op there.
 if [ ! -f "$MNT/cmdline.txt" ]; then
-    log "No cmdline.txt on $FAT_DEV — not a direct-boot board, nothing to do"
+    if [ -f "$MNT/boot.scr" ] && [ -f "$MNT/mender_boot_part" ]; then
+        log "No cmdline.txt but boot.scr + mender_boot_part present on $FAT_DEV — file-based-boot board, using FAT-persisted rollback"
+        file_based_boot_health
+        # file_based_boot_health always exits (reboot or plain exit 0); this
+        # line is unreachable but documents intent if that ever changes.
+        cleanup
+        exit 0
+    fi
+    log "No cmdline.txt on $FAT_DEV — not a direct-boot or file-based-boot board, nothing to do"
     cleanup
     exit 0
 fi
 
-# ── 2. Is an upgrade pending? ───────────────────────────────────────────────
+# ── 2. Is an upgrade pending? (Class A: direct-boot / cmdline.txt) ─────────
 UPGRADE_AVAIL=$(read_ota "$UPGRADE_AVAIL_FILE" "0")
 if [ "$UPGRADE_AVAIL" != "1" ]; then
     # No pending upgrade. Defensive hygiene: reset a stray non-zero boot_count
