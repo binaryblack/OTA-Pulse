@@ -40,6 +40,19 @@ COREDUMP_UPLOAD_PAUSED_UNTIL_FILE="/var/lib/socmond/.coredump_upload_paused_unti
 # by NEEDS_REPROVISION_FILE above.
 METRICS_QUOTA_EXCEEDED_FILE="/var/lib/socmond/.metrics_quota_exceeded"
 
+# LA-002 / BUG-288-collateral restart storm: counts consecutive times a key
+# minted by re-provisioning got rejected again (401/403) with no real upload
+# success in between. Reset to 0 on any real upload success. Read by
+# upload_metrics() to decide when re-provisioning stops being useful and a
+# backoff should apply instead of retrying every cycle.
+REPROVISION_FAIL_COUNT_FILE="/var/lib/socmond/.reprovision_fail_count"
+# Set (to a unix timestamp) once REPROVISION_FAIL_COUNT_FILE shows a key
+# rejected twice in a row (i.e. the re-provision that was supposed to fix it
+# didn't) — the main loop will not attempt another re-provision until this
+# deadline. Persists across daemon restarts on purpose, same rationale as
+# METRICS_UPLOAD_PAUSED_UNTIL_FILE above.
+REPROVISION_BACKOFF_UNTIL_FILE="/var/lib/socmond/.reprovision_backoff_until"
+
 # Ensure directories exist
 # NOTE: OTA functionality moved to soc-ota-agent
 mkdir -p "${METRICS_DIR}" "${COREDUMP_DIR}" "${LOG_DIR}" "$(dirname "${SOCKET_PATH}")" "$(dirname "${API_KEY_FILE}")"
@@ -100,6 +113,51 @@ get_mac_address() {
 
 MAC_ADDRESS=$(get_mac_address)
 
+# LA-002: best-effort detection of an in-progress OTA deployment, used ONLY
+# to decide whether it's safe to `systemctl restart soc-ota-agent` from
+# provision_device() below. soc-ota-agent's real state machine lives in an
+# LMDB file (mender-store) with no shell-readable export, so this is a
+# conservative approximation rather than an exact read of MenderState:
+#  - the mender-store DB file is written on every state transition during an
+#    active deployment (download/install/reboot/commit); during idle
+#    steady-state operation it is written far less often than
+#    OTA_INFLIGHT_WINDOW_S, so a very recent write is a reasonable "busy"
+#    signal.
+#  - a currently-running OTA state-script process (ArtifactInstall/-Reboot/
+#    -Commit/-Rollback*, see meta-otapulse/recipes-core/soc-ota-agent/files/)
+#    is a precise, direct signal for exactly the window this incident hit:
+#    the agent SIGTERM'd mid "Committing update".
+# False positives (skipping a restart that was actually safe) just delay the
+# credential reload by one provisioning cycle — harmless. False negatives are
+# bounded by OTA_INFLIGHT_WINDOW_S.
+OTA_DATASTORE_DIRS="/var/lib/otapulse /var/lib/mender"
+OTA_MENDER_STORE_NAME="mender-store"
+OTA_INFLIGHT_WINDOW_S=60
+
+ota_update_in_flight() {
+    local now dir store_file store_mtime
+    now=$(date +%s)
+
+    for dir in ${OTA_DATASTORE_DIRS}; do
+        store_file="${dir}/${OTA_MENDER_STORE_NAME}"
+        if [ -f "${store_file}" ]; then
+            store_mtime=$(stat -c %Y "${store_file}" 2>/dev/null || echo 0)
+            case "${store_mtime}" in ''|*[!0-9]*) store_mtime=0 ;; esac
+            if [ "${store_mtime}" -gt 0 ] && [ $((now - store_mtime)) -lt "${OTA_INFLIGHT_WINDOW_S}" ]; then
+                return 0
+            fi
+        fi
+    done
+
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -f 'Artifact(Install|Reboot|Commit|Rollback|RollbackReboot)_(Enter|Leave|Error)' >/dev/null 2>&1 && return 0
+    else
+        ps 2>/dev/null | grep -E 'Artifact(Install|Reboot|Commit|Rollback|RollbackReboot)_(Enter|Leave|Error)' | grep -qv grep && return 0
+    fi
+
+    return 1
+}
+
 # Get firmware version - prioritize build version file
 if [ -f /etc/build-version ]; then
     FIRMWARE_VERSION=$(cat /etc/build-version)
@@ -135,6 +193,19 @@ provision_device() {
     fi
 
     log "Provisioning device with server..."
+
+    # LA-002: snapshot what's currently on disk BEFORE this call so we can
+    # tell, after a "successful" provision, whether anything soc-ota-agent
+    # actually cares about changed. Provisioning can return HTTP 200 with a
+    # freshly-minted key that is STILL bound to the same stale/mismatched
+    # device row as before (e.g. a MAC-provisioned duplicate) — restarting
+    # soc-ota-agent on every one of those cycles is what caused the LA-002
+    # restart storm.
+    local prev_device_id prev_server_device_id
+    prev_device_id=""
+    [ -f "/var/lib/socmond/device_id" ] && prev_device_id=$(cat "/var/lib/socmond/device_id" 2>/dev/null)
+    prev_server_device_id=""
+    [ -f "${SERVER_DEVICE_ID_FILE}" ] && prev_server_device_id=$(cat "${SERVER_DEVICE_ID_FILE}" 2>/dev/null)
 
     local response
     response=$(curl -s -X POST \
@@ -173,8 +244,20 @@ provision_device() {
             log "  Hardware ID: ${DEVICE_ID}"
             log "  API Key: $(printf '%.12s' "$API_KEY")... (stored securely)"
 
-            # Notify soc-ota-agent to reload credentials if running
-            if command -v systemctl >/dev/null 2>&1; then
+            # LA-002: only restart soc-ota-agent when the credentials it
+            # actually reads (hardware device_id + server device_id) changed
+            # from what was on disk before this call — the API key itself is
+            # deliberately NOT part of this comparison, since a re-provision
+            # loop bound to the same (wrong) device row mints a new key every
+            # cycle even though nothing meaningful changed. And never restart
+            # mid-deployment (BUG-245-class brick risk: this SIGTERM'd the
+            # agent during "Committing update" in the LA-002 incident).
+            if [ "${DEVICE_ID}" = "${prev_device_id}" ] && [ "${SERVER_DEVICE_ID}" = "${prev_server_device_id}" ]; then
+                log "Provisioned credentials unchanged (device_id=${DEVICE_ID}, server_device_id=${SERVER_DEVICE_ID}) — not restarting soc-ota-agent"
+            elif ota_update_in_flight; then
+                log "Provisioned credentials changed but an OTA update appears in flight — NOT restarting soc-ota-agent to avoid killing it mid-deployment"
+            elif command -v systemctl >/dev/null 2>&1; then
+                log "Provisioned credentials changed (device_id/server_device_id) — restarting soc-ota-agent to reload them"
                 systemctl restart soc-ota-agent 2>/dev/null || true
             fi
 
@@ -427,6 +510,13 @@ upload_metrics() {
                     touch "${METRICS_QUOTA_EXCEEDED_FILE}"
                 else
                     rm -f "${METRICS_QUOTA_EXCEEDED_FILE}"
+                    # LA-002: a real accepted upload proves the current API
+                    # key is fine — clear any consecutive-rejection tracking
+                    # and backoff from a past episode so a future rejection
+                    # (e.g. a genuinely rotated key) starts a fresh count and
+                    # gets BUG-288's prompt one-shot re-provision, not a
+                    # leftover backoff.
+                    rm -f "${REPROVISION_FAIL_COUNT_FILE}" "${REPROVISION_BACKOFF_UNTIL_FILE}"
                     count=$((count + 1))
                 fi
                 rm -f "${file}"
@@ -473,6 +563,49 @@ upload_metrics() {
                     # when provisioned=false.
                     log "API key rejected (HTTP ${upload_http_code}) — clearing it and flagging for re-provisioning"
                     rm -f "${API_KEY_FILE}"
+                    # Also clear the in-memory copy: the top-of-script parse
+                    # of API_KEY only runs once at startup, and the "skip if
+                    # already provisioned" check + this branch only ever
+                    # touch the FILE, not this variable. Without clearing it,
+                    # every upload attempt between now and the next
+                    # provision_device() call (which can be up to
+                    # REPROVISION_BACKOFF_UNTIL_FILE's deadline once backoff
+                    # is active, below) would keep retrying the SAME rejected
+                    # key, re-entering this branch and repeatedly pushing the
+                    # backoff deadline further into the future.
+                    API_KEY=""
+
+                    # LA-002: if the key that just got rejected was itself
+                    # minted by the IMMEDIATELY PRECEDING re-provision (not a
+                    # fresh first-time provisioning), re-provisioning again
+                    # cannot help — the server is handing back a key bound to
+                    # the same broken/mismatched device row every time, so
+                    # retrying every UPLOAD_INTERVAL just repeats
+                    # provision->restart->reject in a tight loop (this is
+                    # what caused the LA-002 agent-restart storm). Track
+                    # consecutive rejection-after-reprovision events and back
+                    # off exponentially instead. A real upload success (above)
+                    # resets the counter, so a genuinely rotated/revoked key
+                    # still recovers via one prompt re-provision — BUG-288's
+                    # intent is preserved for that case.
+                    local reprov_fail_count
+                    reprov_fail_count=0
+                    [ -f "${REPROVISION_FAIL_COUNT_FILE}" ] && reprov_fail_count=$(cat "${REPROVISION_FAIL_COUNT_FILE}" 2>/dev/null)
+                    case "${reprov_fail_count}" in ''|*[!0-9]*) reprov_fail_count=0 ;; esac
+                    reprov_fail_count=$((reprov_fail_count + 1))
+                    echo "${reprov_fail_count}" > "${REPROVISION_FAIL_COUNT_FILE}"
+
+                    if [ "${reprov_fail_count}" -ge 2 ]; then
+                        local backoff_s
+                        case "${reprov_fail_count}" in
+                            2) backoff_s=300 ;;   # 5m
+                            3) backoff_s=900 ;;   # 15m
+                            *) backoff_s=3600 ;;  # 60m cap
+                        esac
+                        log "API key rejected again immediately after a re-provision (consecutive failure #${reprov_fail_count}) — re-provisioning cannot help right now, backing off ${backoff_s}s instead of retrying every cycle"
+                        echo "$(($(date +%s) + backoff_s))" > "${REPROVISION_BACKOFF_UNTIL_FILE}"
+                    fi
+
                     touch "${NEEDS_REPROVISION_FILE}"
                 fi
             fi
@@ -799,26 +932,40 @@ main() {
 
         # upload_metrics flagged our API key as rejected (401/403) since the
         # last iteration — force the reprovision branch below to run now
-        # rather than waiting up to reprovision_interval (BUG-288).
+        # rather than waiting up to reprovision_interval (BUG-288), UNLESS
+        # LA-002's backoff is active (upload_metrics already decided a repeat
+        # re-provision won't help right now).
         if [ -f "${NEEDS_REPROVISION_FILE}" ]; then
             rm -f "${NEEDS_REPROVISION_FILE}"
             provisioned=false
-            last_reprovision_attempt=0
-            log "Re-provisioning triggered by a rejected API key"
+            if [ -f "${REPROVISION_BACKOFF_UNTIL_FILE}" ]; then
+                log "Re-provisioning requested but a backoff is active (LA-002 guard) — will retry per backoff schedule, not immediately"
+            else
+                last_reprovision_attempt=0
+            fi
         fi
 
         # Retry provisioning if still not provisioned. Provisioning state
         # lives on the rootfs and is wiped by every A/B slot switch, so
         # without this the daemon would stay a permanently unprovisioned,
         # watchdog-healthy zombie after any OTA update (RC-B3).
-        if [ "${provisioned}" = "false" ] && [ $((now - last_reprovision_attempt)) -ge "${reprovision_interval}" ]; then
-            if provision_device; then
-                provisioned=true
-                log "Re-provisioning succeeded — device is now connected"
-            else
-                log "Re-provisioning attempt failed, will retry in ${reprovision_interval}s"
+        if [ "${provisioned}" = "false" ]; then
+            local reprov_backoff_until=0
+            [ -f "${REPROVISION_BACKOFF_UNTIL_FILE}" ] && reprov_backoff_until=$(cat "${REPROVISION_BACKOFF_UNTIL_FILE}" 2>/dev/null)
+            case "${reprov_backoff_until}" in ''|*[!0-9]*) reprov_backoff_until=0 ;; esac
+
+            if [ "${reprov_backoff_until}" -gt "${now}" ]; then
+                : # LA-002 backoff still in effect — skip this cycle entirely
+            elif [ $((now - last_reprovision_attempt)) -ge "${reprovision_interval}" ]; then
+                rm -f "${REPROVISION_BACKOFF_UNTIL_FILE}"
+                if provision_device; then
+                    provisioned=true
+                    log "Re-provisioning succeeded — device is now connected"
+                else
+                    log "Re-provisioning attempt failed, will retry in ${reprovision_interval}s"
+                fi
+                last_reprovision_attempt=${now}
             fi
-            last_reprovision_attempt=${now}
         fi
 
         # Send heartbeat

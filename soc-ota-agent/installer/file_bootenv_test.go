@@ -267,3 +267,78 @@ func TestReconcileToBootedSlot_AlreadyInSyncIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, fi.ModTime().Equal(old), "current_slot must not be rewritten when already in sync")
 }
+
+// (h) REGRESSION for the Jetson by-partlabel boot-slot bug: NewFileBasedBootEnv
+// must resolve rootfsPartA/rootfsPartB via maybeResolveLink, exactly like
+// NewDualRootfsDevice already does (dual_rootfs_device.go). Before the fix,
+// a board configured with unresolved /dev/disk/by-partlabel/... paths stored
+// them verbatim; extractPartitionNumber found no trailing digit and returned
+// "", so partitionNumberToSlot could never map the running partition to slot
+// a or b and ReconcileToBootedSlot silently no-op'd on every single boot
+// (the exact, previously zero-coverage case that broke dev-aedbdbbe).
+//
+// resolvePathsInDirs is swapped for the duration of this test so the
+// by-partlabel resolution branch of maybeResolveLink can be exercised
+// against a temp directory instead of requiring real /dev/disk/by-partlabel
+// entries (not present, and not writable as non-root, in a CI/dev sandbox).
+func TestNewFileBasedBootEnv_ResolvesByPartlabelPaths(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Simulate real partition device nodes, e.g. /dev/mmcblk0p1, /dev/mmcblk0p2.
+	partA := filepath.Join(tmp, "mmcblk0p1")
+	partB := filepath.Join(tmp, "mmcblk0p2")
+	require.NoError(t, os.WriteFile(partA, nil, 0644))
+	require.NoError(t, os.WriteFile(partB, nil, 0644))
+
+	// Simulate /dev/disk/by-partlabel/rootfs_a|_b symlinks to those nodes.
+	labelDir := filepath.Join(tmp, "by-partlabel")
+	require.NoError(t, os.Mkdir(labelDir, 0755))
+	linkA := filepath.Join(labelDir, "rootfs_a")
+	linkB := filepath.Join(labelDir, "rootfs_b")
+	require.NoError(t, os.Symlink(partA, linkA))
+	require.NoError(t, os.Symlink(partB, linkB))
+
+	origDirs := resolvePathsInDirs
+	resolvePathsInDirs = map[string]bool{labelDir: true}
+	defer func() { resolvePathsInDirs = origDirs }()
+
+	env := NewFileBasedBootEnv(&recordingCommander{}, linkA, linkB)
+	stateDir := t.TempDir()
+	env.slotFile = filepath.Join(stateDir, "current_slot")
+	env.bootCountFile = filepath.Join(stateDir, "boot_count")
+	env.upgradeAvailFile = filepath.Join(stateDir, "upgrade_available")
+	env.menderBootPartFile = filepath.Join(stateDir, "mender_boot_part")
+
+	assert.Equal(t, partA, env.rootfsPartA,
+		"rootfsPartA must be resolved to the real device node, not left as an unresolvable by-partlabel symlink")
+	assert.Equal(t, partB, env.rootfsPartB,
+		"rootfsPartB must be resolved to the real device node, not left as an unresolvable by-partlabel symlink")
+
+	// With resolution in place, partition numbers are extractable and
+	// partitionNumberToSlot can map the running partition to its slot —
+	// this is exactly what was permanently broken before the fix.
+	numA := extractPartitionNumber(partA)
+	numB := extractPartitionNumber(partB)
+	require.NotEmpty(t, numA, "resolved rootfsPartA must have an extractable trailing partition number")
+	require.NotEmpty(t, numB, "resolved rootfsPartB must have an extractable trailing partition number")
+
+	assert.Equal(t, "a", env.partitionNumberToSlot(numA))
+	assert.Equal(t, "b", env.partitionNumberToSlot(numB))
+
+	// And ReconcileToBootedSlot — dead on every boot before the fix — now
+	// actually realigns stale bookkeeping to the booted slot.
+	env.detectFn = func() (string, error) { return numA, nil }
+	require.NoError(t, os.WriteFile(env.upgradeAvailFile, []byte("0\n"), 0644))
+	require.NoError(t, os.WriteFile(env.menderBootPartFile, []byte(numB+"\n"), 0644)) // stale
+	require.NoError(t, os.WriteFile(env.slotFile, []byte("b\n"), 0644))               // stale
+
+	env.ReconcileToBootedSlot()
+
+	part, err := os.ReadFile(env.menderBootPartFile)
+	require.NoError(t, err)
+	assert.Equal(t, numA, strings.TrimSpace(string(part)))
+
+	slot, err := os.ReadFile(env.slotFile)
+	require.NoError(t, err)
+	assert.Equal(t, "a", strings.TrimSpace(string(slot)))
+}

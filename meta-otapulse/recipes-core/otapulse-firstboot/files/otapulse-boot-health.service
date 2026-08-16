@@ -1,10 +1,12 @@
 [Unit]
-Description=OTAPulse Pre-Agent Boot Health (direct-boot brick prevention)
+Description=OTAPulse Pre-Agent Boot Health (direct-boot + file-based-boot brick prevention)
 Documentation=https://github.com/binaryblack/OTA-Pulse
 # GAP-OTA-006: revert-or-accept a pending OTA slot switch on direct-boot boards
-# (VideoCore/cmdline.txt) BEFORE the OTA agent starts, so a slot that never gets
-# the agent running (kernel panic, broken rootfs, sshd/network down, agent
-# crash-loop) still auto-reverts after MAX_BOOT_RETRIES instead of hard-bricking.
+# (VideoCore/cmdline.txt) AND file-based-boot boards with no working U-Boot env
+# (boot.scr/mender_boot_part, e.g. Orange Pi Zero 2W) BEFORE the OTA agent
+# starts, so a slot that never gets the agent running (kernel panic, broken
+# rootfs, sshd/network down, agent crash-loop) still auto-reverts after
+# MAX_BOOT_RETRIES instead of hard-bricking.
 # Runs after filesystems and udev (so the FAT boot partition is discoverable by
 # label), and BEFORE soc-ota-agent so it works even if the agent never comes up.
 #
