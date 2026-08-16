@@ -11,6 +11,12 @@
 # After editing either copy run:  scripts/check-state-script-sync.sh
 # The pre-commit hook enforces this automatically.
 #
+# LOGGING (BUG-252 discovery): the agent collects state-script output from
+# STDERR ONLY — soc-ota-agent/statescript/executor.go pipes just stderr into
+# the deployment log/journal; stdout is never captured and goes to /dev/null.
+# Every diagnostic echo in this script therefore MUST end with >&2 or it is
+# silently lost.
+#
 # Runs (from the incoming artifact) right after an OTA install, just before the
 # reboot. Responsibilities, checked in order:
 #
@@ -48,14 +54,14 @@ find_fat_boot() {
 
 FAT_DEV=$(find_fat_boot)
 if [ -z "$FAT_DEV" ]; then
-    echo "ArtifactReboot_Enter: No FAT boot partition found, nothing to do"
+    echo "ArtifactReboot_Enter: No FAT boot partition found, nothing to do" >&2
     exit 0
 fi
 
 MNT="/tmp/.otapulse_fat_$$"
 mkdir -p "$MNT"
 if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
-    echo "ArtifactReboot_Enter: Failed to mount $FAT_DEV"
+    echo "ArtifactReboot_Enter: WARNING: Failed to mount $FAT_DEV — NO boot-slot switch of any kind can run this deployment; the device will keep booting the current slot (BUG-252)" >&2
     rmdir "$MNT" 2>/dev/null || true
     exit 0
 fi
@@ -143,7 +149,7 @@ if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FIL
         printf '%s\n' "$NEW" > "$MNT/cmdline_tryboot.txt"
         sync
 
-        echo "ArtifactReboot_Enter: built tryboot.txt/cmdline_tryboot.txt for root=${TARGET_DEV} on ${FAT_DEV} (permanent cmdline.txt left untouched; see ArtifactCommit_Enter_01)"
+        echo "ArtifactReboot_Enter: built tryboot.txt/cmdline_tryboot.txt for root=${TARGET_DEV} on ${FAT_DEV} (permanent cmdline.txt left untouched; see ArtifactCommit_Enter_01)" >&2
         cleanup
 
         # Defer the reboot attempts so the agent can log the state transition first
@@ -253,17 +259,17 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/boot.scr" ]; then
         if [ -n "$PART_B" ] && [ "$TARGET_PART" = "$PART_B" ]; then
             printf 'b' > "$MNT/mender_boot_slot_b"
             rm -f "$MNT/mender_boot_slot_a"
-            echo "ArtifactReboot_Enter: marker scheme -> Slot B (mender_boot_slot_b created)"
+            echo "ArtifactReboot_Enter: marker scheme -> Slot B (mender_boot_slot_b created)" >&2
         else
             rm -f "$MNT/mender_boot_slot_b"
             printf 'a' > "$MNT/mender_boot_slot_a"
-            echo "ArtifactReboot_Enter: marker scheme -> Slot A (mender_boot_slot_b removed)"
+            echo "ArtifactReboot_Enter: marker scheme -> Slot A (mender_boot_slot_b removed)" >&2
         fi
     fi
     sync
-    echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART"
+    echo "ArtifactReboot_Enter: Updated $FAT_DEV mender_boot_part=$TARGET_PART" >&2
 else
-    echo "ArtifactReboot_Enter: not an RPi tryboot platform and no boot.scr — nothing to sync"
+    echo "ArtifactReboot_Enter: not an RPi tryboot platform and no boot.scr — nothing to sync" >&2
 fi
 
 # ── 3. extlinux.conf slot switch ─────────────────────────────────────────────
@@ -287,7 +293,7 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
     sed -i "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${TARGET_LABEL}/g" \
         "$MNT/extlinux/extlinux.conf"
     sync
-    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL}"
+    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL}" >&2
 fi
 
 # ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────
@@ -307,8 +313,31 @@ fi
 # it to +3 only if some earlier version of this script, or an interrupted OTA,
 # left it at +0). After 3 failed tries of the target, systemd-boot's Automatic
 # Boot Assessment excludes it and falls back to the still-good old entry.
+# BUG-252 diagnostics (read-only, logging ONLY — never changes any decision
+# below): probe the ACTUALLY-running root partition so a stale/missing
+# BOOT_PART_FILE can be called out loudly instead of silently producing a
+# no-op "switch" whose log line looks exactly like a successful one. This
+# section previously derived CURRENT_SLOT purely as the opposite of the
+# TARGET read from BOOT_PART_FILE — it never looked at what is really
+# running, so a stale target equal to the running slot logged "success"
+# while changing nothing (the BUG-252 silent-no-op shape).
+RUNNING_ROOT_DEV=$(awk '$2 == "/" { print $1; exit }' /proc/mounts 2>/dev/null)
+if [ "$RUNNING_ROOT_DEV" = "/dev/root" ]; then
+    RUNNING_ROOT_DEV=$(readlink -f /dev/root 2>/dev/null || echo /dev/root)
+fi
+RUNNING_PART=$(printf '%s' "$RUNNING_ROOT_DEV" | grep -oE '[0-9]+$')
+
+if [ -d "$MNT/loader/entries" ] && [ ! -f "$BOOT_PART_FILE" ]; then
+    echo "ArtifactReboot_Enter: WARNING (BUG-252): systemd-boot loader/entries present but $BOOT_PART_FILE is MISSING — EFI ABA slot switch CANNOT run; device will keep booting the current slot (running root=$RUNNING_ROOT_DEV)" >&2
+fi
+
 if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
     TARGET_PART=$(cat "$BOOT_PART_FILE")
+    if [ -z "$TARGET_PART" ]; then
+        echo "ArtifactReboot_Enter: WARNING (BUG-252): $BOOT_PART_FILE exists but is EMPTY — EFI ABA target unknown; the slot mapping below will default to slot A" >&2
+    elif [ -n "$RUNNING_PART" ] && [ "$TARGET_PART" = "$RUNNING_PART" ]; then
+        echo "ArtifactReboot_Enter: WARNING (BUG-252): EFI ABA target partition p${TARGET_PART} (from $BOOT_PART_FILE) == ACTUALLY-RUNNING root partition (root=$RUNNING_ROOT_DEV) — boot-part file is stale or was never updated for this deployment; the 'switch' below is a NO-OP and the device will boot the SAME slot again" >&2
+    fi
     PART_B=""
     if [ -e /dev/disk/by-partlabel/rootfs_b ]; then
         PART_B=$(readlink -f /dev/disk/by-partlabel/rootfs_b | grep -oE '[0-9]+$')
@@ -352,10 +381,19 @@ if [ -f "$BOOT_PART_FILE" ] && [ -d "$MNT/loader/entries" ]; then
         if [ -f "$MNT/loader/loader.conf" ]; then
             sed -i "s/^default .*/default slot-${TARGET_SLOT}*/" "$MNT/loader/loader.conf"
             sync
+            # BUG-252: the sed above matches nothing if loader.conf has no
+            # '^default ' line — a silent no-op that leaves boot selection to
+            # the ABA try-counts alone (both entries now sit at +3). Verify
+            # the pin actually landed and say so loudly if it did not.
+            if ! grep -q "^default slot-${TARGET_SLOT}" "$MNT/loader/loader.conf" 2>/dev/null; then
+                echo "ArtifactReboot_Enter: WARNING (BUG-252): loader.conf has no 'default slot-${TARGET_SLOT}*' line after rewrite (no '^default ' line to rewrite?) — default pin NOT set; systemd-boot will pick by ABA try-counts alone and may re-select the OLD slot" >&2
+            fi
+        else
+            echo "ArtifactReboot_Enter: WARNING (BUG-252): no loader/loader.conf on ESP — cannot pin default; systemd-boot will pick by ABA try-counts alone and may re-select the OLD slot" >&2
         fi
-        echo "ArtifactReboot_Enter: EFI ABA -> slot-${TARGET_SLOT}+3.conf (root=PARTLABEL=${TARGET_LABEL}), old slot-${CURRENT_SLOT} kept bootable as fallback (BUG-245)"
+        echo "ArtifactReboot_Enter: EFI ABA -> slot-${TARGET_SLOT}+3.conf (root=PARTLABEL=${TARGET_LABEL}, target p${TARGET_PART}; currently running root=$RUNNING_ROOT_DEV), old slot-${CURRENT_SLOT} kept bootable as fallback (BUG-245)" >&2
     else
-        echo "ArtifactReboot_Enter: EFI ABA: no slot-${CURRENT_SLOT}+*.conf in loader/entries — skip"
+        echo "ArtifactReboot_Enter: EFI ABA: no slot-${CURRENT_SLOT}+*.conf in loader/entries — skip" >&2
     fi
 fi
 
