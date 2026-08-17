@@ -2,6 +2,19 @@
 #
 # CHANGE LOG
 # ----------
+# BUG-308 (2026-08-17): The support grant for SOC_JOURNALCTL/SOC_DMESG/
+#   SOC_SYSTEMCTL_STATUS (files/soc-support.sudoers) had no NOEXEC — the
+#   default pager (less), invoked as root by journalctl/dmesg/systemctl
+#   status when output doesn't fit one screen, offers a '!<command>'/'v'
+#   shell-escape, giving the support tier a real path to a root shell. Fixed
+#   by moving those three aliases to their own NOEXEC: grant line (see that
+#   file for the full writeup); SOC_IP_ADDR/SOC_DIAG/SOC_SYSTEMCTL_RESTART are
+#   unchanged. Also ships files/support-profile (PAGER=cat/SYSTEMD_PAGER=cat)
+#   as /home/support/.profile, belt-and-suspenders defense-in-depth mirroring
+#   soc-shell-access-privileged's elevated-profile — NOEXEC is the real
+#   closer here since sudo's env_reset means a .profile export is not
+#   guaranteed to survive to the root-executed pager.
+#
 # S16-009 (2026-05-23): Corrects S16-008's locked-password design.
 #   S16-008 created support with --password ! (locked).  A live test on RPi4
 #   proved this breaks gateway pubkey login when the device sshd has no PAM:
@@ -105,6 +118,7 @@ SRC_URI = " \
     file://sshd_config.d/10-soc-support.conf \
     file://gateway-authorized-key \
     file://08-gateway-authkeys.conf \
+    file://support-profile \
 "
 
 S = "${WORKDIR}"
@@ -217,6 +231,18 @@ do_install() {
     #    world-read (SSH authorized_keys must not be world-readable).
     # ------------------------------------------------------------------
     install -d -m 0750 ${D}/home/support
+
+    # ------------------------------------------------------------------
+    # 3b. Support user pager profile — BUG-308.
+    #     Belt-and-suspenders defense-in-depth: exports PAGER=cat and
+    #     SYSTEMD_PAGER=cat so journalctl/dmesg/systemctl don't invoke an
+    #     interactive pager in the first place. NOEXEC on the sudoers grant
+    #     (see soc-support.sudoers) is the real closer — sudo's env_reset
+    #     means this export is not guaranteed to survive into the
+    #     root-executed pager process, so this is not relied upon alone.
+    #     Mirrors soc-shell-access-privileged's elevated-profile exactly.
+    # ------------------------------------------------------------------
+    install -m 0644 ${FILESDIR}/support-profile ${D}/home/support/.profile
 
     # ------------------------------------------------------------------
     # 4. sshd drop-in: pubkey-only auth for the support user
@@ -371,6 +397,7 @@ FILES:${PN} = " \
     ${libexecdir}/soc-diag/.keep \
     ${libexecdir}/soc-diag/soc-readlog \
     /home/support \
+    /home/support/.profile \
 "
 
 # CONFFILES: declare managed config drop-ins as OTA-replaced files so

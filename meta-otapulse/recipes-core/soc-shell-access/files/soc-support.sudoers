@@ -71,11 +71,28 @@ Cmnd_Alias SOC_SYSTEMCTL_RESTART = \
 # ---------------------------------------------------------------------------
 # Grant: support user may run the above aliases as root, no password required.
 # No other sudo commands are permitted (implicit NOPASSWD: ALL denial).
+#
+# BUG-308: SOC_JOURNALCTL/SOC_DMESG/SOC_SYSTEMCTL_STATUS are granted on a
+# SEPARATE, NOEXEC: line. Without NOEXEC, journalctl/dmesg/'systemctl status'
+# invoke the system default pager (less) AS ROOT whenever output doesn't fit
+# one screen, and less's own '!<command>'/'v' shell-escapes then spawn a root
+# shell — a real support-tier privilege escalation to root. NOEXEC blocks the
+# pager (or anything else) from being exec'd by the sudo'd process, closing
+# that path. This mirrors soc-shell-access-privileged's soc-elevated.sudoers,
+# which grants its own SOC_ELEV_SYSTEMCTL/SOC_ELEV_JOURNAL the same way.
+#
+# SOC_IP_ADDR/SOC_DIAG/SOC_SYSTEMCTL_RESTART stay on the original, non-NOEXEC
+# grant below: NOEXEC would break SOC_DIAG's soc-readlog wrapper, which
+# legitimately execs 'cat' internally (exactly why soc-elevated.sudoers keeps
+# its own SOC_ELEV_DIAG grant on a separate, non-NOEXEC line too) — and
+# 'ip addr' / the enumerated systemctl-restart verbs don't invoke a pager and
+# are outside this bug's threat model, so they are left untouched.
 # ---------------------------------------------------------------------------
-support ALL=(root) NOPASSWD: \
+support ALL=(root) NOEXEC: NOPASSWD: \
     SOC_JOURNALCTL, \
     SOC_DMESG, \
+    SOC_SYSTEMCTL_STATUS
+support ALL=(root) NOPASSWD: \
     SOC_IP_ADDR, \
     SOC_DIAG, \
-    SOC_SYSTEMCTL_STATUS, \
     SOC_SYSTEMCTL_RESTART
