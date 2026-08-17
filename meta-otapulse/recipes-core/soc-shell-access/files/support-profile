@@ -1,0 +1,3 @@
+# Managed by OTA — do not edit.
+export SYSTEMD_PAGER=cat
+export PAGER=cat
