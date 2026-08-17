@@ -214,11 +214,37 @@ func (l Launcher) get(state, action string) ([]os.FileInfo, string, error) {
 	return scripts, sDir, nil
 }
 
+// logCollectedOutput logs everything a state script wrote to one of its output
+// streams ("stdout" / "stderr"), truncated to the same 10KB cap for both.
+func logCollectedOutput(name, stream string, bts []byte) {
+	if len(bts) == 0 {
+		return
+	}
+	const outputSizeCap = 10 * 1024
+	if len(bts) > outputSizeCap {
+		log.Infof(
+			"Collected output (%s) while running script %s (Truncated to 10KB)\n"+
+				"%s\n---------- end of script output",
+			stream,
+			name,
+			bts[:outputSizeCap],
+		)
+	} else {
+		log.Infof(
+			"Collected output (%s) while running script %s\n%s\n"+
+				"---------- end of script output",
+			stream,
+			name,
+			string(bts),
+		)
+	}
+}
+
 func execute(name string, timeout time.Duration) error {
 
 	cmd := system.Command(name)
 
-	var stderr io.ReadCloser
+	var stderr, stdout io.ReadCloser
 	var err error
 
 	if !strings.HasPrefix(name, "Idle") && !strings.HasPrefix(name, "Sync") {
@@ -226,6 +252,15 @@ func execute(name string, timeout time.Duration) error {
 		if err != nil {
 			log.Errorf("statescript: %v", err)
 			return errors.Wrap(err, "statescript: unable to open stderr pipe")
+		}
+		// BUG-252 Finding C: stdout was never captured (cmd.Stdout unset ->
+		// /dev/null), so every diagnostic a state script printed to stdout was
+		// silently discarded, making state-script failures a black box in the
+		// deployment journal. Capture and log it exactly like stderr.
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			log.Errorf("statescript: %v", err)
+			return errors.Wrap(err, "statescript: unable to open stdout pipe")
 		}
 	}
 
@@ -246,6 +281,24 @@ func execute(name string, timeout time.Duration) error {
 	})
 	defer timer.Stop()
 
+	// Drain stdout in a goroutine so both pipes are consumed concurrently: a
+	// script filling one pipe's buffer while we block reading the other would
+	// otherwise deadlock until the timeout SIGKILL fires.
+	var outBts []byte
+	outDone := make(chan struct{})
+	if stdout != nil {
+		go func() {
+			defer close(outDone)
+			var rerr error
+			outBts, rerr = ioutil.ReadAll(stdout)
+			if rerr != nil {
+				log.Error(rerr)
+			}
+		}()
+	} else {
+		close(outDone)
+	}
+
 	var bts []byte
 	if stderr != nil {
 		bts, err = ioutil.ReadAll(stderr)
@@ -253,24 +306,10 @@ func execute(name string, timeout time.Duration) error {
 			log.Error(err)
 		}
 	}
+	<-outDone
 
-	if len(bts) > 0 {
-		if len(bts) > 10*1024 {
-			log.Infof(
-				"Collected output (stderr) while running script %s (Truncated to 10KB)\n"+
-					"%s\n---------- end of script output",
-				name,
-				bts[:10*1024],
-			)
-		} else {
-			log.Infof(
-				"Collected output (stderr) while running script %s\n%s\n"+
-					"---------- end of script output",
-				name,
-				string(bts),
-			)
-		}
-	}
+	logCollectedOutput(name, "stderr", bts)
+	logCollectedOutput(name, "stdout", outBts)
 
 	if err := cmd.Wait(); err != nil {
 		return err
