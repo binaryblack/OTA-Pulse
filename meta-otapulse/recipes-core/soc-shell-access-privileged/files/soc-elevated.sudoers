@@ -1,0 +1,128 @@
+# /etc/sudoers.d/15-soc-elevated
+# Managed by OTA — do not edit; changes are overwritten on update.
+#
+# This file is installed by the soc-shell-access-privileged OTA package.
+# It is root-owned (mode 0440) and replaced on every OTA update, so
+# operator edits do not persist.  The otapulse-elevated user has no other
+# sudo/wheel/root group membership; its only elevation is this exact file
+# plus systemd-journal/adm group reads (sudo-free journalctl/dmesg, granted
+# in pkg_postinst — see the recipe .bb) it cannot elevate beyond either.
+#
+# THREAT MODEL (BUG-263)
+# -----------------------
+# This allowlist is a guardrail against accidental/casual brick-risk
+# operations and a compromise-containment + audit boundary — it is NOT a
+# watertight sandbox against a determined malicious operator.  That
+# residual risk is what the approval workflow, forced session recording,
+# MFA gate, and the separate break-glass identity (soc-breakglass.sudoers)
+# exist for.  Do not treat "not in this allowlist" as proof an elevated
+# session cannot eventually reach root through some other primitive; treat
+# it as raising the bar and creating an audit trail while doing so.
+#
+# LESSONS INHERITED FROM soc-shell-access (10-soc-support):
+#  - S16-009: non-locked shadow hash required for no-PAM sshd publickey auth
+#    (see the .bb pkg_postinst for both otapulse-elevated/-breakglass).
+#  - BUG-151: USERADD_PARAM's '--password' value must be the LITERAL quoted
+#    string '*', not a bare '*' — perform_useradd() re-evals USERADD_PARAM a
+#    second time and an unquoted '*' glob-expands against bitbake's cwd.
+#  - BUG-114: sshd_config's "Include /etc/ssh/sshd_config.d/*.conf" is
+#    injected idempotently by soc-shell-access's own pkg_postinst at
+#    do_rootfs time; this package RDEPENDS on soc-shell-access so that
+#    injection (and the 08-gateway-authkeys.conf %u lookup drop-in) is
+#    guaranteed present without duplicating either mechanism here.
+#
+# fnmatch '*' WARNING (why every alias below is fully enumerated)
+# -----------------------------------------------------------------
+# In sudoers, a '*' in a command ARGUMENT is matched by fnmatch() WITHOUT
+# FNM_PATHNAME, so '*' matches '/' AND '..'.  A careless entry like
+# '/bin/cat /etc/*' would let this non-root user read arbitrary root-owned
+# files via '../../' traversal.  Every alias below either takes no
+# filesystem-path argument at all (systemctl unit names, ip subcommands,
+# soc-ota-agent read-only subcommands) or is a fixed, non-wildcarded
+# directory-glob whose target directory (SOC_DIAG, SOC_ELEV_DIAG) is itself
+# root-owned 0755 and populated only by OTA packages, never by the
+# otapulse-elevated user.
+#
+# Explicit boundary (documented for reviewers; deny is by omission):
+# NOT granted: fw_setenv, nvbootctrl, soc-ota-agent install/commit/rollback/
+# setup/bootstrap/snapshot, mender/otapulse CLIs, parted, sgdisk, fdisk, dd,
+# mkfs*, flash_erase, any raw /dev/mmcblk*|sd*|nvme* access, any shell or
+# editor (sh, bash, systemctl edit, vi, ...), find, awk, perl, python,
+# ip netns (netns exec = arbitrary command execution as root).
+
+Cmnd_Alias SOC_ELEV_SYSTEMCTL = \
+    /usr/bin/systemctl start *,        /bin/systemctl start *, \
+    /usr/bin/systemctl stop *,         /bin/systemctl stop *, \
+    /usr/bin/systemctl restart *,      /bin/systemctl restart *, \
+    /usr/bin/systemctl reload *,       /bin/systemctl reload *, \
+    /usr/bin/systemctl try-restart *,  /bin/systemctl try-restart *, \
+    /usr/bin/systemctl status,         /bin/systemctl status, \
+    /usr/bin/systemctl status *,       /bin/systemctl status *, \
+    /usr/bin/systemctl is-active *,    /bin/systemctl is-active *, \
+    /usr/bin/systemctl is-enabled *,   /bin/systemctl is-enabled *, \
+    /usr/bin/systemctl is-failed *,    /bin/systemctl is-failed *, \
+    /usr/bin/systemctl list-units,     /bin/systemctl list-units, \
+    /usr/bin/systemctl list-units *,   /bin/systemctl list-units *, \
+    /usr/bin/systemctl list-unit-files, /bin/systemctl list-unit-files, \
+    /usr/bin/systemctl list-unit-files *, /bin/systemctl list-unit-files *, \
+    /usr/bin/systemctl list-timers,    /bin/systemctl list-timers, \
+    /usr/bin/systemctl list-timers *,  /bin/systemctl list-timers *, \
+    /usr/bin/systemctl show *,         /bin/systemctl show *, \
+    /usr/bin/systemctl cat *,          /bin/systemctl cat *, \
+    /usr/bin/systemctl daemon-reload,  /bin/systemctl daemon-reload, \
+    /usr/bin/systemctl reset-failed *, /bin/systemctl reset-failed *
+
+# 'systemctl edit' (spawns $EDITOR as root), enable/disable/link/mask/unmask
+# (can activate an arbitrary attacker-written unit file by absolute path),
+# and set-environment are intentionally ABSENT from the verb list above.
+
+Cmnd_Alias SOC_ELEV_JOURNAL = \
+    /usr/bin/journalctl, /bin/journalctl, \
+    /usr/bin/dmesg,      /bin/dmesg
+
+# ip: enumerated read+config subcommands. 'ip netns' is EXCLUDED by
+# enumeration ('ip netns exec <ns> <cmd>' is arbitrary root exec) — do NOT
+# convert this alias to a bare '/sbin/ip' or '/sbin/ip *'. Option-first
+# invocations (e.g. 'ip -4 addr') will not match; operators use the
+# canonical 'ip <object> ...' form.
+Cmnd_Alias SOC_ELEV_NET = \
+    /sbin/ip addr,    /sbin/ip addr *,    /usr/sbin/ip addr,  /usr/sbin/ip addr *, \
+    /bin/ip addr,     /bin/ip addr *,     /usr/bin/ip addr,   /usr/bin/ip addr *, \
+    /sbin/ip link,    /sbin/ip link *,    /usr/sbin/ip link,  /usr/sbin/ip link *, \
+    /bin/ip link,     /bin/ip link *,     /usr/bin/ip link,   /usr/bin/ip link *, \
+    /sbin/ip route,   /sbin/ip route *,   /usr/sbin/ip route, /usr/sbin/ip route *, \
+    /bin/ip route,    /bin/ip route *,    /usr/bin/ip route,  /usr/bin/ip route *, \
+    /sbin/ip neigh,   /sbin/ip neigh *,   /usr/sbin/ip neigh, /usr/sbin/ip neigh *, \
+    /bin/ip neigh,    /bin/ip neigh *,    /usr/bin/ip neigh,  /usr/bin/ip neigh *, \
+    /sbin/ip rule,    /sbin/ip rule *,    /usr/sbin/ip rule,  /usr/sbin/ip rule *, \
+    /bin/ip rule,     /bin/ip rule *,     /usr/bin/ip rule,   /usr/bin/ip rule *, \
+    /usr/bin/nmcli, /usr/sbin/nmcli
+
+Cmnd_Alias SOC_ELEV_BOOTENV_RO = \
+    /usr/sbin/fw_printenv, /sbin/fw_printenv, /usr/bin/fw_printenv
+
+Cmnd_Alias SOC_ELEV_PKG = \
+    /usr/bin/opkg list-installed, /usr/bin/opkg list *, \
+    /usr/bin/opkg info *, /usr/bin/opkg status *, /usr/bin/opkg search *
+
+Cmnd_Alias SOC_ELEV_AGENT = \
+    /usr/bin/soc-ota-agent show-artifact, \
+    /usr/bin/soc-ota-agent show-provides, \
+    /usr/bin/soc-ota-agent check-update, \
+    /usr/bin/soc-ota-agent send-inventory, \
+    /usr/bin/soc-ota-agent --version
+
+Cmnd_Alias SOC_ELEV_POWER = \
+    /sbin/reboot, /usr/sbin/reboot, \
+    /usr/bin/systemctl reboot, /bin/systemctl reboot
+
+Cmnd_Alias SOC_ELEV_DIAG = \
+    /usr/libexec/soc-diag/*, \
+    /usr/libexec/soc-diag-elevated/*
+
+Defaults:otapulse-elevated env_reset, !visiblepw
+
+otapulse-elevated ALL=(root) NOEXEC: NOPASSWD: \
+    SOC_ELEV_SYSTEMCTL, SOC_ELEV_JOURNAL, SOC_ELEV_NET, \
+    SOC_ELEV_BOOTENV_RO, SOC_ELEV_PKG, SOC_ELEV_AGENT, SOC_ELEV_POWER
+otapulse-elevated ALL=(root) NOPASSWD: SOC_ELEV_DIAG

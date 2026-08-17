@@ -156,6 +156,7 @@ IMAGE_INSTALL:append = " \
     frp \
     soc-ota-tunneld \
     soc-shell-access \
+    soc-shell-access-privileged \
     "
 
 # BUG-113 note: earlier soc-shell-access recipes (pre-S16-009) left the
@@ -165,3 +166,15 @@ IMAGE_INSTALL:append = " \
 # writes a real SHA-512crypt hash for 'support' at do_rootfs time (S16-009),
 # so the shadow entry is never a locked sentinel and no image-level fixup
 # is needed.
+
+# BUG-263 note: soc-shell-access-privileged ships the real Elevated/Break-
+# Glass tier accounts (otapulse-elevated, otapulse-breakglass), replacing
+# the gateway's prior literal-root design. It is a separate package from
+# soc-shell-access (support tier, untouched) and RDEPENDS on it so the
+# BUG-114 sshd Include injection and 08-gateway-authkeys.conf %u lookup are
+# reused rather than duplicated. The gateway (socMonitoring/server/gateway)
+# is NOT yet cut over to these accounts (docker-compose.yml still pins
+# ELEVATED_SSH_USER=root/BREAKGLASS_SSH_USER=root) — see BUG-263's tracker
+# entry for the required sequencing (debug-tweaks fleet-wide removal must
+# happen only after this real mechanism is live-verified on every Yocto
+# target).
