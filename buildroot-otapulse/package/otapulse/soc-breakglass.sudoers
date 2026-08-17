@@ -1,0 +1,22 @@
+# /etc/sudoers.d/16-soc-breakglass
+# Managed by OTA — do not edit; changes are overwritten on update.
+#
+# BUG-307: Buildroot mirror of meta-otapulse/recipes-core/
+# soc-shell-access-privileged/files/soc-breakglass.sudoers (BUG-263), ported
+# byte-for-byte — do not "improve" or re-derive it here; port, don't redesign.
+#
+# Break-Glass tier: root-equivalent capability behind a SEPARATE identity
+# and SEPARATE key from the elevated tier. The gateway opens the session
+# with 'sudo -i' so the operator lands in a root shell while sshd auth,
+# audit, recording metadata, and $SUDO_USER all attribute the session to
+# otapulse-breakglass.
+#
+# THREAT MODEL (inherited from BUG-263): unlike soc-elevated.sudoers, this is
+# intentionally unbounded (NOPASSWD: ALL) — break-glass exists precisely for
+# incident response scenarios the elevated allowlist cannot anticipate. The
+# safety properties are: a distinct identity/key (so break-glass use is
+# distinguishable from elevated use in every log), forced session
+# recording, and the approval workflow that gates minting a break-glass
+# session in the first place — not command-level restriction.
+Defaults:otapulse-breakglass !lecture
+otapulse-breakglass ALL=(ALL:ALL) NOPASSWD: ALL

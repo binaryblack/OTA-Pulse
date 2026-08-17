@@ -1,0 +1,146 @@
+#!/bin/sh
+# soc-readetc — traversal-hardened /etc reader for the Elevated shell tier.
+#
+# Managed by OTA — do not edit; changes are overwritten on update.
+#
+# BUG-307: Buildroot mirror of meta-otapulse/recipes-core/
+# soc-shell-access-privileged/files/soc-readetc (BUG-263), ported
+# byte-for-byte.
+#
+# The 'otapulse-elevated' user runs this via sudo (covered by the
+# SOC_ELEV_DIAG sudoers alias: /usr/libexec/soc-diag-elevated/*). Modeled
+# directly on soc-shell-access's soc-readlog (same set -u, same rejection
+# style, same fnmatch-'*'-matches-'/'-and-'..' threat this defends against
+# — see soc-support.sudoers' SECURITY note), with two differences:
+#
+#   1. The argument may be a PATH relative to /etc, not just a basename —
+#      subdirectories are allowed (e.g. 'ssh/sshd_config',
+#      'systemd/system/soc-ota-agent.service.d/override.conf').
+#   2. After canonicalisation, a denylist rejects a fixed set of
+#      sensitive files even though they are syntactically valid: root's
+#      own credential/secret material must never be readable through this
+#      wrapper, regardless of sudo scope.
+#
+# This wrapper accepts exactly ONE argument. It rejects an absolute path
+# (leading '/'), any '..' occurrence, control characters, a leading '-',
+# and an empty argument. It canonicalises the resulting path and
+# re-verifies the resolved file is a regular file strictly under the
+# canonical /etc/ before applying the denylist and reading it.
+
+set -u
+
+PROG="soc-readetc"
+ETCDIR="/etc"
+
+err() {
+    printf '%s: %s\n' "$PROG" "$1" >&2
+}
+
+usage() {
+    err "usage: $PROG <path-relative-to-$ETCDIR>   (subdirs allowed, no '..')"
+    exit 2
+}
+
+# --- Argument count: exactly one ------------------------------------------
+if [ "$#" -ne 1 ]; then
+    usage
+fi
+
+name="$1"
+
+# --- Reject empty -----------------------------------------------------------
+if [ -z "$name" ]; then
+    err "empty path"
+    exit 2
+fi
+
+# --- Reject any control character or newline in the name --------------------
+case "$name" in
+    *[[:cntrl:]]*)
+        err "path contains control characters: rejected"
+        exit 2
+        ;;
+esac
+
+# --- Reject absolute paths, '..' traversal, and a leading '-' ---------------
+case "$name" in
+    /*)
+        err "path must be relative to $ETCDIR (no leading '/'): rejected"
+        exit 2
+        ;;
+    *..*)
+        err "path must not contain '..': rejected"
+        exit 2
+        ;;
+    .|..)
+        err "path must not be '.' or '..': rejected"
+        exit 2
+        ;;
+    -*)
+        # A leading '-' could be interpreted as an option; the 'cat --' below
+        # already neutralises this, but reject early for clarity.
+        err "path must not start with '-': rejected"
+        exit 2
+        ;;
+esac
+
+target="$ETCDIR/$name"
+
+# --- Must be a regular file (not a dir, device, fifo, socket) ---------------
+if [ ! -f "$target" ]; then
+    err "no such regular file: $ETCDIR/$name"
+    exit 1
+fi
+
+# --- Canonical-path re-check: resolve symlinks and confirm containment ------
+# Defends against a symlink inside /etc pointing outside it, or a nested
+# '..' that survived quoting oddly. Prefer realpath; fall back to
+# readlink -f; if neither exists, skip the extra check (the /etc-relative
+# path is still enforced above, but symlink escapes are not re-verified —
+# no known target lacks both realpath and readlink in the base image).
+canon=""
+if command -v realpath >/dev/null 2>&1; then
+    canon=$(realpath -- "$target" 2>/dev/null) || canon=""
+elif command -v readlink >/dev/null 2>&1; then
+    canon=$(readlink -f -- "$target" 2>/dev/null) || canon=""
+fi
+
+if [ -n "$canon" ]; then
+    canon_etcdir=""
+    if command -v realpath >/dev/null 2>&1; then
+        canon_etcdir=$(realpath -- "$ETCDIR" 2>/dev/null) || canon_etcdir="$ETCDIR"
+    else
+        canon_etcdir=$(readlink -f -- "$ETCDIR" 2>/dev/null) || canon_etcdir="$ETCDIR"
+    fi
+    case "$canon" in
+        "$canon_etcdir"/*)
+            : # resolved path is under /etc — fall through to the denylist
+            ;;
+        *)
+            err "resolved path is outside $ETCDIR: rejected"
+            exit 1
+            ;;
+    esac
+    target="$canon"
+fi
+
+# --- Denylist: sensitive files that must never be readable here, even if
+# the path itself was syntactically valid and resolves strictly under
+# /etc/. Checked against the CANONICAL path so a symlink cannot alias
+# around it. -------------------------------------------------------------
+case "$target" in
+    */shadow|*/shadow-|*/gshadow|*/gshadow-)
+        err "sensitive file: refused"
+        exit 1
+        ;;
+    *ssh_host_*_key)
+        # Private host keys. The matching '*.pub' files are NOT matched by
+        # this pattern (they don't end in '_key' unsuffixed) and remain
+        # readable.
+        err "sensitive file: refused"
+        exit 1
+        ;;
+esac
+
+# --- Read it.  '--' ends option parsing; "$target" is a vetted absolute path.
+exec cat -- "$target"

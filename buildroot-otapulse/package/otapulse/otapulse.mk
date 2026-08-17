@@ -40,7 +40,9 @@ OTAPULSE_DEPENDENCIES += frp sudo
 endif
 
 # ==============================================================================
-# Shell-access support user (BUG-215)
+# Shell-access support user (BUG-215), + Elevated/Break-Glass tier users
+# (BUG-307 — Buildroot mirror of meta-otapulse's soc-shell-access-privileged,
+# added by BUG-263)
 # ==============================================================================
 # Buildroot users-table syntax: username uid group gid password home shell
 # groups comment (docs/manual/makeusers-syntax.adoc). Mirrors the Yocto
@@ -56,9 +58,25 @@ endif
 #     '*' password is sufficient and simpler here.
 #   - groups '-': no secondary groups — not sudo/wheel/root. The only
 #     elevation path is the exact curated sudoers.d allowlist below.
+#
+# otapulse-elevated / otapulse-breakglass (BUG-307) mirror soc-shell-access-
+# privileged's USERADD_PARAM for otapulse-elevated/otapulse-breakglass
+# exactly (same uid/gid/password/shell/groups reasoning as 'support' above).
+# NOTE (deliberate, documented divergence from the Yocto recipe): the Yocto
+# pkg_postinst additionally grants otapulse-elevated systemd-journal/adm
+# group membership for sudo-FREE journalctl/dmesg reads. That is a UX
+# convenience layered on top of the sudoers grant, not part of the security
+# boundary itself (SOC_ELEV_JOURNAL in soc-elevated.sudoers still grants
+# 'sudo journalctl'/'sudo dmesg' either way) — it is intentionally NOT
+# mirrored here to avoid depending on mkusers' auto-create-missing-group
+# behavior for a non-security-relevant convenience; group-based sudo-free
+# reads can be added later as a separate, independently-validated change if
+# ever needed on Buildroot.
 ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
 define OTAPULSE_USERS
 	support -1 support -1 * /home/support /bin/sh - OTA-Pulse gateway support user
+	otapulse-elevated -1 otapulse-elevated -1 * /home/otapulse-elevated /bin/sh - OTA-Pulse gateway elevated-tier user
+	otapulse-breakglass -1 otapulse-breakglass -1 * /home/otapulse-breakglass /bin/sh - OTA-Pulse gateway break-glass-tier user
 endef
 endif
 
@@ -416,7 +434,8 @@ endif
 
 # ==============================================================================
 # Shell-access layer installation (sudoers allowlist + gateway key) — BUG-215,
-# extended with the root/elevated-tier key — BUG-262/BUG-276
+# extended with the root/elevated-tier key — BUG-262/BUG-276, extended again
+# with the real otapulse-elevated/otapulse-breakglass account mirror — BUG-307
 # ==============================================================================
 # Mirrors meta-otapulse/recipes-core/soc-shell-access/soc-shell-access_1.0.0.bb
 # do_install(). The 'support' user itself is created by OTAPULSE_USERS above
@@ -425,6 +444,25 @@ endif
 # explicit chown is needed here for the .ssh files below). Step 4 below adds
 # the elevated/break-glass tier's root key, which BUG-215 never covered
 # (it was explicitly support-tier-only in scope).
+#
+# BUG-307: steps 5-8 below mirror meta-otapulse/recipes-core/
+# soc-shell-access-privileged/soc-shell-access-privileged_1.0.0.bb (added by
+# BUG-263) — the real, non-root otapulse-elevated/otapulse-breakglass account
+# model, replacing Yocto's prior literal-root design. Step 4's root key above
+# is DELIBERATELY LEFT IN PLACE (not removed): socMonitoring/server/
+# docker-compose.yml's ELEVATED_SSH_USER/BREAKGLASS_SSH_USER are still pinned
+# to "root" fleet-wide as of this change (the cutover to the new usernames is
+# sequenced to happen only after live verification across all Yocto targets —
+# see BUG-263's tracker entry), so removing step 4 now would break every
+# Buildroot board's elevated/break-glass tier immediately, before the cutover
+# even happens. Steps 5-8 pre-provision the new accounts/keys/sudoers so that,
+# when the cutover eventually flips ELEVATED_SSH_USER/BREAKGLASS_SSH_USER to
+# otapulse-elevated/otapulse-breakglass, Buildroot boards already have real
+# credentials and an allowlist waiting — exactly like Yocto now does. Once the
+# cutover is verified complete fleet-wide, step 4 (the root key) becomes dead
+# weight and should be removed in a follow-up bug, mirroring whatever
+# decommissioning step the Yocto side takes for its literal-root debug-tweaks
+# reliance.
 ifeq ($(BR2_PACKAGE_OTAPULSE_REMOTE_SSH),y)
 define OTAPULSE_INSTALL_SHELL_ACCESS
 	# ------------------------------------------------------------------
@@ -488,6 +526,63 @@ define OTAPULSE_INSTALL_SHELL_ACCESS
 	$(INSTALL) -d -m 0700 $(TARGET_DIR)/root/.ssh
 	$(INSTALL) -m 0600 $(OTAPULSE_PKGDIR)/gateway-authorized-key \
 		$(TARGET_DIR)/root/.ssh/authorized_keys
+
+	# ------------------------------------------------------------------
+	# 5. Elevated/Break-Glass sudoers drop-ins — BUG-307.
+	#    Same file names/numbering as the Yocto recipe's
+	#    /etc/sudoers.d/15-soc-elevated and 16-soc-breakglass, content
+	#    ported byte-for-byte from soc-elevated.sudoers/soc-breakglass.
+	#    sudoers (soc-shell-access-privileged) — same Cmnd_Alias grants,
+	#    same NOEXEC boundary. Mode 0440, root:root, same rationale as
+	#    step 1.
+	# ------------------------------------------------------------------
+	$(INSTALL) -m 0440 $(OTAPULSE_PKGDIR)/soc-elevated.sudoers \
+		$(TARGET_DIR)/etc/sudoers.d/15-soc-elevated
+	$(INSTALL) -m 0440 $(OTAPULSE_PKGDIR)/soc-breakglass.sudoers \
+		$(TARGET_DIR)/etc/sudoers.d/16-soc-breakglass
+
+	# ------------------------------------------------------------------
+	# 6. Elevated-tier /etc reader wrapper — BUG-307.
+	#    Deliberately a SEPARATE directory from /usr/libexec/soc-diag
+	#    (step 2) — installing it there would silently grant it to the
+	#    support user too, via SOC_DIAG = /usr/libexec/soc-diag/* in
+	#    soc-support.sudoers. Same file, same traversal hardening, as
+	#    soc-shell-access-privileged's soc-readetc.
+	# ------------------------------------------------------------------
+	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/libexec/soc-diag-elevated
+	$(INSTALL) -m 0755 $(OTAPULSE_PKGDIR)/soc-readetc \
+		$(TARGET_DIR)/usr/libexec/soc-diag-elevated/soc-readetc
+
+	# ------------------------------------------------------------------
+	# 7. Elevated/Break-Glass home dirs + elevated-tier pager profile —
+	#    BUG-307. Mirrors step 3's home-dir pattern (mkusers already
+	#    chowns these to the right user:group at rootfs-finalize time,
+	#    same as 'support'). The break-glass user gets no .profile of
+	#    its own: 'sudo -i' (BREAKGLASS_SHELL_COMMAND) sources root's
+	#    own environment, not otapulse-breakglass's — same reasoning as
+	#    the Yocto recipe, which ships elevated-profile only.
+	# ------------------------------------------------------------------
+	$(INSTALL) -d -m 0750 $(TARGET_DIR)/home/otapulse-elevated
+	$(INSTALL) -d -m 0750 $(TARGET_DIR)/home/otapulse-breakglass
+	$(INSTALL) -m 0644 $(OTAPULSE_PKGDIR)/elevated-profile \
+		$(TARGET_DIR)/home/otapulse-elevated/.profile
+
+	# ------------------------------------------------------------------
+	# 8. Elevated/Break-Glass gateway authorized keys — BUG-307.
+	#    One dedicated key per tier (NOT the same key as 'support' or as
+	#    each other — see elevated_ssh_key_path/breakglass_ssh_key_path
+	#    in socMonitoring/server/gateway/app/config.py), so the two
+	#    identities stay cryptographically distinguishable, exactly like
+	#    the Yocto recipe. Same Dropbear ~/.ssh/authorized_keys
+	#    constraint as step 3 — no /etc/ssh/authorized_keys/%u lookup on
+	#    this sshd.
+	# ------------------------------------------------------------------
+	$(INSTALL) -d -m 0700 $(TARGET_DIR)/home/otapulse-elevated/.ssh
+	$(INSTALL) -m 0600 $(OTAPULSE_PKGDIR)/gateway-elevated-authorized-key \
+		$(TARGET_DIR)/home/otapulse-elevated/.ssh/authorized_keys
+	$(INSTALL) -d -m 0700 $(TARGET_DIR)/home/otapulse-breakglass/.ssh
+	$(INSTALL) -m 0600 $(OTAPULSE_PKGDIR)/gateway-breakglass-authorized-key \
+		$(TARGET_DIR)/home/otapulse-breakglass/.ssh/authorized_keys
 endef
 OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_SHELL_ACCESS
 endif
