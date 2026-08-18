@@ -176,6 +176,25 @@ func (d *dualRootfsDeviceImpl) Rollback() error {
 		return err
 	}
 	log.Debugf("Marking %s partition as a boot candidate successful.", nextPartition)
+
+	// BUG-311: WriteEnv above only updates the agent's own boot-env vars.
+	// On boards where InstallUpdate() also called switch-boot-slot.sh to
+	// update bootloader-level configuration (PARTUUID swap, extlinux.conf
+	// root=, etc.), that bootloader config is NOT touched by WriteEnv and
+	// was never reverted here before this fix — leaving the device armed
+	// at the bootloader level to boot the failed/rolled-back slot despite
+	// upgrade_available=0. Re-invoke the same script so the bootloader
+	// config actually reverts to match. Do not swallow a failure here:
+	// this is the last-resort safety path for an already-failed install.
+	if err := d.switchBootSlot(nextPartition); err != nil {
+		log.Errorf(
+			"switchBootSlot failed during Rollback for partition %s: %v — "+
+				"bootloader config may still point at the failed slot",
+			nextPartition, err,
+		)
+		return errors.Wrap(err, "failed to switch boot slot via switch-boot-slot.sh during rollback")
+	}
+
 	return nil
 }
 

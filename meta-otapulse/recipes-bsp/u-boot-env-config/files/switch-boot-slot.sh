@@ -602,16 +602,29 @@ try_systemd_boot_aba() {
 }
 
 # Method 6: Store boot slot preference (for bootloader that reads it)
+#
+# BUG-311: this is a best-effort bookkeeping write, run AFTER the real
+# slot-switch method has already succeeded (see the method chain in
+# main()). It must never abort the script via `set -e` — a full /data
+# (e.g. LA-002's disk-fill scenario) can make this write fail with ENOSPC
+# even though the actual boot-slot switch already succeeded, and an
+# aborted script here gets treated as a fatal install failure by
+# dual_rootfs_device.go's InstallUpdate(), discarding a real success.
 store_boot_slot() {
-    mkdir -p "$(dirname "$BOOT_SLOT_FILE")"
-    echo "$SLOT" > "$BOOT_SLOT_FILE"
+    mkdir -p "$(dirname "$BOOT_SLOT_FILE")" 2>/dev/null || \
+        log "WARNING: could not create $(dirname "$BOOT_SLOT_FILE") (non-fatal, e.g. /data full)"
+    if ! echo "$SLOT" > "$BOOT_SLOT_FILE" 2>/dev/null; then
+        log "WARNING: could not write $BOOT_SLOT_FILE (non-fatal, e.g. /data full)"
+    fi
 
     # Also store in /boot if writable
     if [ -w /boot ]; then
-        echo "$SLOT" > /boot/boot_slot
+        if ! echo "$SLOT" > /boot/boot_slot 2>/dev/null; then
+            log "WARNING: could not write /boot/boot_slot (non-fatal)"
+        fi
     fi
 
-    log "Stored boot slot preference: $SLOT"
+    log "Stored boot slot preference: $SLOT (best-effort)"
     return 0
 }
 
