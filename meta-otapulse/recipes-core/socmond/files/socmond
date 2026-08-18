@@ -130,7 +130,18 @@ MAC_ADDRESS=$(get_mac_address)
 # False positives (skipping a restart that was actually safe) just delay the
 # credential reload by one provisioning cycle — harmless. False negatives are
 # bounded by OTA_INFLIGHT_WINDOW_S.
-OTA_DATASTORE_DIRS="/var/lib/otapulse /var/lib/mender"
+# BUG-311: soc-ota-agent's REAL datastore dir is resolved from
+# OTAPULSE_DATASTORE_DIR/MENDER_DATASTORE_DIR (see
+# soc-ota-agent/conf/paths.go's DefaultDataStore), which
+# soc-ota-agent.service sets to /data/otapulse — NOT /var/lib/otapulse.
+# The hardcoded list below was checking a path the agent never writes to
+# under that config, making this guard dead code on every board that
+# ships with the standard service env (confirmed via on-device forensics:
+# /var/lib/otapulse/mender-store did not exist at all, only
+# /data/otapulse/mender-store). Include the env vars (if this process
+# happens to inherit them) AND the real hardcoded default so the guard
+# works regardless of how it's invoked.
+OTA_DATASTORE_DIRS="${OTAPULSE_DATASTORE_DIR:-} ${MENDER_DATASTORE_DIR:-} /data/otapulse /var/lib/otapulse /var/lib/mender"
 OTA_MENDER_STORE_NAME="mender-store"
 OTA_INFLIGHT_WINDOW_S=60
 
