@@ -167,6 +167,18 @@ file_based_boot_health() {
             sync
             log "No pending upgrade — removed stale mender_boot_part_prev"
         fi
+        # BUG-310: also drop the U-Boot-level bootcount safety net's own
+        # counter (boot-orange-pi-zero2w.cmd's uboot_boot_count). Nothing on
+        # the Linux side otherwise ever resets it, so without this it climbs
+        # by 1-2 per successful OTA cycle and eventually reverts a perfectly
+        # good deployment a few cycles later. This hygiene path runs on every
+        # boot once upgrade_available is clear, so a fresh counter for the
+        # NEXT pending switch is guaranteed.
+        if [ -f "$MNT/uboot_boot_count" ]; then
+            rm -f "$MNT/uboot_boot_count"
+            sync
+            log "No pending upgrade — removed stale uboot_boot_count"
+        fi
         cleanup
         exit 0
     fi
@@ -226,6 +238,10 @@ file_based_boot_health() {
         # it rather than let `set -e` abort before the reboot.
         write_ota "$UPGRADE_AVAIL_FILE" "0" || log "WARNING: failed to clear upgrade_available"
         printf '0' > "$FAT_BOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT boot_count"
+        # BUG-310: also clear the U-Boot-level counter here — this revert IS
+        # the event that resolves its pending window too, so it must not
+        # carry a stale count into the next OTA cycle.
+        rm -f "$MNT/uboot_boot_count" 2>/dev/null || log "WARNING: failed to clear uboot_boot_count"
         sync
 
         log "Rebooting onto the previous slot (file-based-boot)"
