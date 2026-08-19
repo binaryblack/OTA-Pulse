@@ -86,6 +86,15 @@ IMAGE_INSTALL += " \
     socmond-bin \
     "
 
+# Diagnostic Log and Trace (DLT) — sprint S43 (TODO-032). Real COVESA/GENIVI
+# dlt-daemon (meta-oe). dlt-system (in the same package) ingests
+# soc-ota-agent's/socmond's existing journald output automatically — see
+# the dlt-daemon_%.bbappend for config. dlt-daemon-systemd (adaptor-udp/
+# example/receive test units) is deliberately NOT installed.
+IMAGE_INSTALL += " \
+    dlt-daemon \
+    "
+
 # OTA Updates - SoC OTA Agent (Mender-based)
 # Provides A/B partition OTA with signature verification
 IMAGE_INSTALL += " \
