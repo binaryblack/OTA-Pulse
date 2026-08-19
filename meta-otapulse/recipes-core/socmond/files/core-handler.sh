@@ -102,6 +102,18 @@ EOF
 
 log "Coredump saved: ${CORE_FILE_PATH} (${CORE_SIZE} bytes)"
 
+# Bridge to DLT (sprint S43 / TODO-032) — one-shot FATAL log entry
+# referencing the coredump path. Pure addition: does not touch the
+# gzip/meta/upload flow above at all. Guarded exactly like the rest of
+# this script (no set -e, "we must not fail or we cause crash loops") —
+# if dlt-example-user is missing or dlt-daemon isn't up yet, this is a
+# silent no-op, never a failure.
+command -v dlt-example-user >/dev/null 2>&1 && \
+    dlt-example-user -n 1 -l 1 -A SOCM -C CRSH -t 2000 \
+        "coredump: ${EXECUTABLE} pid=${PID} signal=${SIGNAL} -> ${CORE_FILE_PATH}" \
+        >/dev/null 2>&1
+true
+
 # Cleanup old coredumps if directory exceeds size limit (500MB)
 # Do this in background to not block
 (
