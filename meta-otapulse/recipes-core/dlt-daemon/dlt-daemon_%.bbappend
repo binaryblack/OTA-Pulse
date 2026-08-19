@@ -21,6 +21,7 @@ SRC_URI += " \
     file://dlt.conf \
     file://dlt-system.conf \
     file://dlt-ordering.conf \
+    file://dlt-system-ordering.conf \
     "
 
 do_install:append() {
@@ -30,8 +31,16 @@ do_install:append() {
     install -d -m 0755 ${D}${systemd_system_unitdir}/dlt.service.d
     install -m 0644 ${WORKDIR}/dlt-ordering.conf \
         ${D}${systemd_system_unitdir}/dlt.service.d/50-otapulse-ordering.conf
+
+    # Upstream dlt-system.service only Wants=dlt.service, no After= — real
+    # start-order race found live (TASK-S43-003), see
+    # dlt-system-ordering.conf for the failure evidence.
+    install -d -m 0755 ${D}${systemd_system_unitdir}/dlt-system.service.d
+    install -m 0644 ${WORKDIR}/dlt-system-ordering.conf \
+        ${D}${systemd_system_unitdir}/dlt-system.service.d/50-otapulse-ordering.conf
 }
 
 FILES:${PN} += " \
     ${systemd_system_unitdir}/dlt.service.d/50-otapulse-ordering.conf \
+    ${systemd_system_unitdir}/dlt-system.service.d/50-otapulse-ordering.conf \
     "
