@@ -644,6 +644,32 @@ store_boot_slot() {
 # chain — it is the most permissive method (fires on the mere presence of
 # a bare cmdline.txt) and would false-positive-shadow the more specific
 # bootloader methods above it if tried earlier.
+#
+# BUG-348 SAFETY GATE: a cmdline.txt sitting ALONGSIDE a config.txt on the
+# same FAT boot partition is specifically the VideoCore/Raspberry-Pi
+# direct-boot signature (config.txt is firmware-specific to that
+# platform; no other board class in this fleet ships it). That EXACT
+# board class already has its own, safer, tryboot-based slot-switch
+# mechanism — ArtifactReboot_Enter_01's Section 1 — which builds a
+# TRY-only tryboot.txt/cmdline_tryboot.txt pair and leaves the PERMANENT
+# cmdline.txt untouched until ArtifactCommit_Enter_01 confirms the new
+# slot actually booted. This method runs during ArtifactInstall (called
+# from InstallUpdate()), i.e. BEFORE ArtifactReboot_Enter_01 ever runs —
+# so if this method were allowed to fire here, it would PERMANENTLY
+# rewrite cmdline.txt's root= to the new (possibly bad) slot before the
+# new rootfs has ever booted, with no way back. That silently defeats
+# the entire tryboot safety net: a firmware fallback on ANY reset boots
+# "config.txt/cmdline.txt" as the safe old slot, but that file would
+# already point at the new slot. Confirmed via direct code reading
+# (dual_rootfs_device.go's InstallUpdate() calls switchBootSlot()
+# unconditionally, before any reboot/state-script phase) — this is
+# exactly the double-brick mechanism BUG-347 hit with a garbage
+# artifact, except this gap could fire on a REAL, well-formed image
+# too. Self-gating out here (config.txt present => defer entirely to
+# ArtifactReboot_Enter_01) is strictly safer: it can only ever remove a
+# redundant, unsafe permanent write on a board that already has its own
+# correct mechanism — it never removes the only way a board could switch
+# slots.
 try_cmdline_txt() {
     local fat_dev="" mnt="" cmdline=""
 
@@ -680,6 +706,21 @@ try_cmdline_txt() {
             rmdir "$mnt" 2>/dev/null || true
             return 1
         fi
+    fi
+
+    # BUG-348 safety gate: config.txt sitting in the SAME directory as
+    # cmdline.txt is the VideoCore/Raspberry-Pi direct-boot signature (see
+    # the block comment above this function for the full rationale). Defer
+    # entirely to ArtifactReboot_Enter_01's own tryboot mechanism rather
+    # than permanently committing root= here, before the new slot has
+    # ever booted.
+    if [ -f "$(dirname "$cmdline")/config.txt" ]; then
+        log "cmdline.txt found alongside config.txt (VideoCore/RPi tryboot platform) — deferring entirely to ArtifactReboot_Enter_01's own tryboot mechanism, not touching the permanent file here"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 1
     fi
 
     if ! grep -q 'root=' "$cmdline"; then
