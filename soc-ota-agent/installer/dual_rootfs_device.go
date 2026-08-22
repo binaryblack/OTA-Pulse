@@ -43,7 +43,15 @@ type dualRootfsDeviceImpl struct {
 	BootEnvReadWriter
 	system.Commander
 	*partitions
-	rebooter *system.SystemRebootCmd
+	rebooter systemRebooter
+}
+
+// systemRebooter is what dualRootfsDeviceImpl needs from
+// system.SystemRebootCmd — an interface so tests can substitute a recording
+// fake (the real one sleeps for minutes after a "successful" reboot).
+type systemRebooter interface {
+	Reboot() error
+	RebootWithArgument(argument string) error
 }
 
 // This interface is only here for tests.
@@ -114,11 +122,34 @@ func (d *dualRootfsDeviceImpl) SupportsRollback() (bool, error) {
 	return true, nil
 }
 
+// Reboot performs the post-install reboot into the freshly-installed slot.
+//
+// On Raspberry Pi / VideoCore boards the slot switch is a firmware tryboot
+// ONE-SHOT armed by ArtifactReboot_Enter_01 (tryboot.txt + cmdline_tryboot.txt
+// on the FAT boot partition). The firmware engages it only when THIS reboot
+// carries the "0 tryboot" reboot(2) argument — and a plain `reboot` actively
+// discards any argument set earlier (see system.SystemRebootCmd.
+// RebootWithArgument). So when the boot env reports an armed try, reboot with
+// that argument; otherwise (every other board class, or nothing armed) reboot
+// plainly, exactly as before. BUG-353: until this change the agent always
+// rebooted plainly here, about one second after the state script, so tryboot
+// never engaged on real hardware and the board booted whatever the permanent
+// config said — with no fallback.
 func (d *dualRootfsDeviceImpl) Reboot() error {
 	log.Infof("OTAPulse rebooting from active partition: %s", d.active)
+	if p, ok := d.BootEnvReadWriter.(interface{ TrybootRebootArgument() string }); ok {
+		if arg := p.TrybootRebootArgument(); arg != "" {
+			log.Infof("OTAPulse: tryboot try armed on the boot partition — rebooting with argument %q so the firmware boots the TRY config exactly once (permanent boot config untouched until ArtifactCommit_Enter_01)", arg)
+			return d.rebooter.RebootWithArgument(arg)
+		}
+	}
 	return d.rebooter.Reboot()
 }
 
+// RollbackReboot reboots back onto the still-active (old) slot after a failed
+// update. Always a PLAIN reboot: by now ArtifactRollbackReboot_Enter_01 has
+// removed any armed TRY files and the firmware must boot the permanent config
+// (the old slot) — a rollback must never re-try the rejected slot.
 func (d *dualRootfsDeviceImpl) RollbackReboot() error {
 	log.Infof("OTAPulse rebooting from inactive partition: %s", d.active)
 	return d.rebooter.Reboot()

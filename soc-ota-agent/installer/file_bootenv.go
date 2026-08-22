@@ -467,10 +467,14 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
 	syscall.Sync()
 	log.Infof("FileBasedBootEnv: Synced boot slot %s to %s", partNum, bootFile)
 
-	// On direct-boot platforms (e.g. RPi4 without U-Boot), the VideoCore firmware
-	// reads root= from cmdline.txt on the FAT boot partition. Without U-Boot to
-	// switch partitions via fw_setenv, we must update cmdline.txt directly so the
-	// device boots from the correct partition after OTA reboot.
+	// On direct-boot platforms (no U-Boot) the firmware reads root= straight
+	// from cmdline.txt on the FAT boot partition, so there is no bootloader
+	// env to switch. How the next boot is pointed at the new slot depends on
+	// the board class — see applyDirectBootSlot: Raspberry Pi / VideoCore
+	// boards use a firmware tryboot one-shot owned by the state scripts and
+	// this agent's Reboot(), and the permanent cmdline.txt is deliberately
+	// NOT touched here (BUG-245/BUG-353); any other direct-boot board still
+	// gets the permanent rewrite.
 	//
 	// Only do this when U-Boot env tools are absent — on U-Boot platforms the
 	// bootloader manages root= itself and cmdline.txt changes are unnecessary.
@@ -486,7 +490,7 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
 		bootDir := filepath.Dir(bootFile)
 		newRootDev := f.getDeviceForPartNum(partNum)
 		if newRootDev != "" {
-			f.updateDirectBootSlot(bootDir, newRootDev)
+			f.applyDirectBootSlot(bootDir, newRootDev)
 		} else {
 			log.Debugf("FileBasedBootEnv: Could not determine root device for partition %s, skipping cmdline.txt update", partNum)
 		}
@@ -526,29 +530,119 @@ func (f *FileBasedBootEnv) getDeviceForPartNum(partNum string) string {
 	return ""
 }
 
-// updateDirectBootSlot points the next boot at newRootDev on a direct-boot
-// (no U-Boot) platform by PERMANENTLY rewriting root= in cmdline.txt. This applies to
-// Raspberry Pi (VideoCore) and any other direct-boot board alike: the firmware always
-// reads root= from cmdline.txt, so the switch reliably takes.
+// applyDirectBootSlot decides how the next boot is pointed at newRootDev on a
+// direct-boot (no working U-Boot env) platform:
 //
-// This replaces the earlier RPi-only VideoCore "tryboot" one-shot (reboot "0 tryboot"
-// + tryboot.txt-as-config). That self-reverting trial proved non-functional on this
-// image — systemd's reboot did not engage tryboot and the device booted back to the
-// original slot every time (BUG-074). The permanent rewrite trades firmware
-// auto-rollback for a switch that actually takes; hardware auto-rollback would need an
-// autoboot.txt tryboot_a_b two-boot-partition layout (a separate boot-integration
-// change). updateBootCmdline keeps a cmdline_prev.txt backup as the rollback
-// target. That backup is now consumed by the pre-agent
-// otapulse-boot-health.service (installed by meta-otapulse/recipes-core/
-// otapulse-firstboot): it counts boot attempts and, once boot_count reaches
-// DefaultMaxBootRetries with upgrade_available still set, restores
-// cmdline_prev.txt over cmdline.txt and reboots onto the known-good slot —
-// closing GAP-OTA-006, where a slot that never runs the agent (panic / broken
-// rootfs / crash-loop) would otherwise be a permanent soft-brick. On a GOOD
-// boot the backup is cleared by CommitUpdate (see dual_rootfs_device.go) and,
+//   - Raspberry Pi / VideoCore (config.txt + cmdline.txt side by side on the
+//     FAT boot partition): DO NOTHING HERE. The slot switch on this board
+//     class is a firmware "tryboot" one-shot owned by the artifact's state
+//     scripts: ArtifactReboot_Enter_01 builds tryboot.txt + cmdline_tryboot.txt
+//     (root= -> new slot, plus TRY-only rootdelay/panic/init= edits) and this
+//     agent's Reboot() then issues `reboot "0 tryboot"` (see
+//     dualRootfsDeviceImpl.Reboot / TrybootRebootArgument), so the firmware
+//     boots the TRY config exactly once; ArtifactCommit_Enter_01 rewrites the
+//     permanent cmdline.txt ONLY after the new slot has booted and the agent
+//     has verified it. A failed try (panic, watchdog, power-cut) resets, the
+//     reset clears the one-shot, and the firmware boots the untouched
+//     permanent cmdline.txt = the OLD slot, where the agent finds an
+//     uncommitted update and rolls back — the board never loses its
+//     known-good slot. Permanently rewriting cmdline.txt here, before the new
+//     slot has ever booted, silently defeats all of that. BUG-353 was
+//     reproduced live on a real RPi4: this code rewrote cmdline.txt to the
+//     new slot two seconds BEFORE ArtifactReboot_Enter_01 even ran, so the
+//     install-triggered reboot booted a deliberately-broken image from the
+//     PERMANENT config with no fallback, and a power cycle could not recover
+//     it (tryboot never engaged either — the agent's plain reboot carried no
+//     argument; see system.SystemRebootCmd.RebootWithArgument).
+//
+//   - Any other direct-boot board (cmdline.txt but no config.txt — none in
+//     the current fleet; kept for completeness): the pre-BUG-245 permanent
+//     rewrite with a cmdline_prev.txt backup consumed by the pre-agent
+//     otapulse-boot-health.service (GAP-OTA-006) — see updateDirectBootSlot.
+func (f *FileBasedBootEnv) applyDirectBootSlot(bootDir, newRootDev string) {
+	if isVideoCoreTrybootPlatform(bootDir) {
+		log.Infof("FileBasedBootEnv: %s is a VideoCore/RPi tryboot platform (config.txt + cmdline.txt) — leaving the permanent cmdline.txt untouched; the slot switch is a firmware tryboot one-shot armed by ArtifactReboot_Enter_01 and committed by ArtifactCommit_Enter_01 after a verified boot (BUG-245/BUG-353)", bootDir)
+		return
+	}
+	f.updateDirectBootSlot(bootDir, newRootDev)
+}
+
+// updateDirectBootSlot points the next boot at newRootDev on a NON-VideoCore
+// direct-boot platform by PERMANENTLY rewriting root= in cmdline.txt.
+// History: this was the BUG-074 fix and, until BUG-353, it also ran on RPi4 —
+// see applyDirectBootSlot for why it must not. updateBootCmdline keeps a
+// cmdline_prev.txt backup as the rollback target, consumed by the pre-agent
+// otapulse-boot-health.service (meta-otapulse/recipes-core/otapulse-firstboot):
+// it counts boot attempts and, once boot_count reaches DefaultMaxBootRetries
+// with upgrade_available still set, restores cmdline_prev.txt over cmdline.txt
+// and reboots onto the known-good slot (GAP-OTA-006). On a GOOD boot the
+// backup is cleared by CommitUpdate (see dual_rootfs_device.go) and,
 // defensively, by otapulse-boot-health on any later upgrade_available=0 boot.
 func (f *FileBasedBootEnv) updateDirectBootSlot(bootDir, newRootDev string) {
 	f.updateBootCmdline(bootDir, newRootDev)
+}
+
+// isVideoCoreTrybootPlatform reports whether bootDir (a mounted FAT boot
+// partition) carries the Raspberry Pi VideoCore direct-boot signature:
+// config.txt AND cmdline.txt side by side. This is the same predicate
+// switch-boot-slot.sh's Method 8 gate and the ArtifactReboot_Enter_01 /
+// ArtifactCommit_Enter_01 state scripts use to recognise this board class, so
+// all of them agree on which boards own their slot switch via tryboot.
+func isVideoCoreTrybootPlatform(bootDir string) bool {
+	if _, err := os.Stat(filepath.Join(bootDir, "config.txt")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(bootDir, "cmdline.txt")); err != nil {
+		return false
+	}
+	return true
+}
+
+// trybootRebootArgument is the reboot(2) RESTART2 string the Raspberry Pi
+// firmware recognises (via the downstream kernel's rpi_firmware_notify_reboot,
+// which matches " tryboot" WITH the leading space) as "boot tryboot.txt
+// instead of config.txt exactly once". Identical to Raspberry Pi OS's
+// documented `sudo reboot "0 tryboot"`.
+const trybootRebootArgument = "0 tryboot"
+
+// trybootRebootArgumentFor returns the reboot argument this agent must pass on
+// its post-install reboot for the boot partition at bootDir: "0 tryboot" when
+// bootDir is a VideoCore tryboot platform AND a try is armed (tryboot.txt
+// present — written by ArtifactReboot_Enter_01, removed again by
+// ArtifactCommit_Enter_01 / ArtifactRollbackReboot_Enter_01), "" (plain
+// reboot) otherwise. Keyed on the armed TRY file rather than on the board
+// class alone, so a reboot with nothing armed never asks the firmware to try a
+// config that does not exist.
+func trybootRebootArgumentFor(bootDir string) string {
+	if !isVideoCoreTrybootPlatform(bootDir) {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(bootDir, "tryboot.txt")); err != nil {
+		return ""
+	}
+	return trybootRebootArgument
+}
+
+// TrybootRebootArgument locates the FAT boot partition (same discovery as
+// syncBootSlotToBootPartition / ClearDirectBootBackup) and returns the reboot
+// argument the post-install reboot must carry — see trybootRebootArgumentFor.
+// Best-effort and hardware-independent: boards with no FAT boot partition, no
+// VideoCore signature, or no armed try get "" (plain reboot). Consumed by
+// dualRootfsDeviceImpl.Reboot through an optional interface, exactly like
+// ClearDirectBootBackup.
+func (f *FileBasedBootEnv) TrybootRebootArgument() string {
+	bootDir, mountedAt := f.findBootDir()
+	if bootDir == "" {
+		return ""
+	}
+	if mountedAt != "" {
+		defer func() {
+			if cmd := f.Commander.Command("umount", mountedAt); cmd != nil {
+				_ = cmd.Run()
+			}
+		}()
+	}
+	return trybootRebootArgumentFor(bootDir)
 }
 
 // updateBootCmdline permanently rewrites the root= parameter in /boot/cmdline.txt to

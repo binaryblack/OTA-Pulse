@@ -36,7 +36,38 @@ func NewSystemRebootCmd(command Commander) *SystemRebootCmd {
 	}
 }
 
+// Reboot issues a plain `reboot` (no reboot(2) argument).
 func (s *SystemRebootCmd) Reboot() error {
+	return s.rebootWith()
+}
+
+// RebootWithArgument issues `reboot <argument>`, i.e. a reboot whose string
+// reaches the kernel as the reboot(2) LINUX_REBOOT_CMD_RESTART2 argument.
+//
+// This exists for platforms whose firmware keys one-shot boot behaviour off
+// that string — concretely the Raspberry Pi VideoCore firmware, which engages
+// its self-reverting "tryboot" one-shot only when the argument contains
+// " tryboot" (e.g. "0 tryboot"; see the RPi downstream kernel's
+// rpi_firmware_notify_reboot). On systemd images `reboot` is systemctl's
+// halt-compat entry point: `reboot ARG` writes ARG to
+// /run/systemd/reboot-param and systemd-shutdown then calls
+// reboot(RESTART2, ARG). A BARE `reboot` does the opposite — it UNLINKS any
+// previously-written /run/systemd/reboot-param (systemd
+// update_reboot_parameter_and_warn(NULL, keep=false)) — which is exactly why a
+// state script could never arm tryboot "in advance" and rely on this agent's
+// own plain reboot to carry it (BUG-353). The argument must travel on the very
+// reboot call this agent makes.
+//
+// An empty argument degrades to a plain Reboot().
+func (s *SystemRebootCmd) RebootWithArgument(argument string) error {
+	if argument == "" {
+		return s.rebootWith()
+	}
+	return s.rebootWith(argument)
+}
+
+// rebootWith runs `reboot <args...>` with the shared retry/wait logic.
+func (s *SystemRebootCmd) rebootWith(args ...string) error {
 	// Retry logic for reboot command.
 	// After large OTA writes (6GB images), the filesystem may temporarily
 	// be read-only due to buffer pressure, causing the reboot command to fail
@@ -59,7 +90,7 @@ func (s *SystemRebootCmd) Reboot() error {
 			retryDelay += time.Second
 		}
 
-		lastErr = s.command.Command("reboot").Run()
+		lastErr = s.command.Command("reboot", args...).Run()
 
 		// *Any* return from reboot is unexpected - it should not return if successful
 		if lastErr == nil {

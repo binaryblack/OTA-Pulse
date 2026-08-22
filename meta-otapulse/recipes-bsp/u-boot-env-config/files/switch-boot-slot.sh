@@ -644,6 +644,43 @@ store_boot_slot() {
 # chain — it is the most permissive method (fires on the mere presence of
 # a bare cmdline.txt) and would false-positive-shadow the more specific
 # bootloader methods above it if tried earlier.
+#
+# BUG-348 SAFETY GATE: a cmdline.txt sitting ALONGSIDE a config.txt on the
+# same FAT boot partition is specifically the VideoCore/Raspberry-Pi
+# direct-boot signature (config.txt is firmware-specific to that
+# platform; no other board class in this fleet ships it). That EXACT
+# board class already has its own, safer, tryboot-based slot-switch
+# mechanism — ArtifactReboot_Enter_01's Section 1 — which builds a
+# TRY-only tryboot.txt/cmdline_tryboot.txt pair and leaves the PERMANENT
+# cmdline.txt untouched until ArtifactCommit_Enter_01 confirms the new
+# slot actually booted. This method runs during ArtifactInstall (called
+# from InstallUpdate()), i.e. BEFORE ArtifactReboot_Enter_01 ever runs —
+# so if this method were allowed to fire here, it would PERMANENTLY
+# rewrite cmdline.txt's root= to the new (possibly bad) slot before the
+# new rootfs has ever booted, with no way back. That silently defeats
+# the entire tryboot safety net: a firmware fallback on ANY reset boots
+# "config.txt/cmdline.txt" as the safe old slot, but that file would
+# already point at the new slot. Confirmed via direct code reading
+# (dual_rootfs_device.go's InstallUpdate() calls switchBootSlot()
+# unconditionally, before any reboot/state-script phase) — this is
+# exactly the double-brick mechanism BUG-347 hit with a garbage
+# artifact, except this gap could fire on a REAL, well-formed image
+# too. Self-gating out here (config.txt present => defer entirely to
+# ArtifactReboot_Enter_01) is strictly safer: it can only ever remove a
+# redundant, unsafe permanent write on a board that already has its own
+# correct mechanism — it never removes the only way a board could switch
+# slots.
+#
+# MUST return 0 (success), not 1, when this gate fires: the real,
+# on-device agent binary (multiboard_yocto's EXTERNALSRC soc-ota-agent
+# copy - the ONLY copy that is ever actually compiled and shipped;
+# verified against the real installed /usr/bin/soc-ota-agent binary via
+# `strings`, not just source reading) fails the ENTIRE install hard on a
+# non-zero switch-boot-slot.sh exit (clears upgrade_available, returns a
+# wrapped error, never reboots). Since this method is last in the chain
+# and every earlier method already self-gates on RPi4, returning 1 here
+# would hard-fail every single OTA install on this board class. See the
+# return-0 comment inside try_cmdline_txt() for the full rationale.
 try_cmdline_txt() {
     local fat_dev="" mnt="" cmdline=""
 
@@ -680,6 +717,42 @@ try_cmdline_txt() {
             rmdir "$mnt" 2>/dev/null || true
             return 1
         fi
+    fi
+
+    # BUG-348 safety gate: config.txt sitting in the SAME directory as
+    # cmdline.txt is the VideoCore/Raspberry-Pi direct-boot signature (see
+    # the block comment above this function for the full rationale). Defer
+    # entirely to ArtifactReboot_Enter_01's own tryboot mechanism rather
+    # than permanently committing root= here, before the new slot has
+    # ever booted.
+    #
+    # BUG-348 correction (independent review, model: fable — caught before
+    # this ever reached a real image build): this branch MUST return 0
+    # here, not 1. The agent binary actually compiled for real boards
+    # (multiboard_yocto's EXTERNALSRC soc-ota-agent copy — confirmed via
+    # `strings` on the real installed /usr/bin/soc-ota-agent binary
+    # extracted from a real board's rootfs) treats a non-zero
+    # switch-boot-slot.sh exit as a HARD INSTALL FAILURE: InstallUpdate()
+    # clears upgrade_available and fails the deployment outright, before
+    # any reboot ever happens. (A DIFFERENT, non-authoritative copy of
+    # this same Go source under socMonitoring/ — not what any board
+    # actually runs — swallows this error instead; do not trust that copy
+    # for on-device behavior.) On RPi4/VideoCore boards every earlier
+    # method in this script's chain already self-gates, so this method is
+    # the last one tried — if it ever returned 1, main() would report
+    # overall failure and InstallUpdate() would hard-fail EVERY OTA
+    # install on this board class. Returning 0 here is correct, honest
+    # semantics: this board class's real "method" for this install phase
+    # IS deferral — the actual switch is deliberately performed later, by
+    # ArtifactReboot_Enter_01 + ArtifactCommit_Enter_01 — so reporting
+    # success is accurate, not a false claim.
+    if [ -f "$(dirname "$cmdline")/config.txt" ]; then
+        log "cmdline.txt found alongside config.txt (VideoCore/RPi tryboot platform) — deferring the actual switch to ArtifactReboot_Enter_01's tryboot mechanism + ArtifactCommit_Enter_01 (not touching the permanent file here); reporting success since deferral IS this board class's method"
+        if [ -n "$mnt" ]; then
+            umount "$mnt" 2>/dev/null
+            rmdir "$mnt" 2>/dev/null || true
+        fi
+        return 0
     fi
 
     if ! grep -q 'root=' "$cmdline"; then

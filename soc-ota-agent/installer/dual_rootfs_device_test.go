@@ -289,3 +289,82 @@ func TestDeviceVerifyReboot(t *testing.T) {
 	err = testDevice.VerifyReboot()
 	assert.NoError(t, err)
 }
+
+// --- BUG-353: the post-install reboot must carry the firmware tryboot
+// argument exactly when the boot env reports an armed try; rollback reboots
+// are always plain -----------------------------------------------------------
+
+type recordingRebooter struct {
+	calls []string
+}
+
+func (r *recordingRebooter) Reboot() error {
+	r.calls = append(r.calls, "reboot")
+	return nil
+}
+
+func (r *recordingRebooter) RebootWithArgument(argument string) error {
+	r.calls = append(r.calls, "reboot "+argument)
+	return nil
+}
+
+// fakeTrybootBootEnv is a BootEnvReadWriter that also exposes the optional
+// TrybootRebootArgument hook, like FileBasedBootEnv does.
+type fakeTrybootBootEnv struct {
+	fakeBootEnv
+	arg string
+}
+
+func (f *fakeTrybootBootEnv) TrybootRebootArgument() string { return f.arg }
+
+func Test_Reboot_UsesTrybootArgumentWhenTryIsArmed(t *testing.T) {
+	rb := &recordingRebooter{}
+	dev := dualRootfsDeviceImpl{partitions: &partitions{}, rebooter: rb}
+	dev.BootEnvReadWriter = &fakeTrybootBootEnv{arg: "0 tryboot"}
+
+	if err := dev.Reboot(); err != nil {
+		t.Fatalf("Reboot returned error: %v", err)
+	}
+	if len(rb.calls) != 1 || rb.calls[0] != "reboot 0 tryboot" {
+		t.Fatalf("expected a single `reboot 0 tryboot`, got %v", rb.calls)
+	}
+}
+
+func Test_Reboot_PlainWhenNothingArmed(t *testing.T) {
+	rb := &recordingRebooter{}
+	dev := dualRootfsDeviceImpl{partitions: &partitions{}, rebooter: rb}
+	dev.BootEnvReadWriter = &fakeTrybootBootEnv{arg: ""}
+
+	if err := dev.Reboot(); err != nil {
+		t.Fatalf("Reboot returned error: %v", err)
+	}
+	if len(rb.calls) != 1 || rb.calls[0] != "reboot" {
+		t.Fatalf("expected a single plain `reboot`, got %v", rb.calls)
+	}
+}
+
+func Test_Reboot_PlainWhenBootEnvHasNoTrybootHook(t *testing.T) {
+	rb := &recordingRebooter{}
+	dev := dualRootfsDeviceImpl{partitions: &partitions{}, rebooter: rb}
+	dev.BootEnvReadWriter = &fakeBootEnv{}
+
+	if err := dev.Reboot(); err != nil {
+		t.Fatalf("Reboot returned error: %v", err)
+	}
+	if len(rb.calls) != 1 || rb.calls[0] != "reboot" {
+		t.Fatalf("expected a single plain `reboot`, got %v", rb.calls)
+	}
+}
+
+func Test_RollbackReboot_AlwaysPlainEvenIfTryArmed(t *testing.T) {
+	rb := &recordingRebooter{}
+	dev := dualRootfsDeviceImpl{partitions: &partitions{}, rebooter: rb}
+	dev.BootEnvReadWriter = &fakeTrybootBootEnv{arg: "0 tryboot"}
+
+	if err := dev.RollbackReboot(); err != nil {
+		t.Fatalf("RollbackReboot returned error: %v", err)
+	}
+	if len(rb.calls) != 1 || rb.calls[0] != "reboot" {
+		t.Fatalf("rollback must be a plain `reboot`, got %v", rb.calls)
+	}
+}

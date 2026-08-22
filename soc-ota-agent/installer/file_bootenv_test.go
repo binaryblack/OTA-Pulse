@@ -342,3 +342,75 @@ func TestNewFileBasedBootEnv_ResolvesByPartlabelPaths(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "a", strings.TrimSpace(string(slot)))
 }
+
+// --- BUG-353: VideoCore/RPi tryboot platforms must never get the permanent
+// cmdline.txt rewrite at install time, and the post-install reboot must carry
+// the firmware's "0 tryboot" argument exactly when a try is armed -----------
+
+func TestApplyDirectBootSlot_VideoCoreTrybootPlatformLeavesCmdlineUntouched(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	original := "console=serial0,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait"
+	cmdlinePath := filepath.Join(bootDir, "cmdline.txt")
+	require.NoError(t, os.WriteFile(cmdlinePath, []byte(original+"\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "config.txt"), []byte("enable_uart=1\n"), 0644))
+
+	env.applyDirectBootSlot(bootDir, "/dev/mmcblk0p3")
+
+	after, err := os.ReadFile(cmdlinePath)
+	require.NoError(t, err)
+	assert.Equal(t, original+"\n", string(after),
+		"permanent cmdline.txt must be left untouched on a VideoCore tryboot platform (BUG-353)")
+	_, statErr := os.Stat(filepath.Join(bootDir, directBootPrevCmdline))
+	assert.True(t, os.IsNotExist(statErr), "no cmdline_prev.txt breadcrumb may be written when nothing was rewritten")
+}
+
+func TestApplyDirectBootSlot_NonVideoCoreDirectBootStillRewrites(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	original := "console=ttyS0 root=/dev/mmcblk0p2 rootwait"
+	cmdlinePath := filepath.Join(bootDir, "cmdline.txt")
+	require.NoError(t, os.WriteFile(cmdlinePath, []byte(original+"\n"), 0644))
+	// deliberately NO config.txt -> not a VideoCore platform
+
+	env.applyDirectBootSlot(bootDir, "/dev/mmcblk0p3")
+
+	after, err := os.ReadFile(cmdlinePath)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Fields(string(after)), "root=/dev/mmcblk0p3",
+		"non-VideoCore direct-boot boards keep the permanent rewrite")
+	prev, err := os.ReadFile(filepath.Join(bootDir, directBootPrevCmdline))
+	require.NoError(t, err)
+	assert.Equal(t, original+"\n", string(prev))
+}
+
+func TestTrybootRebootArgumentFor(t *testing.T) {
+	write := func(dir, name string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x\n"), 0644))
+	}
+
+	armed := t.TempDir() // VideoCore platform with an armed try -> "0 tryboot"
+	write(armed, "config.txt")
+	write(armed, "cmdline.txt")
+	write(armed, "tryboot.txt")
+	assert.Equal(t, "0 tryboot", trybootRebootArgumentFor(armed))
+
+	idle := t.TempDir() // VideoCore platform, nothing armed -> plain reboot
+	write(idle, "config.txt")
+	write(idle, "cmdline.txt")
+	assert.Equal(t, "", trybootRebootArgumentFor(idle))
+
+	notVC := t.TempDir() // tryboot.txt but no config.txt (not VideoCore) -> plain reboot
+	write(notVC, "cmdline.txt")
+	write(notVC, "tryboot.txt")
+	assert.Equal(t, "", trybootRebootArgumentFor(notVC))
+
+	assert.Equal(t, "", trybootRebootArgumentFor(filepath.Join(t.TempDir(), "nope")))
+}
+
+// The RPi firmware driver matches " tryboot" (WITH the leading space) in the
+// reboot(2) argument — pin the exact string the agent passes.
+func TestTrybootRebootArgument_MatchesFirmwareContract(t *testing.T) {
+	assert.Equal(t, "0 tryboot", trybootRebootArgument)
+	assert.Contains(t, trybootRebootArgument, " tryboot")
+}

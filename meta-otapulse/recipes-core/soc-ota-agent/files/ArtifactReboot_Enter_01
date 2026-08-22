@@ -21,11 +21,12 @@
 # reboot. Responsibilities, checked in order:
 #
 # 1. RPi4 direct-boot (VideoCore) A/B slot switch (BUG-245): build a TRY
-#    configuration and reboot into it via the firmware's tryboot one-shot, WITHOUT
-#    touching the permanent config.txt/cmdline.txt. See the section-1 comment
-#    block below for the full history and rationale. The switch is made permanent
-#    later, by ArtifactCommit_Enter_01, only after the new slot has booted and the
-#    agent has confirmed it healthy.
+#    configuration that the AGENT's own post-install reboot (`reboot "0 tryboot"`,
+#    BUG-353) boots via the firmware's tryboot one-shot, WITHOUT touching the
+#    permanent config.txt/cmdline.txt. See the section-1 comment block below for
+#    the full history and rationale. The switch is made permanent later, by
+#    ArtifactCommit_Enter_01, only after the new slot has booted and the agent
+#    has confirmed it healthy.
 #
 # 2. FAT boot-env sync (iMX8MP and any boot.scr board): copy
 #    /data/ota/mender_boot_part to the FAT boot partition so U-Boot's boot.scr
@@ -88,12 +89,36 @@ cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true;
 #                        duplicating it).
 #   - cmdline_tryboot.txt the current cmdline.txt content with root= pointed at
 #                        the new slot, `rootwait` replaced by `rootdelay=20`,
-#                        and ` panic=15` appended if no panic= is already
-#                        present. rootwait waits forever for the root device —
-#                        it would hang the TRY boot instead of letting it fail
-#                        and reset; panic=15 turns a kernel panic into a reset,
-#                        which is what clears the firmware's one-shot flag and
-#                        falls back to config.txt/cmdline.txt (the OLD slot).
+#                        ` panic=15` appended if no panic= is already present,
+#                        and an explicit `init=/sbin/init` pinned if no init=
+#                        is already present. rootwait waits forever for the
+#                        root device — it would hang the TRY boot instead of
+#                        letting it fail and reset; panic=15 turns a kernel
+#                        panic into a reset, which is what clears the
+#                        firmware's one-shot flag and falls back to
+#                        config.txt/cmdline.txt (the OLD slot).
+#
+#                        BUG-348 (live-reproduced): WITHOUT an explicit init=,
+#                        a broken new-slot image whose real init binary is
+#                        missing/corrupt does NOT panic — the kernel's
+#                        built-in fallback chain (/sbin/init -> /etc/init ->
+#                        /bin/init -> /bin/sh) silently execs /bin/sh as PID 1
+#                        instead, since that candidate still exists on a
+#                        normal rootfs even when the real init is broken. No
+#                        panic means panic=15 never fires, no reset ever
+#                        happens, and the board hangs in that shell forever —
+#                        the tryboot recovery mechanism depends entirely on a
+#                        panic to trigger the reset that clears the one-shot
+#                        flag, so a failure mode that boots to a shell instead
+#                        of panicking defeats it completely. Pinning the
+#                        REAL init path explicitly removes the fallback chain
+#                        the kernel would otherwise walk: an unusable pinned
+#                        init now panics immediately ("Requested init ...
+#                        failed") instead of trying /bin/sh next, converting
+#                        this failure mode into the same bounded,
+#                        panic-then-reset-then-fallback recovery every other
+#                        boot failure already gets.
+#
 #                        These TRY-only edits never reach the PERMANENT
 #                        cmdline.txt — ArtifactCommit_Enter_01 writes that from
 #                        the ORIGINAL argument list, unmodified.
@@ -107,16 +132,26 @@ cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true;
 # ONLY thing that ever writes to the permanent cmdline.txt again.
 #
 # NOTE for otapulse-tryboot-watchdog/otapulse-tryboot-commit (meta-custom
-# otapulse-rpi4-tryboot recipe, installed on raspberrypi4-64 only): those
-# services' "Role 2" (boot-count watchdog keyed on cmdline_prev.txt) is a real
-# safety net for step (c)'s LAST-RESORT fallback below, which still uses the old
-# permanent-rewrite + cmdline_prev.txt scheme. Their "Role 1" (promote
-# cmdline_tryboot.txt -> cmdline.txt as soon as tryboot.txt is seen at
-# basic.target) has been DISABLED as part of BUG-245 — it fired long before any
-# health check and would have permanently committed the TRY-only cmdline
-# arguments (rootdelay=20/panic=15) instead of leaving the commit to
-# ArtifactCommit_Enter_01. See that recipe's otapulse-tryboot-watchdog script
-# for the disabled block.
+# otapulse-rpi4-tryboot recipe, installed on raspberrypi4-64 only): their
+# "Role 1" (promote cmdline_tryboot.txt -> cmdline.txt as soon as tryboot.txt
+# is seen at basic.target) has been DISABLED as part of BUG-245 — it fired long
+# before any health check and would have permanently committed the TRY-only
+# cmdline arguments (rootdelay=20/panic=15/init=) instead of leaving the commit
+# to ArtifactCommit_Enter_01. Their "Role 2" (boot-count watchdog keyed on
+# cmdline_prev.txt) only ever sees a cmdline_prev.txt written by
+# ArtifactCommit_Enter_01 at commit time (cleared right after by the agent's
+# CommitUpdate) — this script no longer has any permanent-rewrite fallback for
+# it to guard (BUG-353, see the end of this section).
+#
+# WHO DOES WHAT on this board class (BUG-353 contract — all of these must agree,
+# and each one is gated on the same VideoCore signature, config.txt + cmdline.txt
+# side by side on the FAT boot partition):
+#   - agent file_bootenv.go (applyDirectBootSlot): never touches the permanent
+#                                  cmdline.txt on this board class
+#   - switch-boot-slot.sh Method 8 : defers (BUG-348 gate, returns 0)
+#   - THIS script                  : builds tryboot.txt + cmdline_tryboot.txt
+#   - agent Reboot()               : `reboot "0 tryboot"` iff tryboot.txt armed
+#   - ArtifactCommit_Enter_01      : the ONLY writer of the permanent cmdline.txt
 if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FILE" ]; then
     TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
     if [ -n "$TARGET_PART" ] && grep -q 'root=' "$MNT/cmdline.txt"; then
@@ -146,92 +181,47 @@ if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FIL
             *' panic='*) : ;;
             *) NEW="$NEW panic=15" ;;
         esac
+        # BUG-348: pin the real init path explicitly so a broken/missing
+        # init panics the kernel instead of silently falling through to
+        # /bin/sh (see the block comment above this section for the full
+        # rationale). Only added if this cmdline doesn't already pin one.
+        case " $NEW " in
+            *' init='*) : ;;
+            *) NEW="$NEW init=/sbin/init" ;;
+        esac
         printf '%s\n' "$NEW" > "$MNT/cmdline_tryboot.txt"
         sync
 
         echo "ArtifactReboot_Enter: built tryboot.txt/cmdline_tryboot.txt for root=${TARGET_DEV} on ${FAT_DEV} (permanent cmdline.txt left untouched; see ArtifactCommit_Enter_01)" >&2
         cleanup
 
-        # Defer the reboot attempts so the agent can log the state transition first
-        # (existing pattern). The whole retry chain runs from a standalone script
-        # file (rather than inline in this nohup command) to avoid fragile nested
-        # quoting around the embedded python3 fallback — everything still runs
-        # inside the deferred shell so ordering is preserved even though a
-        # successful tryboot never returns.
-        DEFER="/tmp/.otapulse_reboot_defer_$$.sh"
-        cat > "$DEFER" <<'DEFER_EOF'
-#!/bin/sh
-sleep 2
-
-# (a) systemd >= 246: --reboot-argument reaches the reboot(2) syscall as the
-#     RESTART2 string "0 tryboot", which the VideoCore firmware reads to engage
-#     its one-shot tryboot. systemctl reboot RETURNS 0 IMMEDIATELY once the
-#     request is accepted -- the actual reboot happens asynchronously as
-#     systemd tears the system down cleanly. That is success, not "did not
-#     return" -- falling through to (b)/(c) after a successful (a) would race
-#     the in-flight clean shutdown with a raw unclean reboot (b) or, worse,
-#     let (c) permanently rewrite cmdline.txt and delete tryboot.txt while a
-#     tryboot is already armed and mid-teardown, which can silently commit
-#     the switch with firmware auto-rollback disarmed. So: a ZERO exit from
-#     (a) means the clean reboot is in flight -- stop here and just wait to be
-#     killed by it. Only a NON-ZERO exit (rejected/unavailable) may fall
-#     through to (b).
-if systemctl reboot --reboot-argument="0 tryboot" 2>/dev/null; then
-    sleep 60
-    exit 0
-fi
-
-# (b) Bypass systemd entirely: issue the reboot(2) syscall directly via python3
-#     ctypes (python3 is present on these images). Same RESTART2 "0 tryboot"
-#     argument as (a). Only reached if (a) is unavailable or was rejected.
-#     glibc's reboot() wrapper only exposes the simple RB_* command set, not
-#     the 4-argument raw syscall RESTART2 needs, so this calls syscall()
-#     directly with a per-arch __NR_reboot number; unknown arches are skipped
-#     (falls through to (c)) rather than guessing.
-#     Unlike systemctl reboot, the raw RESTART2 syscall does NOT sync
-#     filesystems or stop services first -- it is immediate and unclean. The
-#     agent has just written mender-store state under /data and this script
-#     just wrote the FAT try files, so force a sync (and give it a moment to
-#     land) right before issuing it, or unsynced pages can be lost and desync
-#     the agent's state machine across the try boot. This path is a
-#     best-effort fallback only -- (a) is the clean path.
-sync
-sleep 1
-python3 -c '
-import ctypes, ctypes.util, platform
-_SYS_REBOOT = {"aarch64": 142, "armv7l": 88, "armv6l": 88, "x86_64": 169, "i686": 88}
-_nr = _SYS_REBOOT.get(platform.machine())
-if _nr is not None:
-    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-    libc.syscall(ctypes.c_long(_nr), ctypes.c_uint32(0xfee1dead), ctypes.c_uint32(0x28121969),
-                 ctypes.c_uint32(0xA1B2C3D4), b"0 tryboot")
-' 2>/dev/null
-
-# (c) LAST RESORT: neither (a) nor (b) engaged tryboot. Fall back to the exact
-#     pre-BUG-245 behavior -- permanently rewrite cmdline.txt (with
-#     cmdline_prev.txt save) and plain-reboot. Firmware auto-rollback is NOT
-#     armed for this update, but the switch still takes -- this can never
-#     regress a switch that used to succeed before BUG-245.
-logger -t otapulse-reboot-enter "tryboot engagement failed -- LAST RESORT permanent cmdline.txt rewrite, firmware auto-rollback NOT armed for this update" 2>/dev/null
-
-MNT2="/tmp/.otapulse_fat_fallback_$$"
-mkdir -p "$MNT2"
-if mount "__FAT_DEV__" "$MNT2" 2>/dev/null; then
-    [ -f "$MNT2/cmdline_prev.txt" ] || cp -f "$MNT2/cmdline.txt" "$MNT2/cmdline_prev.txt"
-    CUR2=$(cat "$MNT2/cmdline.txt")
-    NEW2=$(printf '%s' "$CUR2" | sed -E "s#root=[^ ]+#root=__TARGET_DEV__#")
-    printf '%s\n' "$NEW2" > "$MNT2/cmdline.txt.new" && mv -f "$MNT2/cmdline.txt.new" "$MNT2/cmdline.txt"
-    rm -f "$MNT2/tryboot.txt" "$MNT2/cmdline_tryboot.txt"
-    sync
-    umount "$MNT2" 2>/dev/null
-fi
-rmdir "$MNT2" 2>/dev/null
-
-reboot
-DEFER_EOF
-        sed -i "s#__FAT_DEV__#${FAT_DEV}#g; s#__TARGET_DEV__#${TARGET_DEV}#g" "$DEFER"
-        chmod +x "$DEFER"
-        nohup sh "$DEFER" >/dev/null 2>&1 &
+        # BUG-353: the reboot itself is NOT issued from here. The agent issues
+        # it right after this script returns (dual_rootfs_device.go Reboot()),
+        # as `reboot "0 tryboot"` whenever tryboot.txt is armed — that reboot(2)
+        # RESTART2 string is what the VideoCore firmware keys its one-shot on
+        # (downstream kernel rpi_firmware_notify_reboot matches " tryboot").
+        # Proven live on a real RPi4 (2026-08-22): device-tree
+        # chosen/bootloader/tryboot=1 and the TRY cmdline in /proc/cmdline,
+        # permanent cmdline.txt/config.txt byte-identical before and after.
+        #
+        # History — why this script must NOT try to reboot by itself: an
+        # earlier version backgrounded a deferred "systemctl reboot
+        # --reboot-argument -> raw reboot(2) syscall -> LAST-RESORT permanent
+        # cmdline.txt rewrite" chain from here. That could never work: (1) the
+        # agent issues its own plain `reboot` about one second after this
+        # script exits, and on systemd a BARE `reboot` UNLINKS
+        # /run/systemd/reboot-param (update_reboot_parameter_and_warn(NULL)),
+        # so any argument set earlier is discarded — and the deferred chain is
+        # killed with the agent's cgroup during the very shutdown it raced;
+        # (2) its LAST-RESORT branch permanently rewrote cmdline.txt to the new
+        # slot BEFORE that slot had ever booted — exactly the commit-before-
+        # verify brick path this whole section exists to eliminate. Both are
+        # gone. If the agent running this artifact predates BUG-353 it reboots
+        # plainly: the firmware then boots the untouched permanent cmdline.txt
+        # (the OLD slot), ArtifactCommit_Enter_01 refuses the wrong-slot commit,
+        # and the deployment fails CLEANLY with the board alive — fail-safe,
+        # never a permanent switch without a net.
+        echo "ArtifactReboot_Enter: tryboot armed — the agent's own reboot carries the \"0 tryboot\" argument (BUG-353); no reboot is issued from this script" >&2
         exit 0
     fi
 fi
