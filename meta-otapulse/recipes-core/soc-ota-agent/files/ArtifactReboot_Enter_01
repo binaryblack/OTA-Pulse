@@ -88,12 +88,36 @@ cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true;
 #                        duplicating it).
 #   - cmdline_tryboot.txt the current cmdline.txt content with root= pointed at
 #                        the new slot, `rootwait` replaced by `rootdelay=20`,
-#                        and ` panic=15` appended if no panic= is already
-#                        present. rootwait waits forever for the root device —
-#                        it would hang the TRY boot instead of letting it fail
-#                        and reset; panic=15 turns a kernel panic into a reset,
-#                        which is what clears the firmware's one-shot flag and
-#                        falls back to config.txt/cmdline.txt (the OLD slot).
+#                        ` panic=15` appended if no panic= is already present,
+#                        and an explicit `init=/sbin/init` pinned if no init=
+#                        is already present. rootwait waits forever for the
+#                        root device — it would hang the TRY boot instead of
+#                        letting it fail and reset; panic=15 turns a kernel
+#                        panic into a reset, which is what clears the
+#                        firmware's one-shot flag and falls back to
+#                        config.txt/cmdline.txt (the OLD slot).
+#
+#                        BUG-348 (live-reproduced): WITHOUT an explicit init=,
+#                        a broken new-slot image whose real init binary is
+#                        missing/corrupt does NOT panic — the kernel's
+#                        built-in fallback chain (/sbin/init -> /etc/init ->
+#                        /bin/init -> /bin/sh) silently execs /bin/sh as PID 1
+#                        instead, since that candidate still exists on a
+#                        normal rootfs even when the real init is broken. No
+#                        panic means panic=15 never fires, no reset ever
+#                        happens, and the board hangs in that shell forever —
+#                        the tryboot recovery mechanism depends entirely on a
+#                        panic to trigger the reset that clears the one-shot
+#                        flag, so a failure mode that boots to a shell instead
+#                        of panicking defeats it completely. Pinning the
+#                        REAL init path explicitly removes the fallback chain
+#                        the kernel would otherwise walk: an unusable pinned
+#                        init now panics immediately ("Requested init ...
+#                        failed") instead of trying /bin/sh next, converting
+#                        this failure mode into the same bounded,
+#                        panic-then-reset-then-fallback recovery every other
+#                        boot failure already gets.
+#
 #                        These TRY-only edits never reach the PERMANENT
 #                        cmdline.txt — ArtifactCommit_Enter_01 writes that from
 #                        the ORIGINAL argument list, unmodified.
@@ -145,6 +169,14 @@ if [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ] && [ -f "$BOOT_PART_FIL
         case " $NEW " in
             *' panic='*) : ;;
             *) NEW="$NEW panic=15" ;;
+        esac
+        # BUG-348: pin the real init path explicitly so a broken/missing
+        # init panics the kernel instead of silently falling through to
+        # /bin/sh (see the block comment above this section for the full
+        # rationale). Only added if this cmdline doesn't already pin one.
+        case " $NEW " in
+            *' init='*) : ;;
+            *) NEW="$NEW init=/sbin/init" ;;
         esac
         printf '%s\n' "$NEW" > "$MNT/cmdline_tryboot.txt"
         sync
