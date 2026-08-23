@@ -441,7 +441,26 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
 	if oldData, statErr := os.ReadFile(bootFile); statErr == nil {
 		oldPart := strings.TrimSpace(string(oldData))
 		if oldPart != "" && oldPart != partNum {
-			if _, prevStatErr := os.Stat(prevFile); os.IsNotExist(prevStatErr) {
+			_, prevStatErr := os.Stat(prevFile)
+			// A prev marker already on disk is only a "do not clobber" case
+			// when it belongs to THIS in-flight cycle (a retried WriteEnv
+			// call, or Rollback's own WriteEnv layered on top of Install's —
+			// see dual_rootfs_device.go Rollback(), which writes
+			// mender_boot_part again while upgrade_available is still "1").
+			// upgrade_available is the ground truth for "mid-cycle": WriteEnv
+			// always writes mender_boot_part BEFORE upgrade_available (see the
+			// write-order doctrine above), so at this point its on-disk value
+			// still reflects the state from BEFORE this call — "1" only when
+			// a cycle is already genuinely in flight. Anything left over from
+			// an EARLIER, already-resolved cycle (upgrade_available != "1")
+			// must be overwritten with the current old/new pair, or it
+			// silently poisons every future revert with stale data (BUG-311:
+			// this existence-only check let a marker left behind by a
+			// U-Boot-level revert on orange-pi-zero2w — which never clears
+			// its own trigger file — suppress every subsequent real OTA's own
+			// correct backup write, reported live 2026-08-19).
+			ua, _ := f.readFile(f.upgradeAvailFile, "0")
+			if os.IsNotExist(prevStatErr) || ua != "1" {
 				// Best-effort, direct write (not the generic f.writeFile retry
 				// helper below — that helper's remount-rw fallback targets
 				// /data specifically, not this FAT boot mount). A failure here
@@ -694,24 +713,37 @@ func (f *FileBasedBootEnv) updateBootCmdline(bootDir, newRootDev string) {
 	log.Infof("FileBasedBootEnv: Updated %s: root → %s", cmdlinePath, newRootDev)
 }
 
-// ClearDirectBootBackup removes the cmdline_prev.txt rollback backup on
-// direct-boot (no working U-Boot env) boards. It is a no-op on U-Boot boards.
+// ClearDirectBootBackup removes the rollback-backup files written during this
+// OTA cycle so a leftover cannot mislead the NEXT cycle's revert:
+// cmdline_prev.txt on direct-boot (VideoCore cmdline.txt) boards, and
+// mender_boot_part_prev (+ its FAT-resident uboot_boot_count) on
+// file-based-boot (boot.scr, no working U-Boot env) boards such as Orange Pi
+// Zero 2W. It is a no-op on U-Boot-env boards.
 //
 // Called from CommitUpdate after a confirmed-good boot: at that point the new
-// slot is accepted, so its cmdline_prev.txt backup is stale. Leaving it in place
-// would defeat the NEXT OTA cycle's revert — updateBootCmdline only writes a
-// fresh backup when none exists (to avoid clobbering an in-cycle backup), so a
-// leftover from this cycle would make otapulse-boot-health restore an
-// already-current slot instead of the real previous one. Removing it here keeps
-// the pre-agent revert path (GAP-OTA-006) correct across successive OTAs.
+// slot is accepted, so any backup from getting there is stale. Leaving
+// cmdline_prev.txt in place would make otapulse-boot-health restore an
+// already-current slot instead of the real previous one (GAP-OTA-006).
+// Leaving mender_boot_part_prev in place is worse on boot.scr boards: BOTH
+// the U-Boot-level bootcount safety net (boot-orange-pi-zero2w.cmd) and
+// otapulse-boot-health's file-based-boot branch treat its mere PRESENCE as
+// "a switch is pending", with no way (from inside U-Boot) to tell a
+// genuinely in-flight cycle from a stale leftover — so an uncleared marker
+// makes every ordinary boot from then on look like an unconfirmed OTA, arms
+// a panic-triggered hard reset on each one, and re-triggers a no-op revert
+// every few boots, forever (BUG-311, reproduced live on orange-pi-zero2w
+// dev-5b5a24ae 2026-08-19). Clearing it here, at the earliest point the OTA
+// is known-good, closes that window as early as possible; otapulse-boot-
+// health's own hygiene sweep on a later boot remains the backstop for the
+// case where the agent never gets to commit at all.
 //
-// Best-effort and hardware-independent: the FAT boot partition is located by the
-// same mount-point / by-label probing used by syncBootSlotToBootPartition; a
-// failure to find or mount it is logged and ignored (otapulse-boot-health also
-// drops the stale backup on any later upgrade_available=0 boot).
+// Best-effort and hardware-independent: the FAT boot partition is located by
+// the same mount-point / by-label probing used by syncBootSlotToBootPartition;
+// a failure to find or mount it, or to remove either file, is logged and
+// ignored — the next boot's hygiene sweep is the backstop.
 func (f *FileBasedBootEnv) ClearDirectBootBackup() {
 	if uBootEnvWorks() {
-		// U-Boot board: no cmdline.txt scheme, nothing to clean up.
+		// U-Boot board: neither backup scheme applies here.
 		return
 	}
 
@@ -729,16 +761,37 @@ func (f *FileBasedBootEnv) ClearDirectBootBackup() {
 	}
 
 	prevPath := filepath.Join(bootDir, directBootPrevCmdline)
-	if _, err := os.Stat(prevPath); err != nil {
-		// Nothing to remove (common on the very first commit) — not an error.
-		return
+	if _, err := os.Stat(prevPath); err == nil {
+		if rerr := os.Remove(prevPath); rerr != nil {
+			log.Warnf("FileBasedBootEnv: ClearDirectBootBackup: failed to remove %s: %v", prevPath, rerr)
+		} else {
+			syscall.Sync()
+			log.Infof("FileBasedBootEnv: ClearDirectBootBackup: removed stale %s after good boot", prevPath)
+		}
 	}
-	if err := os.Remove(prevPath); err != nil {
-		log.Warnf("FileBasedBootEnv: ClearDirectBootBackup: failed to remove %s: %v", prevPath, err)
-		return
+
+	prevPartPath := filepath.Join(bootDir, "mender_boot_part_prev")
+	if _, err := os.Stat(prevPartPath); err == nil {
+		if rerr := os.Remove(prevPartPath); rerr != nil {
+			log.Warnf("FileBasedBootEnv: ClearDirectBootBackup: failed to remove %s: %v", prevPartPath, rerr)
+		} else {
+			syscall.Sync()
+			log.Infof("FileBasedBootEnv: ClearDirectBootBackup: removed stale %s after good boot", prevPartPath)
+		}
+		// Best-effort: also reset the FAT-resident boot-loader-level counter
+		// (boot-orange-pi-zero2w.cmd's uboot_boot_count) so a good commit
+		// leaves no residual count either. Harmless if this fails or the file
+		// is absent — the counter only matters while mender_boot_part_prev
+		// (just removed above) is present.
+		bootCountPath := filepath.Join(bootDir, "uboot_boot_count")
+		if _, err := os.Stat(bootCountPath); err == nil {
+			if werr := os.WriteFile(bootCountPath, []byte("0"), 0644); werr != nil {
+				log.Warnf("FileBasedBootEnv: ClearDirectBootBackup: failed to reset %s: %v", bootCountPath, werr)
+			} else {
+				syscall.Sync()
+			}
+		}
 	}
-	syscall.Sync()
-	log.Infof("FileBasedBootEnv: ClearDirectBootBackup: removed stale %s after good boot", prevPath)
 }
 
 // ReconcileToBootedSlot brings the agent's own /data/ota bookkeeping
