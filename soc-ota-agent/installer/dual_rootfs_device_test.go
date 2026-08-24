@@ -164,6 +164,20 @@ func Test_installUpdate_existingAndNonInactivePartition(t *testing.T) {
 	// rewind to the beginning of file
 	image.Seek(0, 0)
 
+	// BUG-357: pre-size "inactivePart" like a real, fixed-size block device
+	// (which always has data readable at any in-range offset) rather than
+	// leaving it a growing empty file. A growing empty file makes
+	// OptimizedBlockDeviceWriter's forward dirty-frame read hit a real
+	// io.EOF on the very first frame -- a test-fixture-only quirk that
+	// can't happen on an actual block device (writes are always within an
+	// already-provisioned, fixed-size device, per the ENOSPC check in
+	// blockdevice.Open) -- which BlockFrameWriter.Close() then silently
+	// swallows, so the bytes never actually reach the file even though the
+	// call reports success. The new post-write read-back verification in
+	// StoreUpdate correctly catches that silent no-op; fix the fixture to
+	// match real hardware instead of weakening the check.
+	os.Truncate("inactivePart", int64(len(imageContent)))
+
 	old := BlockDeviceGetSizeOf
 	oldSectorSizeOf := BlockDeviceGetSectorSizeOf
 	BlockDeviceGetSizeOf = func(file *os.File) (uint64, error) { return uint64(len(imageContent)), nil }

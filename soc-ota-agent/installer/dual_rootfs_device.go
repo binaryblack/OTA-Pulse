@@ -15,6 +15,8 @@ package installer
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 
 	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/mendersoftware/mender-artifact/handlers"
@@ -255,7 +258,16 @@ func (d *dualRootfsDeviceImpl) StoreUpdate(image io.Reader, info os.FileInfo) er
 		return errors.Wrapf(err, errmsg, inactivePartition)
 	}
 
-	n, err := io.Copy(dev, image)
+	// BUG-357: hash the bytes as they are handed to the block-device writer.
+	// This lets us later PROVE the media actually stored what we intended
+	// to write. The artifact reader's own checksum check (areader/reader.go
+	// -- ch.Verify(), run by our caller immediately after StoreUpdate
+	// returns) only proves the bytes READ FROM THE ARTIFACT STREAM were
+	// correct; it says nothing about what physically ends up at rest on
+	// the target partition once fsync/the block layer/the flash controller
+	// have all had their say.
+	writeHasher := sha256.New()
+	n, err := io.Copy(dev, io.TeeReader(image, writeHasher))
 	if err != nil {
 		dev.Close()
 		return err
@@ -268,7 +280,83 @@ func (d *dualRootfsDeviceImpl) StoreUpdate(image io.Reader, info os.FileInfo) er
 
 	log.Infof("Wrote %d/%d bytes to the inactive partition", n, imageSize)
 
-	return err
+	// A short write (n < imageSize) must fail here explicitly. Without this,
+	// verifyWrittenData below would hash-and-compare only the first n bytes
+	// -- a vacuous pass (n==0 trivially matches too) while the rest of the
+	// partition still holds the OLD image, i.e. a half-new/half-old rootfs
+	// that the checks below would wrongly wave through.
+	if n != imageSize {
+		return errors.Errorf("wrote %d of %d payload bytes to %q -- refusing to install a short/incomplete write", n, imageSize, inactivePartition)
+	}
+
+	// BUG-355/BUG-357: verify what's actually AT REST on the partition
+	// matches what was written, by re-reading it back from the physical
+	// media (best-effort cache drop first, so the read isn't just served
+	// from what the write itself cached) and re-hashing it. A real
+	// incident on orange-pi-zero2w (2026-08-24) proved this class of
+	// corruption is real and otherwise invisible: the in-flight artifact
+	// checksum passed cleanly and fsync succeeded, yet a forensic
+	// byte-level SD-card read (done off-device, on a separate host)
+	// confirmed one shared library had been silently corrupted at rest --
+	// undetected until it crash-looped three unrelated services on the
+	// very next boot. This check closes that gap for every board, not
+	// just this one; a mismatch here fails the install cleanly, before
+	// InstallUpdate() ever flips a boot variable, so the device simply
+	// stays on its current known-good slot instead of silently bricking.
+	// Use dev.Path, not inactivePartition: blockdevice.Open rewrites the
+	// device string for UBI targets (a bare volume name like "ubi0_0" in,
+	// "/dev/ubi0_0" in dev.Path -- see block_device.go's typeUBI branch),
+	// and dev.Path is the corrected form on every device class. Passing
+	// inactivePartition here would make a UBI board reopen a relative,
+	// nonexistent path and fail every single install with a bogus
+	// verification error.
+	if verr := verifyWrittenData(dev.Path, n, writeHasher.Sum(nil)); verr != nil {
+		return errors.Wrap(verr, "post-write integrity verification failed -- refusing to install a possibly-corrupted update")
+	}
+
+	return nil
+}
+
+// verifyWrittenData re-reads exactly `size` bytes from `path` -- forcing a
+// read from the physical media rather than any cache the write itself may
+// have populated -- and confirms their SHA-256 matches `expectedSum` (the
+// hash of the bytes actually handed to the writer during StoreUpdate). This
+// is the only check anywhere in the update pipeline that verifies what
+// actually ended up at rest on the target partition; see the BUG-357
+// comment in StoreUpdate for why that distinction matters.
+//
+// Cache-drop is best-effort: BLKFLSBUF only succeeds on a real block
+// device. On anything else (e.g. a regular file, as used by this package's
+// own tests) the ioctl fails harmlessly and is skipped -- there is no
+// separate "physical media" to bypass for a regular file, so the plain
+// read-back below is already authoritative in that case.
+func verifyWrittenData(path string, size int64, expectedSum []byte) error {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return errors.Wrapf(err, "failed to reopen %q for post-write verification", path)
+	}
+	defer f.Close()
+
+	if ferr := unix.IoctlSetInt(int(f.Fd()), unix.BLKFLSBUF, 0); ferr != nil {
+		log.Debugf("BLKFLSBUF not applicable to %q (%v) -- proceeding without an explicit cache drop", path, ferr)
+	}
+
+	readHasher := sha256.New()
+	read, err := io.CopyN(readHasher, f, size)
+	if err != nil {
+		return errors.Wrapf(err, "failed to read back %q for post-write verification (got %d/%d bytes)", path, read, size)
+	}
+
+	readSum := readHasher.Sum(nil)
+	if !bytes.Equal(readSum, expectedSum) {
+		return errors.Errorf(
+			"data at rest on %q does not match what was written (wrote sha256=%x, read back sha256=%x) -- the media likely corrupted the write",
+			path, expectedSum, readSum,
+		)
+	}
+
+	log.Infof("Post-write integrity verification passed for %q (%d bytes, sha256=%x)", path, size, readSum)
+	return nil
 }
 
 func (d *dualRootfsDeviceImpl) FinishStoreUpdate() error {
