@@ -1142,5 +1142,20 @@ func writeFileAtomic(path, dir, content string, perm os.FileMode) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return errors.Wrapf(err, "failed to rename %s to %s", tmpPath, path)
 	}
+	// BUG-317: fsyncing the temp file's data (above) is not enough — on ext4
+	// (and POSIX generally), rename(2) is only durable across a crash once
+	// the CONTAINING DIRECTORY's own metadata is itself fsynced. Without
+	// this, an unclean shutdown/power-cut shortly after a successful-looking
+	// WriteEnv can still lose the rename entirely, reverting the file to its
+	// pre-write content (or absent, if it didn't exist before) — confirmed
+	// live as a real, not just theoretical, loss mode on Radxa CM5.
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return errors.Wrapf(err, "failed to open %s to fsync after rename", dir)
+	}
+	defer dirHandle.Close()
+	if err := dirHandle.Sync(); err != nil {
+		return errors.Wrapf(err, "failed to fsync directory %s after rename", dir)
+	}
 	return nil
 }

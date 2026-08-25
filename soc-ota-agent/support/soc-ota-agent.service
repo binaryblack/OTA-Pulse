@@ -1,7 +1,13 @@
 [Unit]
 Description=OTAPulse - SoC OTA Agent for Firmware Updates
 Documentation=https://github.com/binaryblack/OTA-Pulse
-After=network-online.target systemd-resolved.service
+# BUG-317: Requires= alone does not order startup — without an explicit
+# After=data.mount, systemd can start this unit in parallel with (or before)
+# data.mount finishing, letting this agent's first ReadEnv/WriteEnv race the
+# mount. See the shipped meta-otapulse copy of this file for the full
+# rationale (this dev/support copy is not baked into real images, but the
+# gap is identical).
+After=network-online.target systemd-resolved.service data.mount
 Wants=network-online.target
 Requires=data.mount
 Conflicts=mender.service mender-client.service

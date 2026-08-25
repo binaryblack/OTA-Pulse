@@ -1,8 +1,18 @@
 [Unit]
 Description=OTAPulse - SoC OTA Agent for Firmware Updates
 Documentation=https://github.com/binaryblack/OTA-Pulse
-After=network-online.target systemd-resolved.service otapulse-partition-setup.service
-Wants=network-online.target
+# BUG-317: /data's fstab entry uses nofail (by design, so an absent/failed
+# /data never blocks local-fs.target on first boot before it exists) — which
+# means local-fs.target does NOT wait for it, and otapulse-partition-setup's
+# own After=local-fs.target does not transitively guarantee /data is mounted
+# either. Without an explicit data.mount ordering here, this agent's very
+# first ReadEnv/WriteEnv against /data/ota can race the mount, especially
+# right after an install-triggered reboot (confirmed live: Radxa CM5 lost an
+# upgrade_available write across exactly this window). Wants= (not Requires=)
+# preserves nofail's "boot must survive a missing /data" property while still
+# ordering after it when it IS present.
+After=network-online.target systemd-resolved.service otapulse-partition-setup.service data.mount
+Wants=network-online.target data.mount
 Requires=otapulse-partition-setup.service
 Conflicts=mender.service mender-client.service
 

@@ -156,6 +156,21 @@ file_based_boot_health() {
     # reset was never actually implemented here until now.
     FAT_UBOOT_COUNT_FILE="$MNT/uboot_boot_count"
 
+    # BUG-317: /data can legitimately not be mounted yet this early in boot
+    # (its fstab entry is nofail, so nothing guarantees it beat this script).
+    # UPGRADE_AVAIL_FILE lives on /data — reading it while unmounted returns
+    # the same "0"/not-pending default as a genuinely absent file, which would
+    # make this hygiene branch wrongly conclude "no pending upgrade" and
+    # erase a real in-flight cycle's rollback net (mender_boot_part_prev,
+    # FAT boot_count) out from under it. Bail out untouched instead — the
+    # agent itself, once /data really is mounted, is the correct place to
+    # resolve upgrade_available's true state.
+    if ! mountpoint -q /data 2>/dev/null; then
+        log "/data not mounted yet — deferring to the agent, touching nothing"
+        cleanup
+        exit 0
+    fi
+
     UPGRADE_AVAIL=$(read_ota "$UPGRADE_AVAIL_FILE" "0")
     if [ "$UPGRADE_AVAIL" != "1" ]; then
         # No pending upgrade. Defensive hygiene: reset a stray non-zero FAT
@@ -299,6 +314,16 @@ if [ ! -f "$MNT/cmdline.txt" ]; then
 fi
 
 # ── 2. Is an upgrade pending? (Class A: direct-boot / cmdline.txt) ─────────
+# BUG-317: see the matching guard in file_based_boot_health() — /data's
+# fstab entry is nofail, so it can legitimately not be mounted yet here;
+# reading UPGRADE_AVAIL_FILE while unmounted would silently look identical
+# to "no pending upgrade" and erase a real in-flight cycle's rollback net.
+if ! mountpoint -q /data 2>/dev/null; then
+    log "/data not mounted yet — deferring to the agent, touching nothing"
+    cleanup
+    exit 0
+fi
+
 UPGRADE_AVAIL=$(read_ota "$UPGRADE_AVAIL_FILE" "0")
 if [ "$UPGRADE_AVAIL" != "1" ]; then
     # No pending upgrade. Defensive hygiene: reset a stray non-zero boot_count

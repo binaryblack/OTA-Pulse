@@ -1737,6 +1737,35 @@ func (rs *updateVerifyRebootState) Handle(ctx *StateContext, c Controller) (Stat
 	for _, i := range c.GetInstallers() {
 		err := i.VerifyReboot()
 		if err != nil {
+			// BUG-317: upgrade_available lives on /data, which on some
+			// boards does not reliably survive an install-triggered reboot
+			// even though the FAT/raw-partition slot switch performed in the
+			// same window does — confirmed live on Radxa CM5. A false
+			// VerifyReboot here would otherwise condemn a genuinely
+			// successful update and trigger a spurious rollback. Cross-check
+			// against ground truth that lives on the BOOTED rootfs itself
+			// (immune to /data loss, unlike the flag VerifyReboot just
+			// failed on): if the currently-running image's own artifact
+			// name already matches what this update installed, the switch
+			// demonstrably worked — repair the lost flag and continue
+			// instead of failing. Guarded on the name actually differing
+			// from a stale re-check (GetCurrentArtifactName erroring, or the
+			// booted name legitimately not matching) so this can only ever
+			// turn a genuine false-negative into success, never mask a real
+			// failed switch.
+			if current, nameErr := c.GetCurrentArtifactName(); nameErr == nil &&
+				current != "" && current == rs.Update().ArtifactName() {
+				if repairer, ok := i.(interface{ RepairLostUpgradeFlag() error }); ok {
+					if rerr := repairer.RepairLostUpgradeFlag(); rerr == nil {
+						log.Warnf("VerifyReboot: upgrade_available was lost but the booted rootfs already IS the installed update (%q) — repaired and continuing (BUG-317)", current)
+						err = nil
+					} else {
+						log.Warnf("VerifyReboot: booted rootfs matches installed update (%q) but failed to repair upgrade_available: %s", current, rerr.Error())
+					}
+				}
+			}
+		}
+		if err != nil {
 			return rs.HandleError(ctx, c, NewTransientError(err))
 		}
 	}

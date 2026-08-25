@@ -669,6 +669,26 @@ func (d *dualRootfsDeviceImpl) VerifyReboot() error {
 	}
 }
 
+// RepairLostUpgradeFlag re-arms upgrade_available after VerifyReboot found it
+// false. Exported for the ONE narrow case where the caller (state.go's
+// updateVerifyRebootState.Handle) has already independently confirmed, via
+// evidence that lives OUTSIDE this flag, that the slot switch genuinely
+// succeeded: the booted rootfs's own artifact identity already matches the
+// update that was supposedly failing to verify. This does not weaken
+// VerifyReboot/rollback semantics for any other case — a caller must have
+// that independent proof in hand before calling this; it is never invoked
+// as part of the normal VerifyReboot path itself.
+//
+// BUG-317: on some boards (confirmed live on Radxa CM5, mmcblk1p5) the /data
+// write that sets upgrade_available=1 during install does not reliably
+// survive an install-triggered reboot, even though the FAT/raw-partition
+// slot switch performed in the same window does — VerifyReboot's sole
+// ground truth (this same lossy file) then condemns a genuinely successful
+// update and drives a spurious rollback.
+func (d *dualRootfsDeviceImpl) RepairLostUpgradeFlag() error {
+	return d.WriteEnv(BootVars{"upgrade_available": "1"})
+}
+
 func (d *dualRootfsDeviceImpl) VerifyRollbackReboot() error {
 	hasUpdate, err := d.HasUpdate()
 	if err != nil {
