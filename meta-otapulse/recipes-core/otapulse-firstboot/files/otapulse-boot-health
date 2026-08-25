@@ -147,6 +147,14 @@ write_ota() {
 file_based_boot_health() {
     FAT_BOOT_COUNT_FILE="$MNT/boot_count"
     FAT_PREV_PART_FILE="$MNT/mender_boot_part_prev"
+    # U-Boot-level bootcount safety net counter (BUG-310/BUG-354, see
+    # boot-orange-pi-zero2w.cmd) — a SEPARATE counter from FAT_BOOT_COUNT_FILE
+    # above, incremented by U-Boot itself (never by this script or the agent)
+    # while mender_boot_part_prev is present. file_bootenv.go's
+    # ClearDirectBootBackup documents this script's hygiene sweep as the
+    # backstop that resets it when the agent never reaches CommitUpdate — that
+    # reset was never actually implemented here until now.
+    FAT_UBOOT_COUNT_FILE="$MNT/uboot_boot_count"
 
     UPGRADE_AVAIL=$(read_ota "$UPGRADE_AVAIL_FILE" "0")
     if [ "$UPGRADE_AVAIL" != "1" ]; then
@@ -166,6 +174,18 @@ file_based_boot_health() {
             rm -f "$FAT_PREV_PART_FILE"
             sync
             log "No pending upgrade — removed stale mender_boot_part_prev"
+        fi
+        # Same leftover-across-cycles risk as boot_count above, but for
+        # U-Boot's own counter: an unreset non-'0' byte here survives into the
+        # NEXT OTA cycle and counts toward ITS revert threshold, which can
+        # trip the U-Boot-level revert early on a cycle that never had 5
+        # genuinely bad boots of its own.
+        if [ -f "$FAT_UBOOT_COUNT_FILE" ]; then
+            UB_BC=$(tr -dc '0-9' < "$FAT_UBOOT_COUNT_FILE" 2>/dev/null || true)
+            if [ -n "$UB_BC" ] && [ "$UB_BC" != "0" ]; then
+                printf '0' > "$FAT_UBOOT_COUNT_FILE" 2>/dev/null && sync && \
+                    log "No pending upgrade — reset FAT uboot_boot_count to 0"
+            fi
         fi
         cleanup
         exit 0
@@ -226,6 +246,7 @@ file_based_boot_health() {
         # it rather than let `set -e` abort before the reboot.
         write_ota "$UPGRADE_AVAIL_FILE" "0" || log "WARNING: failed to clear upgrade_available"
         printf '0' > "$FAT_BOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT boot_count"
+        printf '0' > "$FAT_UBOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT uboot_boot_count"
         sync
 
         log "Rebooting onto the previous slot (file-based-boot)"
