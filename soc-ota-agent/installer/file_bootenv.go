@@ -472,6 +472,32 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
 					syscall.Sync()
 					log.Infof("FileBasedBootEnv: Recorded mender_boot_part_prev=%s (rollback target) before switching to %s", oldPart, partNum)
 				}
+
+				// Defense-in-depth (same accumulation bug as
+				// ClearDirectBootBackup's commit-path reset, see its
+				// comment): a cycle that never reaches a successful commit —
+				// crashed, force-stopped, bricked — leaves its FAT boot
+				// counters wherever they were, and the NEXT genuinely fresh
+				// switch inherits that residue. This is the same
+				// os.IsNotExist(prevStatErr) || ua != "1" gate as the prev
+				// backup write above — reached only when starting a NEW
+				// cycle, never mid-cycle. Gating matters: Rollback() also
+				// calls WriteEnv (dual_rootfs_device.go) while ua is still
+				// "1" mid-cycle, and zeroing these counters then would erase
+				// a genuinely-failing cycle's own attempt history before its
+				// revert threshold is reached, extending a bad-image boot
+				// loop past its budget.
+				bootDirForCounters := filepath.Dir(bootFile)
+				for _, name := range []string{"uboot_boot_count", "boot_count"} {
+					counterPath := filepath.Join(bootDirForCounters, name)
+					if _, err := os.Stat(counterPath); err == nil {
+						if werr := os.WriteFile(counterPath, []byte("0"), 0644); werr != nil {
+							log.Warnf("FileBasedBootEnv: Failed to reset %s for new cycle: %v", counterPath, werr)
+						} else {
+							syscall.Sync()
+						}
+					}
+				}
 			}
 		}
 	}
@@ -778,15 +804,32 @@ func (f *FileBasedBootEnv) ClearDirectBootBackup() {
 			syscall.Sync()
 			log.Infof("FileBasedBootEnv: ClearDirectBootBackup: removed stale %s after good boot", prevPartPath)
 		}
-		// Best-effort: also reset the FAT-resident boot-loader-level counter
-		// (boot-orange-pi-zero2w.cmd's uboot_boot_count) so a good commit
-		// leaves no residual count either. Harmless if this fails or the file
-		// is absent — the counter only matters while mender_boot_part_prev
-		// (just removed above) is present.
-		bootCountPath := filepath.Join(bootDir, "uboot_boot_count")
-		if _, err := os.Stat(bootCountPath); err == nil {
-			if werr := os.WriteFile(bootCountPath, []byte("0"), 0644); werr != nil {
-				log.Warnf("FileBasedBootEnv: ClearDirectBootBackup: failed to reset %s: %v", bootCountPath, werr)
+	}
+
+	// Best-effort: reset BOTH FAT-resident boot-attempt counters so a good
+	// commit leaves no residual count for the NEXT cycle to inherit.
+	// Deliberately unconditional (not nested under the mender_boot_part_prev
+	// removal above): otapulse-boot-health's own hygiene sweep can remove
+	// mender_boot_part_prev on an ordinary boot before this function ever
+	// runs, which used to skip this reset entirely and let a leftover count
+	// survive into the next cycle. Two counters, two different owners:
+	//   - uboot_boot_count: incremented by U-Boot itself (boot.scr) while
+	//     mender_boot_part_prev is present; threshold 5.
+	//   - boot_count: incremented by otapulse-boot-health (Class-B, Linux-
+	//     side) on every ua=1 boot; threshold MAX_BOOT_RETRIES=3. This one
+	//     was never reset anywhere — since the ONLY reboots an A/B board sees
+	//     are post-switch (ua=1) boots, boot-health's own ua=0 hygiene reset
+	//     never fires in normal OTA cycling, so it silently accumulated +1
+	//     per successful commit. At an accumulated count of 2, the very next
+	//     cycle's healthy first boot pushed it to 3 and boot-health reverted
+	//     a genuinely correct slot switch — reproduced live on
+	//     orange-pi-zero2w 2026-08-26 (two mirror-imaged false reverts in one
+	//     day, each preceded by a committed cycle).
+	for _, name := range []string{"uboot_boot_count", "boot_count"} {
+		counterPath := filepath.Join(bootDir, name)
+		if _, err := os.Stat(counterPath); err == nil {
+			if werr := os.WriteFile(counterPath, []byte("0"), 0644); werr != nil {
+				log.Warnf("FileBasedBootEnv: ClearDirectBootBackup: failed to reset %s: %v", counterPath, werr)
 			} else {
 				syscall.Sync()
 			}
