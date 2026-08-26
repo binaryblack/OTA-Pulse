@@ -8,12 +8,15 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 # either. Without an explicit data.mount ordering here, this agent's very
 # first ReadEnv/WriteEnv against /data/ota can race the mount, especially
 # right after an install-triggered reboot (confirmed live: Radxa CM5 lost an
-# upgrade_available write across exactly this window). Wants= (not Requires=)
-# preserves nofail's "boot must survive a missing /data" property while still
-# ordering after it when it IS present.
+# upgrade_available write across exactly this window). Requires=data.mount is
+# safe here (unlike a board with no other /data dependency) because this unit
+# already unconditionally Requires=otapulse-partition-setup.service, which
+# creates /data — by the time systemd would start this agent, data.mount has
+# already been asked to exist, matching the same Requires=data.mount ordering
+# already used by the socMonitoring/support copies of this file.
 After=network-online.target systemd-resolved.service otapulse-partition-setup.service data.mount
-Wants=network-online.target data.mount
-Requires=otapulse-partition-setup.service
+Wants=network-online.target
+Requires=otapulse-partition-setup.service data.mount
 Conflicts=mender.service mender-client.service
 
 [Service]
