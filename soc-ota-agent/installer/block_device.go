@@ -80,7 +80,7 @@ func (bd bdevice) Open(device string, size int64) (*BlockDevice, error) {
 			"This might be caused by some \"auto mount\" service "+
 			"(e.g udisks2) that mounts all block devices. It is "+
 			"recommended to blacklist the partitions used by "+
-			"Mender to avoid any issues.", device, mntPt)
+			"ota-pulse to avoid any issues.", device, mntPt)
 		log.Warnf("Performing umount on %q.", mntPt)
 		err = syscall.Unmount(device, 0)
 		if err != nil {
@@ -146,7 +146,7 @@ func (bd bdevice) Open(device string, size int64) (*BlockDevice, error) {
 
 	log.Infof(
 		"Native sector size of block device %s is %v bytes."+
-			" Mender will write in chunks of %v bytes",
+			" ota-pulse will write in chunks of %v bytes",
 		device,
 		nativeSsz,
 		chunkSize,

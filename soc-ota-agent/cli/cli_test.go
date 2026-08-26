@@ -458,7 +458,7 @@ func TestGetMenderDaemonPID(t *testing.T) {
 		},
 		"error: no output": {
 			system.Command("printf", ""),
-			"could not find the PID of the mender daemon",
+			"could not find the PID of the ota-pulse daemon",
 		},
 		"return PID": {
 			system.Command("echo", "MainPID=123"),

@@ -225,7 +225,7 @@ func SetupCLI(args []string) error {
 				&cli.StringFlag{
 					Name:    "data",
 					Aliases: []string{"d"},
-					Usage:   "Mender state data `DIR`ECTORY path.",
+					Usage:   "otapulse state data `DIR`ECTORY path.",
 					Value:   conf.DefaultDataStore,
 				},
 				&cli.StringFlag{
@@ -390,7 +390,7 @@ func SetupCLI(args []string) error {
 		&cli.StringFlag{
 			Name:        "data",
 			Aliases:     []string{"d"},
-			Usage:       "Mender state data `DIR`ECTORY path.",
+			Usage:       "otapulse state data `DIR`ECTORY path.",
 			Value:       conf.DefaultDataStore,
 			Destination: &runOptions.dataStore,
 		},
@@ -688,7 +688,7 @@ func (runOptions *runOptionsType) handleLogFlags(ctx *cli.Context) error {
 	}
 	if !runOptions.logOptions.noSyslog {
 		hook, err := mender_syslog.NewSyslogHook(
-			"", "", syslog.LOG_DEBUG|syslog.LOG_USER, "mender", level)
+			"", "", syslog.LOG_DEBUG|syslog.LOG_USER, "otapulse", level)
 		if err != nil {
 			log.Warnf("Could not connect to syslog daemon: %s. "+
 				"(use --no-syslog to disable completely)",

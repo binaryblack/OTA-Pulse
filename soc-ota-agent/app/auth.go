@@ -518,7 +518,7 @@ func (m *menderAuthManagerService) broadcastAuthTokenStateChange() {
 			log.Errorf(
 				"Could not reconfigure proxy with URL %q and token '%s...'"+
 					" Other applications running on the device won't be able"+
-					" to reach the Mender server. Error: %s",
+					" to reach the ota-pulse server. Error: %s",
 				m.serverURL,
 				string(m.authToken)[:7],
 				err.Error(),
@@ -556,15 +556,15 @@ func (m *menderAuthManagerService) fetchAuthToken() {
 	// Cycle through servers and attempt to authorize.
 	serverIterator := nextServerIterator(*m.config)
 	if serverIterator == nil {
-		log.Debug("empty server list in mender.conf, serverIterator is nil")
-		err := NewFatalError(errors.New("empty server list in mender.conf"))
+		log.Debug("empty server list in otapulse.conf, serverIterator is nil")
+		err := NewFatalError(errors.New("empty server list in otapulse.conf"))
 		resp.Error = err
 		return
 	}
 
 	if server = serverIterator(); server == nil {
-		log.Debug("empty server list in mender.conf, server is nil")
-		err := NewFatalError(errors.New("empty server list in mender.conf"))
+		log.Debug("empty server list in otapulse.conf, server is nil")
+		err := NewFatalError(errors.New("empty server list in otapulse.conf"))
 		resp.Error = err
 		return
 	}

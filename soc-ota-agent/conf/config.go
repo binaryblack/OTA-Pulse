@@ -258,14 +258,14 @@ func checkConfigDefaults(config *MenderConfig) {
 	if config.MenderConfigFromFile.UpdateControlMapExpirationTimeSeconds == 0 {
 		log.Info(
 			"'UpdateControlMapExpirationTimeSeconds' is not set " +
-				"in the Mender configuration file." +
+				"in the otapulse.conf configuration file." +
 				" Falling back to the default of 2*UpdatePollIntervalSeconds")
 	}
 
 	if config.MenderConfigFromFile.UpdateControlMapBootExpirationTimeSeconds == 0 {
 		log.Infof(
 			"'UpdateControlMapBootExpirationTimeSeconds' is not set "+
-				"in the Mender configuration file."+
+				"in the otapulse.conf configuration file."+
 				" Falling back to the default of %d seconds",
 			DefaultUpdateControlMapBootExpirationTimeSeconds,
 		)
@@ -312,7 +312,7 @@ func readConfigFile(config interface{}, fileName string) error {
 	if err := json.Unmarshal(conf, &config); err != nil {
 		switch err.(type) {
 		case *json.SyntaxError:
-			return errors.New("Error parsing mender configuration file: " + err.Error())
+			return errors.New("Error parsing otapulse.conf configuration file: " + err.Error())
 		}
 		return errors.New("Error parsing config file: " + err.Error())
 	}
