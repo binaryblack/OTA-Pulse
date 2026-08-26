@@ -264,8 +264,26 @@ func (us *updateState) Update() *datastore.UpdateInfo {
 	return &us.update
 }
 
+// lastFailureBreadcrumbFile records the most recent update-state failure so its
+// cause survives a reboot even when journald (volatile per-boot on most board
+// images here — no persistent /var/log/journal) does not. BUG-361: an Orange Pi
+// Zero 2W rollback triggered by a one-shot FAT-write hiccup left NO trace once the
+// device rebooted, forcing a live SSH forensics session to reconstruct what
+// happened from FAT-file timestamps and inference alone. Best-effort, overwritten
+// each time — this is a breadcrumb for the next investigation, not an audit log.
+const lastFailureBreadcrumbFile = "/data/ota/last_failure"
+
+func writeLastFailureBreadcrumb(stateName string, err menderError) {
+	content := fmt.Sprintf("time=%s state=%s error=%s\n", time.Now().UTC().Format(time.RFC3339), stateName, err.Error())
+	if werr := os.MkdirAll("/data/ota", 0755); werr != nil {
+		return
+	}
+	_ = os.WriteFile(lastFailureBreadcrumbFile, []byte(content), 0644)
+}
+
 func (us *updateState) HandleError(ctx *StateContext, c Controller, err menderError) (State, bool) {
 	log.Error(err.Error())
+	writeLastFailureBreadcrumb(us.Id().String(), err)
 
 	// Default for most update states. Some states will override this.
 	if us.Update().SupportsRollback == datastore.RollbackSupported {

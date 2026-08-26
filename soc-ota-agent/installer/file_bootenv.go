@@ -308,7 +308,54 @@ func deviceAlreadyMounted(dev string, mountLines []string) bool {
 // syncBootSlotToBootPartition copies the mender_boot_part file to the boot partition
 // so that U-Boot can read it during boot. U-Boot cannot read from ext4 data partition.
 // Supports multiple platforms: i.MX, Raspberry Pi, Rockchip, generic ARM boards.
+//
+// BUG-361: the FAT boot partition (mount-discovery AND the final WriteFile) was a
+// strict one-shot, unlike every /data write in this file (see f.writeFile's 15x
+// retry loop above) — a single transient SD-card hiccup during the highest-I/O-
+// stress window this board ever sees (a full rootfs write immediately followed by
+// BUG-357's full-image read-back verification) aborted the ENTIRE install with no
+// retry, even though nothing was actually wrong: the artifact was already
+// correctly written and verified on the target partition. Live-diagnosed
+// 2026-08-26 on orange-pi-zero2w (dev-5b5a24ae) via Sonnet/Fable RCA: InstallUpdate
+// -> WriteEnv -> writeMenderBootPart -> this function failed to mount or write the
+// FAT partition, aborting BEFORE upgrade_available was ever set, so Rollback() was
+// a correct no-op (ua was still 0) and the device plain-rebooted on its untouched,
+// still-good old slot. Fail-safe (no brick risk — the old slot was never touched),
+// but wasted an entire otherwise-successful OTA cycle. Bounded retry here mirrors
+// the /data doctrine: a handful of attempts with sync+backoff is enough to ride out
+// a transient card hiccup while still failing loudly (and safely) if the boot
+// partition is genuinely gone.
 func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
+	const maxAttempts = 4
+	retryDelay := 2 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			log.Warnf("FileBasedBootEnv: Retrying FAT boot-partition sync for slot %s (attempt %d/%d) after error: %v",
+				partNum, attempt, maxAttempts, lastErr)
+			syscall.Sync()
+			time.Sleep(retryDelay)
+			if retryDelay < 8*time.Second {
+				retryDelay += 2 * time.Second
+			}
+		}
+
+		lastErr = f.syncBootSlotToBootPartitionOnce(partNum)
+		if lastErr == nil {
+			if attempt > 1 {
+				log.Infof("FileBasedBootEnv: FAT boot-partition sync for slot %s succeeded on attempt %d", partNum, attempt)
+			}
+			return nil
+		}
+	}
+
+	return lastErr
+}
+
+// syncBootSlotToBootPartitionOnce is the single-attempt body of
+// syncBootSlotToBootPartition — see BUG-361 above for why the caller retries it.
+func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error {
 	// Common boot partition mount points across different platforms
 	// /boot/firmware - Raspberry Pi (Ubuntu/Debian)
 	// /boot - Generic Linux, some Yocto builds
