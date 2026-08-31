@@ -29,7 +29,7 @@ func nextServerIterator(config conf.MenderConfig) func() *client.MenderServer {
 	numServers := len(config.Servers)
 	if config.Servers == nil || numServers == 0 {
 		log.Error("Empty server list! Make sure at least one server " +
-			"is specified in /etc/mender/mender.conf")
+			"is specified in /etc/otapulse/otapulse.conf")
 		return nil
 	}
 

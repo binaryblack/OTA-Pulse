@@ -320,7 +320,7 @@ func getMenderDaemonPID(cmd *system.Cmd) (string, error) {
 	}
 	pid := strings.Trim(buf.String(), "MainPID=\n")
 	if pid == "" || pid == "0" {
-		return "", errors.New("could not find the PID of the mender daemon")
+		return "", errors.New("could not find the PID of the ota-pulse daemon")
 	}
 	return pid, nil
 }

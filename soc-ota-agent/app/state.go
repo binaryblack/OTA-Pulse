@@ -353,7 +353,7 @@ func (i *initState) Handle(ctx *StateContext, c Controller) (State, bool) {
 		return handleStateDataError(ctx, nil, false, sd.Name, &sd.UpdateInfo, sdErr)
 	}
 
-	msg := fmt.Sprintf("Mender shut down in state: %s", sd.Name)
+	msg := fmt.Sprintf("ota-pulse shut down in state: %s", sd.Name)
 	switch sd.Name {
 	case datastore.MenderStateReboot:
 	case datastore.MenderStateRollbackReboot:
