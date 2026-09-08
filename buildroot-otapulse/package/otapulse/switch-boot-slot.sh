@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # OTAPulse Boot Slot Switching Script
 # Switches the active boot slot between A and B partitions
 #

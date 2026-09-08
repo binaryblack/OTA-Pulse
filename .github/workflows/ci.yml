@@ -66,3 +66,25 @@ jobs:
 
       - name: govulncheck
         run: govulncheck ./...
+
+  target-shebang-lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject #!/bin/bash in Buildroot target-device scripts
+        run: |
+          # buildroot-otapulse/package/**/*.sh (and Sxx init scripts) are
+          # installed straight onto the BusyBox-only target rootfs via
+          # $(TARGET_DIR) in otapulse.mk — there is no /bin/bash there, only
+          # /bin/sh (BusyBox ash). board/otapulse/*.sh runs on the build HOST
+          # and is exempt. See BUG-417.
+          bad=""
+          for f in $(find buildroot-otapulse/package -type f \( -name '*.sh' -o -name 'S[0-9]*' \)); do
+            head -n1 "$f" | grep -qE '^#!.*\bbash\b' && bad="$bad $f"
+          done
+          if [ -n "$bad" ]; then
+            echo "Target-device scripts must use #!/bin/sh (BusyBox ash), not bash:"
+            for f in $bad; do echo "  $f"; done
+            exit 1
+          fi
