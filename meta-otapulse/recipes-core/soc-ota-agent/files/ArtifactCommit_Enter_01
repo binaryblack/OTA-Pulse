@@ -19,6 +19,47 @@
 
 BOOT_PART_FILE="/data/ota/mender_boot_part"
 
+# ── NVIDIA Tegra (Jetson): bounded wait for clock sync before commit ───────
+# BUG-432: this devkit class's RTC has no working battery backup, so every
+# power-cycle boots with a bogus floor clock (observed live: "2023-12-24")
+# until systemd-timesyncd corrects it over the network. Immediately after
+# this script returns, the agent's Go state machine (state.go's
+# updateCommitState) sends a TLS-secured status report to the real OTA
+# server as its very next step, BEFORE actually committing. If the clock is
+# still wrong at that moment, the real server certificate's notBefore looks
+# like it is in the future and TLS verification fails with
+# X509_V_ERR_CERT_NOT_YET_VALID ("openssl verify rc: 9") — that failure
+# counts against the commit's retry budget, and exhausting it forces a
+# spurious rollback of an otherwise fully successful slot switch. Confirmed
+# live via journalctl streamed across a real reboot on a Jetson Xavier NX.
+# custom-base-image.bb's Dragon Q6A comment already documents this exact
+# TLS-after-power-cycle failure class for boards with unreliable RTCs;
+# Jetson is the previously-unhandled case. Self-gates on nvbootctrl +
+# rootfs A/B enabled, same check switch-boot-slot.sh's try_nvbootctrl uses,
+# so this can only ever fire on genuine Tegra/Jetson boards. Bounded to 60s
+# and NEVER fails the commit even if the clock never syncs — matches this
+# script's existing "never exit non-zero here" contract for every platform
+# but the RPi4 wrong-slot guard below.
+if command -v nvbootctrl >/dev/null 2>&1 && command -v timedatectl >/dev/null 2>&1; then
+    nvbootctrl -t rootfs is-rootfs-ab-enabled >/dev/null 2>&1
+    AB_STATUS=$?
+    if [ "$AB_STATUS" = "1" ] || [ "$AB_STATUS" = "2" ]; then
+        WAITED=0
+        SYNCED="no"
+        while [ "$WAITED" -lt 60 ]; do
+            SYNCED=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+            [ "$SYNCED" = "yes" ] && break
+            sleep 1
+            WAITED=$((WAITED + 1))
+        done
+        if [ "$SYNCED" = "yes" ]; then
+            echo "ArtifactCommit_Enter: clock NTP-synced after ${WAITED}s wait (Tegra RTC-less boot, BUG-432)"
+        else
+            echo "ArtifactCommit_Enter: WARNING - clock still not NTP-synced after ${WAITED}s wait; proceeding anyway (may hit a TLS cert-not-yet-valid retry, BUG-432)"
+        fi
+    fi
+fi
+
 find_fat_boot() {
     for dev in /dev/disk/by-partlabel/boot /dev/mmcblk*p1 /dev/nvme*n1p1 /dev/sd?1; do
         [ -b "$dev" ] || continue
