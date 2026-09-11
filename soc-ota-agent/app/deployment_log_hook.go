@@ -74,6 +74,10 @@ func (dh DeploymentHook) Fire(entry *logrus.Entry) error {
 		return nil
 	}
 
+	if unrelated, ok := entry.Data["deployment_unrelated"].(bool); ok && unrelated {
+		return nil
+	}
+
 	// customize log message to contain only message, level and time
 	dLog := logrus.NewEntry(entry.Logger)
 	dLog.Message = entry.Message

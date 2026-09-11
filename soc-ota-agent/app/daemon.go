@@ -131,7 +131,8 @@ func (d *MenderDaemon) Run() error {
 				toState = nState
 				updateLastCheckAttempt = false
 			default:
-				log.Errorf("Cannot check update or update inventory while in %s state", toState)
+				log.WithField("deployment_unrelated", true).
+					Errorf("Cannot check update or update inventory while in %s state", toState)
 			}
 
 		default:
