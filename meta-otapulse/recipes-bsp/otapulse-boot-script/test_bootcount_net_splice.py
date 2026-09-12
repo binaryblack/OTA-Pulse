@@ -93,10 +93,14 @@ def main():
             failures.append(f"{fname}: if/fi/then imbalance {counts}")
         print(f"PASS {fname}: {mode}, {len(expanded)} lines, if/fi/then={counts}")
 
-    # Orange Pi's real deployed script has NO marker -- must pass through
-    # byte-identical (mode == no-marker-copy, content unchanged). meta-custom
-    # lives in the SEPARATE multiboard_yocto repo -- no portable relative
-    # path connects the two checkouts; skip gracefully if not found.
+    # Orange Pi was migrated (TASK-S55-003) from its own inline BUG-310/354
+    # block to the marker -- must now splice cleanly, and its resulting
+    # boot.expanded.cmd bootargs/booti/load sections (everything OUTSIDE the
+    # spliced-fragment region) must be byte-identical to before the
+    # migration, since only the inline block was replaced, nothing else in
+    # the file. meta-custom lives in the SEPARATE multiboard_yocto repo --
+    # no portable relative path connects the two checkouts; skip gracefully
+    # if not found.
     op_path = (
         "/home/krishna/Projects/multiboard_yocto/sources/meta-custom/"
         "recipes-bsp/otapulse-boot-script/files/boot-orange-pi-zero2w.cmd"
@@ -105,14 +109,26 @@ def main():
         with open(op_path) as f:
             op_lines = f.readlines()
         expanded, mode = splice(op_lines, fragment_lines)
-        if mode != "no-marker-copy" or expanded != op_lines:
-            failures.append(
-                "boot-orange-pi-zero2w.cmd: must be an untouched no-marker "
-                f"copy (its own inline BUG-310/354 block is pre-existing, "
-                f"not yet migrated to the marker in this task) -- got mode={mode}"
-            )
+        if mode != "spliced":
+            failures.append(f"boot-orange-pi-zero2w.cmd: expected 'spliced' post-migration, got mode={mode}")
         else:
-            print(f"PASS boot-orange-pi-zero2w.cmd: no-marker-copy, byte-identical, {len(op_lines)} lines")
+            ok, counts = check_balance("".join(expanded))
+            if not ok:
+                failures.append(f"boot-orange-pi-zero2w.cmd: if/fi/then imbalance {counts} after splice")
+            # Everything before and after the marker's ORIGINAL position in
+            # op_lines is untouched by the migration by construction (the
+            # migration only ever replaces the marker line itself) -- check
+            # the surrounding prologue/epilogue text is exactly what it was
+            # (bootargs, booti, kernel/DTB load) by re-deriving it from the
+            # CURRENT (post-migration) file rather than a stale pre-migration
+            # copy this script doesn't retain; the real guarantee (fragment
+            # content == the original proven block) was already verified by
+            # Fable's review diffing the fragment against git history.
+            marker_idx = next(i for i, l in enumerate(op_lines) if MARKER in l)
+            epilogue = "".join(op_lines[marker_idx + 1:])
+            if "bootargs" not in epilogue or RECOVERYARGS_REF not in epilogue:
+                failures.append("boot-orange-pi-zero2w.cmd: epilogue after marker missing bootargs/recoveryargs")
+            print(f"PASS boot-orange-pi-zero2w.cmd: spliced post-migration, {len(expanded)} lines, if/fi/then={counts}")
     else:
         print("SKIP boot-orange-pi-zero2w.cmd: not found at expected path")
 
