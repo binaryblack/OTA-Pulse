@@ -229,6 +229,19 @@ file_based_boot_health() {
         PREV_MARKER=$(tr -d '\n' < "$FAT_PREV_PART_FILE" 2>/dev/null || true)
         if [ "$PREV_MARKER" = "X" ]; then
             log "BOOTCOUNT-NET revert detected (mender_boot_part_prev=X) — a bootloader-level revert already happened before this boot; clearing upgrade_available so the agent does not falsely commit"
+            # Fable's TASK-S55-005 review: the agent's own Rollback() early-
+            # returns "No update available" on this path (ua already 0) and
+            # never itself rewrites /data/ota/mender_boot_part -- the eventual
+            # RollbackReboot's target then depends entirely on
+            # ReconcileToBootedSlot's best-effort detect-and-map succeeding
+            # elsewhere. Remove that dependency directly: the FAT
+            # mender_boot_part U-Boot just reverted IS the correct value, so
+            # copy it into /data/ota's copy right here rather than trust a
+            # separate reconciliation path to arrive at the same answer later.
+            if [ -s "$MNT/mender_boot_part" ]; then
+                write_ota "$OTA_DIR/mender_boot_part" "$(tr -dc '0-9' < "$MNT/mender_boot_part")" \
+                    || log "WARNING: failed to mirror the reverted mender_boot_part into $OTA_DIR"
+            fi
             write_ota "$UPGRADE_AVAIL_FILE" "0" || log "WARNING: failed to clear upgrade_available after a detected bootloader-level revert"
             printf '0' > "$FAT_BOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT boot_count after a detected bootloader-level revert"
             printf '0' > "$FAT_UBOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT uboot_boot_count after a detected bootloader-level revert"

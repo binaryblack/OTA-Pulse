@@ -186,8 +186,14 @@ fi
 # extlinux/extlinux.conf on the same FAT partition, so that must be excluded
 # too. Mirrors installer/file_bootenv.go's isBootScrNumericBoard exactly
 # (boot.scr present AND NOT VideoCore AND NOT systemd-boot AND NOT extlinux)
-# — keep both checks in sync by hand if either changes.
-if [ -f "$MNT/boot.scr" ] && [ ! -f "$MNT/config.txt" ] && [ ! -f "$MNT/cmdline.txt" ] \
+# — keep both checks in sync by hand if either changes. Fable's TASK-S55-005
+# review: isVideoCoreTrybootPlatform disqualifies only when BOTH config.txt
+# AND cmdline.txt are present (matches isBootScrNumericBoard's own Go-side
+# semantics) — the "NOT config.txt AND NOT cmdline.txt" form below used to
+# disqualify on EITHER alone, a broader (but on every board shipped today,
+# equivalent) exclusion. Written as the exact AND-negation for a precise
+# mirror rather than relying on that equivalence holding forever.
+if [ -f "$MNT/boot.scr" ] && ! { [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.txt" ]; } \
    && [ ! -d "$MNT/loader/entries" ] && [ ! -f "$MNT/extlinux/extlinux.conf" ] \
    && [ -f "$BOOT_PART_FILE" ]; then
     TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
