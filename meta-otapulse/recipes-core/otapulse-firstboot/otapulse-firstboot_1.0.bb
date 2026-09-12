@@ -26,7 +26,6 @@ SRC_URI = " \
     file://otapulse-auto-provision.service \
     file://otapulse-machine-id \
     file://otapulse-machine-id.service \
-    file://switch-boot-slot.sh \
     file://99-otapulse-bsp-aliases.rules \
 "
 
@@ -60,9 +59,6 @@ do_install() {
     # Install auto-provisioning script
     install -m 0755 ${WORKDIR}/otapulse-auto-provision ${D}${bindir}/otapulse-auto-provision
 
-    # Install boot slot switching script
-    install -m 0755 ${WORKDIR}/switch-boot-slot.sh ${D}${bindir}/switch-boot-slot.sh
-
     # Install persistent machine-id script
     install -m 0755 ${WORKDIR}/otapulse-machine-id ${D}${bindir}/otapulse-machine-id
 
@@ -89,7 +85,6 @@ FILES:${PN} = " \
     ${bindir}/otapulse-boot-health \
     ${bindir}/otapulse-auto-provision \
     ${bindir}/otapulse-machine-id \
-    ${bindir}/switch-boot-slot.sh \
     ${systemd_system_unitdir}/otapulse-partition-setup.service \
     ${systemd_system_unitdir}/otapulse-boot-health.service \
     ${systemd_system_unitdir}/otapulse-auto-provision.service \

@@ -275,6 +275,15 @@ file_based_boot_health() {
             printf '%s' "$PREV_PART" > "$MNT/mender_boot_part"
             rm -f "$FAT_PREV_PART_FILE"
 
+            # Fable's TASK-S55-010 finding F3 (symmetry with the sentinel
+            # branch's TASK-S55-005 fix above): mirror the reverted value
+            # into /data/ota directly rather than depend on a later
+            # ReconcileToBootedSlot best-effort pass to arrive at the same
+            # answer — the eventual RollbackReboot's switch-boot-slot.sh call
+            # reads FROM /data/ota/mender_boot_part.
+            write_ota "$OTA_DIR/mender_boot_part" "$PREV_PART" \
+                || log "WARNING: failed to mirror the reverted mender_boot_part into $OTA_DIR"
+
             # Marker-scheme boards (see ArtifactReboot_Enter_01 section 2):
             # some vendor U-Boots ignore the numeric mender_boot_part and
             # instead select Slot B *iff* mender_boot_slot_b is PRESENT
