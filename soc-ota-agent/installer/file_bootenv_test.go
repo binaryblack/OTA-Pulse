@@ -414,3 +414,150 @@ func TestTrybootRebootArgument_MatchesFirmwareContract(t *testing.T) {
 	assert.Equal(t, "0 tryboot", trybootRebootArgument)
 	assert.Contains(t, trybootRebootArgument, " tryboot")
 }
+
+// --- TASK-S55-004 (TODO-049/S55) -------------------------------------------
+//
+// NOTE: these tests were written and hand-verified against this file's
+// logic, but could NOT be executed on the machine they were authored on —
+// no Go toolchain is installed on that host (bitbake fetches/builds its own
+// during a real image build). Run them for real as part of TASK-S55-007's
+// build, before trusting this comment away: `go test ./installer/...`.
+
+func TestIsBootScrNumericBoard(t *testing.T) {
+	write := func(dir string, rel ...string) {
+		full := filepath.Join(dir, filepath.Join(rel...))
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0755))
+		require.NoError(t, os.WriteFile(full, []byte("x\n"), 0644))
+	}
+
+	numeric := t.TempDir() // imx8mp-frdm / orange-pi-zero2w / beagleplay-ti class
+	write(numeric, "boot.scr")
+	assert.True(t, isBootScrNumericBoard(numeric))
+
+	noBootScr := t.TempDir() // e.g. Jetson: no boot.scr candidate at all
+	assert.False(t, isBootScrNumericBoard(noBootScr))
+
+	rpi4 := t.TempDir() // VideoCore direct-boot excludes it even with boot.scr present
+	write(rpi4, "boot.scr")
+	write(rpi4, "config.txt")
+	write(rpi4, "cmdline.txt")
+	assert.False(t, isBootScrNumericBoard(rpi4))
+
+	cm5 := t.TempDir() // boot.scr built as a harmless fallback, real boot is extlinux
+	write(cm5, "boot.scr")
+	write(cm5, "extlinux", "extlinux.conf")
+	assert.False(t, isBootScrNumericBoard(cm5))
+
+	systemdBoot := t.TempDir() // defense-in-depth: a future systemd-boot-class board
+	write(systemdBoot, "boot.scr")
+	write(systemdBoot, "loader", "entries")
+	assert.False(t, isBootScrNumericBoard(systemdBoot))
+}
+
+func TestResolveOldPartForRollback(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+
+	nonNumeric := t.TempDir() // no boot.scr -> always "", regardless of running root
+	assert.Equal(t, "", env.resolveOldPartForRollback(nonNumeric))
+
+	numeric := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(numeric, "boot.scr"), []byte("x\n"), 0644))
+	// detectCurrentPartitionNumber reads /proc/self/mounts for the real "/"
+	// mount of THIS test process — host-dependent, and not this test's
+	// concern. This call must simply not panic; the real assertion this
+	// test makes is the nonNumeric case above (the gating), which is what
+	// TASK-S55-004 actually changed.
+	assert.NotPanics(t, func() { env.resolveOldPartForRollback(numeric) })
+}
+
+func TestArmPendingSwitchRollback_NoOpWhenOldPartEmptyOrUnchanged(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "boot.scr"), []byte("x\n"), 0644))
+
+	require.NoError(t, env.armPendingSwitchRollback(bootDir, "", "3"))
+	require.NoError(t, env.armPendingSwitchRollback(bootDir, "2", "2"))
+
+	_, err := os.Stat(filepath.Join(bootDir, "mender_boot_part_prev"))
+	assert.True(t, os.IsNotExist(err), "no-op cases must not write a rollback backup")
+}
+
+// The actual TODO-049 fix: on a boot.scr-numeric board, uboot_boot_count and
+// boot_count must be CREATED (not merely reset-if-present) so U-Boot's
+// fatwrite — which can only overwrite an existing file — has something to
+// overwrite on a board's very first arm.
+func TestArmPendingSwitchRollback_NumericBoardCreatesCounters(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "boot.scr"), []byte("x\n"), 0644))
+
+	require.NoError(t, env.armPendingSwitchRollback(bootDir, "2", "3"))
+
+	prev, err := os.ReadFile(filepath.Join(bootDir, "mender_boot_part_prev"))
+	require.NoError(t, err)
+	assert.Equal(t, "2\n", string(prev))
+
+	for _, name := range []string{"uboot_boot_count", "boot_count"} {
+		content, err := os.ReadFile(filepath.Join(bootDir, name))
+		require.NoError(t, err, "%s must be created on a boot.scr-numeric board even though it did not exist before", name)
+		assert.Equal(t, "0", string(content))
+	}
+}
+
+// Non-numeric boards (RPi4/VideoCore, CM5) must keep the ORIGINAL
+// conservative behavior: counters are reset only if already present, never
+// created — nothing on those boards ever creates or reads these files, so
+// creating them would be unread clutter.
+func TestArmPendingSwitchRollback_NonNumericBoardDoesNotCreateCounters(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "config.txt"), []byte("x\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "cmdline.txt"), []byte("x\n"), 0644))
+
+	require.NoError(t, env.armPendingSwitchRollback(bootDir, "2", "3"))
+
+	prev, err := os.ReadFile(filepath.Join(bootDir, "mender_boot_part_prev"))
+	require.NoError(t, err, "the prev backup itself is best-effort but still attempted on every board")
+	assert.Equal(t, "2\n", string(prev))
+
+	for _, name := range []string{"uboot_boot_count", "boot_count"} {
+		_, err := os.Stat(filepath.Join(bootDir, name))
+		assert.True(t, os.IsNotExist(err), "%s must NOT be created on a non-numeric board", name)
+	}
+}
+
+// The fail-closed hardening itself: on a boot.scr-numeric board, a write
+// failure for the rollback backup must abort the slot switch (return an
+// error) rather than silently proceeding best-effort as before.
+func TestArmPendingSwitchRollback_NumericBoardFailsClosedOnWriteFailure(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "boot.scr"), []byte("x\n"), 0644))
+	require.True(t, isBootScrNumericBoard(bootDir), "sanity: this dir must be detected as numeric, or the rest of this test proves nothing")
+
+	// Force the mender_boot_part_prev write to fail without needing
+	// permission tricks: put a DIRECTORY at the exact path
+	// armPendingSwitchRollback will try to open as a FILE for writing.
+	blocker := filepath.Join(bootDir, "mender_boot_part_prev")
+	require.NoError(t, os.MkdirAll(blocker, 0755))
+
+	err := env.armPendingSwitchRollback(bootDir, "2", "3")
+	require.Error(t, err, "a numeric board that cannot write its rollback backup must fail closed")
+	assert.Contains(t, err.Error(), "refusing to proceed")
+}
+
+// The same failure mode on a non-numeric board must stay best-effort — no
+// error, matching this project's original (pre-TODO-049) behavior for RPi4/
+// CM5-class boards, whose own working mechanisms never depend on this file.
+func TestArmPendingSwitchRollback_NonNumericBoardStaysBestEffortOnWriteFailure(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "config.txt"), []byte("x\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "cmdline.txt"), []byte("x\n"), 0644))
+
+	blocker := filepath.Join(bootDir, "mender_boot_part_prev")
+	require.NoError(t, os.MkdirAll(blocker, 0755))
+
+	err := env.armPendingSwitchRollback(bootDir, "2", "3")
+	assert.NoError(t, err, "a non-numeric board must never abort the slot switch over this file")
+}

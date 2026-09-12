@@ -460,93 +460,20 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error
 		return errors.New("could not find or mount boot partition for boot slot sync")
 	}
 
-	// Persist the OLD (pre-switch) slot value as mender_boot_part_prev, next to
-	// mender_boot_part on the SAME FAT boot partition, BEFORE it is overwritten
-	// below. This is the file-based-boot analogue of the direct-boot
-	// cmdline_prev.txt backup (see updateBootCmdline) and is the rollback target
-	// consumed by otapulse-boot-health.service's file-based-boot branch
-	// (GAP-OTA-006 follow-up): a board like Orange Pi Zero 2W has NO working
-	// U-Boot env (has_uboot_env: false) and NO cmdline.txt (not VideoCore
-	// direct-boot), so without this record a slot that never boots the agent is
-	// unrecoverable — there is nothing to revert TO.
-	//
-	// Deliberately written on the FAT boot partition, NOT /data: /data is
-	// exactly the thing a disk-fill scenario (large_artifact.py LA-002) can
-	// leave full or (BUG-235) unmounted, and it is also where the OLD
-	// (pre-this-fix) bookkeeping lived — losing it to an ENOSPC-truncated write
-	// during the very install that needs the rollback net is the root cause
-	// this closes.
-	//
-	// "Write once per cycle" — same doctrine as updateBootCmdline's
-	// cmdline_prev.txt: never clobber a backup already written earlier in this
-	// OTA cycle (e.g. a retried WriteEnv call), and never write a value equal to
-	// the new target (that would record "previous == current", making a later
-	// revert a no-op). Best-effort: a failure to read/write the prev marker must
-	// not abort the slot switch itself — it only means a subsequent revert has
-	// nothing to restore, no worse than before this fix existed.
-	prevFile := filepath.Join(filepath.Dir(bootFile), "mender_boot_part_prev")
-	if oldData, statErr := os.ReadFile(bootFile); statErr == nil {
-		oldPart := strings.TrimSpace(string(oldData))
-		if oldPart != "" && oldPart != partNum {
-			_, prevStatErr := os.Stat(prevFile)
-			// A prev marker already on disk is only a "do not clobber" case
-			// when it belongs to THIS in-flight cycle (a retried WriteEnv
-			// call, or Rollback's own WriteEnv layered on top of Install's —
-			// see dual_rootfs_device.go Rollback(), which writes
-			// mender_boot_part again while upgrade_available is still "1").
-			// upgrade_available is the ground truth for "mid-cycle": WriteEnv
-			// always writes mender_boot_part BEFORE upgrade_available (see the
-			// write-order doctrine above), so at this point its on-disk value
-			// still reflects the state from BEFORE this call — "1" only when
-			// a cycle is already genuinely in flight. Anything left over from
-			// an EARLIER, already-resolved cycle (upgrade_available != "1")
-			// must be overwritten with the current old/new pair, or it
-			// silently poisons every future revert with stale data (BUG-311:
-			// this existence-only check let a marker left behind by a
-			// U-Boot-level revert on orange-pi-zero2w — which never clears
-			// its own trigger file — suppress every subsequent real OTA's own
-			// correct backup write, reported live 2026-08-19).
-			ua, _ := f.readFile(f.upgradeAvailFile, "0")
-			if os.IsNotExist(prevStatErr) || ua != "1" {
-				// Best-effort, direct write (not the generic f.writeFile retry
-				// helper below — that helper's remount-rw fallback targets
-				// /data specifically, not this FAT boot mount). A failure here
-				// only means a later revert has nothing to restore; it must
-				// never abort the slot switch itself.
-				if werr := os.WriteFile(prevFile, []byte(oldPart+"\n"), 0644); werr != nil {
-					log.Warnf("FileBasedBootEnv: Failed to write mender_boot_part_prev rollback backup: %v", werr)
-				} else {
-					syscall.Sync()
-					log.Infof("FileBasedBootEnv: Recorded mender_boot_part_prev=%s (rollback target) before switching to %s", oldPart, partNum)
-				}
-
-				// Defense-in-depth (same accumulation bug as
-				// ClearDirectBootBackup's commit-path reset, see its
-				// comment): a cycle that never reaches a successful commit —
-				// crashed, force-stopped, bricked — leaves its FAT boot
-				// counters wherever they were, and the NEXT genuinely fresh
-				// switch inherits that residue. This is the same
-				// os.IsNotExist(prevStatErr) || ua != "1" gate as the prev
-				// backup write above — reached only when starting a NEW
-				// cycle, never mid-cycle. Gating matters: Rollback() also
-				// calls WriteEnv (dual_rootfs_device.go) while ua is still
-				// "1" mid-cycle, and zeroing these counters then would erase
-				// a genuinely-failing cycle's own attempt history before its
-				// revert threshold is reached, extending a bad-image boot
-				// loop past its budget.
-				bootDirForCounters := filepath.Dir(bootFile)
-				for _, name := range []string{"uboot_boot_count", "boot_count"} {
-					counterPath := filepath.Join(bootDirForCounters, name)
-					if _, err := os.Stat(counterPath); err == nil {
-						if werr := os.WriteFile(counterPath, []byte("0"), 0644); werr != nil {
-							log.Warnf("FileBasedBootEnv: Failed to reset %s for new cycle: %v", counterPath, werr)
-						} else {
-							syscall.Sync()
-						}
-					}
-				}
-			}
-		}
+	// Persist the OLD (pre-switch) slot value as mender_boot_part_prev, next
+	// to mender_boot_part on the SAME FAT boot partition, BEFORE it is
+	// overwritten below — see armPendingSwitchRollback's doc comment for
+	// the full rationale (rollback-net target, write-once-per-cycle
+	// doctrine, TASK-S55-004's fail-closed hardening) and
+	// resolveOldPartForRollback's for the first-ever-OTA fallback.
+	bootDir := filepath.Dir(bootFile)
+	oldData, statErr := os.ReadFile(bootFile)
+	oldPart := strings.TrimSpace(string(oldData))
+	if statErr != nil {
+		oldPart = f.resolveOldPartForRollback(bootDir)
+	}
+	if err := f.armPendingSwitchRollback(bootDir, oldPart, partNum); err != nil {
+		return err
 	}
 
 	// Write to boot partition
@@ -579,7 +506,8 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error
 	// (BUG-074). Probe whether fw_printenv can actually read an environment.
 	isDirectBoot := !uBootEnvWorks()
 	if isDirectBoot {
-		bootDir := filepath.Dir(bootFile)
+		// bootDir was already computed above (TASK-S55-004) -- same value,
+		// no need to recompute it here.
 		newRootDev := f.getDeviceForPartNum(partNum)
 		if newRootDev != "" {
 			f.applyDirectBootSlot(bootDir, newRootDev)
@@ -588,6 +516,154 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error
 		}
 	}
 
+	return nil
+}
+
+// resolveOldPartForRollback (TASK-S55-004, closes HOLE B) is called only when
+// bootDir's mender_boot_part file is absent -- a boot.scr-numeric board's
+// FIRST-EVER OTA has no such file yet (otapulse-partition-setup only ever
+// initializes /data/ota/mender_boot_part, never the FAT copy -- nothing
+// writes the FAT copy until this very sync, or an earlier
+// ArtifactReboot_Enter_01 section 2 run). Previously this left the
+// prev-backup/counter-arming logic below with no rollback target to record
+// on that first OTA. Derive it from the currently booted root partition
+// instead: on a first-ever OTA the running slot IS the only slot that has
+// ever been proven to boot, so it is exactly the correct rollback target.
+// Returns "" (a no-op for the caller) on any board that isn't
+// isBootScrNumericBoard, or if detection fails.
+func (f *FileBasedBootEnv) resolveOldPartForRollback(bootDir string) string {
+	if !isBootScrNumericBoard(bootDir) {
+		return ""
+	}
+	detected, err := f.detectCurrentPartitionNumber()
+	if err != nil || detected == "" {
+		log.Warnf("FileBasedBootEnv: mender_boot_part absent and could not derive a rollback target from the running root partition: %v", err)
+		return ""
+	}
+	log.Infof("FileBasedBootEnv: mender_boot_part absent (first-ever OTA on this board) — derived rollback target %s from the running root partition", detected)
+	return detected
+}
+
+// armPendingSwitchRollback persists oldPart as bootDir's mender_boot_part_prev
+// rollback target (and pre-creates/resets the FAT bootcount counters) before
+// the caller overwrites mender_boot_part with partNum. Deliberately written
+// on the FAT boot partition, NOT /data: /data is exactly the thing a
+// disk-fill scenario (large_artifact.py LA-002) can leave full or (BUG-235)
+// unmounted, and it is also where the OLD (pre-this-fix) bookkeeping lived —
+// losing it to an ENOSPC-truncated write during the very install that needs
+// the rollback net is the root cause this closes. Consumed by
+// otapulse-boot-health.service's file-based-boot branch (GAP-OTA-006
+// follow-up) and, for the boot.scr-numeric board class, by
+// otapulse-bootcount-net.cmd.inc (TODO-049/S55) — a board like Orange Pi
+// Zero 2W has NO working U-Boot env (has_uboot_env: false) and NO
+// cmdline.txt (not VideoCore direct-boot), so without this record a slot
+// that never boots the agent is unrecoverable — there is nothing to revert
+// TO.
+//
+// "Write once per cycle" — same doctrine as updateBootCmdline's
+// cmdline_prev.txt: never clobber a backup already written earlier in this
+// OTA cycle (e.g. a retried WriteEnv call), and never write a value equal to
+// the new target (that would record "previous == current", making a later
+// revert a no-op). No-op entirely when oldPart is "" or already equals
+// partNum.
+//
+// TASK-S55-004 fail-closed hardening: on a boot.scr-numeric board (per
+// isBootScrNumericBoard), a slot switch that cannot record its own rollback
+// target has no brick protection at all — the exact gap that let the
+// imx8mp-frdm incident happen (a bad write to the new slot with nothing
+// recorded to revert to). This function returns an error in that case,
+// refusing to let the caller proceed with the mender_boot_part write. On
+// every OTHER board (RPi4/VideoCore, CM5, or a numericBoard=false detection
+// edge case) every write here stays exactly as best-effort as it always was
+// — these files are unread noise there either way, and this project's own
+// working mechanisms for those boards (tryboot, extlinux/sysboot) must never
+// be made to depend on a FAT write they never needed.
+func (f *FileBasedBootEnv) armPendingSwitchRollback(bootDir, oldPart, partNum string) error {
+	if oldPart == "" || oldPart == partNum {
+		return nil
+	}
+
+	numericBoard := isBootScrNumericBoard(bootDir)
+	if !numericBoard {
+		// TASK-S55-009's RPi4/Jetson regression check greps the journal for
+		// this exact line to prove the fail-closed hardening above never
+		// engages on those boards.
+		log.Infof("FileBasedBootEnv: bootcount-net: not a boot.scr-numeric board, skipping fail-closed hardening for %s", bootDir)
+	}
+	prevFile := filepath.Join(bootDir, "mender_boot_part_prev")
+	_, prevStatErr := os.Stat(prevFile)
+
+	// A prev marker already on disk is only a "do not clobber" case when it
+	// belongs to THIS in-flight cycle (a retried WriteEnv call, or
+	// Rollback's own WriteEnv layered on top of Install's — see
+	// dual_rootfs_device.go Rollback(), which writes mender_boot_part again
+	// while upgrade_available is still "1"). upgrade_available is the
+	// ground truth for "mid-cycle": WriteEnv always writes mender_boot_part
+	// BEFORE upgrade_available (see the write-order doctrine on WriteEnv
+	// above), so at this point its on-disk value still reflects the state
+	// from BEFORE this call — "1" only when a cycle is already genuinely in
+	// flight. Anything left over from an EARLIER, already-resolved cycle
+	// (upgrade_available != "1") must be overwritten with the current
+	// old/new pair, or it silently poisons every future revert with stale
+	// data (BUG-311: this existence-only check let a marker left behind by
+	// a U-Boot-level revert on orange-pi-zero2w — which never clears its
+	// own trigger file — suppress every subsequent real OTA's own correct
+	// backup write, reported live 2026-08-19).
+	ua, _ := f.readFile(f.upgradeAvailFile, "0")
+	if !os.IsNotExist(prevStatErr) && ua == "1" {
+		return nil
+	}
+
+	var prevWriteErr error
+	if werr := os.WriteFile(prevFile, []byte(oldPart+"\n"), 0644); werr != nil {
+		log.Warnf("FileBasedBootEnv: Failed to write mender_boot_part_prev rollback backup: %v", werr)
+		prevWriteErr = werr
+	} else {
+		syscall.Sync()
+		log.Infof("FileBasedBootEnv: Recorded mender_boot_part_prev=%s (rollback target) before switching to %s", oldPart, partNum)
+	}
+
+	// Defense-in-depth (same accumulation bug as ClearDirectBootBackup's
+	// commit-path reset, see its comment): a cycle that never reaches a
+	// successful commit — crashed, force-stopped, bricked — leaves its FAT
+	// boot counters wherever they were, and the NEXT genuinely fresh switch
+	// inherits that residue. This is the same
+	// !os.IsNotExist(prevStatErr) && ua == "1" gate above — reached only
+	// when starting a NEW cycle, never mid-cycle. Gating matters:
+	// Rollback() also calls WriteEnv (dual_rootfs_device.go) while ua is
+	// still "1" mid-cycle, and zeroing these counters then would erase a
+	// genuinely-failing cycle's own attempt history before its revert
+	// threshold is reached, extending a bad-image boot loop past its
+	// budget.
+	//
+	// TASK-S55-004: on a numericBoard, pre-create these counters
+	// UNCONDITIONALLY (not "reset if present") — U-Boot's fatwrite only
+	// ever overwrites an existing file, never creates one, so the
+	// fragment's own first arm on a fresh board depends on this agent
+	// having already created the file at least once. Every other board
+	// keeps the original conservative "reset only if already present"
+	// behavior, since nothing there ever creates or reads these files going
+	// forward.
+	var counterWriteErr error
+	for _, name := range []string{"uboot_boot_count", "boot_count"} {
+		counterPath := filepath.Join(bootDir, name)
+		_, statErr := os.Stat(counterPath)
+		if statErr != nil && !numericBoard {
+			continue
+		}
+		if werr := os.WriteFile(counterPath, []byte("0"), 0644); werr != nil {
+			log.Warnf("FileBasedBootEnv: Failed to reset %s for new cycle: %v", counterPath, werr)
+			if numericBoard {
+				counterWriteErr = werr
+			}
+		} else {
+			syscall.Sync()
+		}
+	}
+
+	if numericBoard && (prevWriteErr != nil || counterWriteErr != nil) {
+		return errors.New("boot.scr-numeric board: failed to arm the pre-kernel bootcount-net rollback target before switching slots — refusing to proceed with a slot switch that has no recorded fallback")
+	}
 	return nil
 }
 
@@ -685,6 +761,59 @@ func isVideoCoreTrybootPlatform(bootDir string) bool {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(bootDir, "cmdline.txt")); err != nil {
+		return false
+	}
+	return true
+}
+
+// isBootScrNumericBoard reports whether bootDir (a mounted FAT boot
+// partition) is one of the boards whose bootloader actually reads the
+// numeric mender_boot_part/_prev/uboot_boot_count files this struct's
+// syncBootSlotToBootPartitionOnce writes -- i.e. a U-Boot boot.scr that
+// splices in otapulse-bootcount-net.cmd.inc (TODO-049/S55: imx8mp-frdm,
+// orange-pi-zero2w, beagleplay-ti today; any future board on the same
+// convention by default).
+//
+// WriteEnv's mender_boot_part write path runs unconditionally for every
+// board that reaches FileBasedBootEnv (RPi4/VideoCore included -- see the
+// isDirectBoot branch a few dozen lines below this file's
+// syncBootSlotToBootPartitionOnce, which ALSO applies to RPi4 since it too
+// has no working U-Boot env) writing a mender_boot_part file nothing on
+// that board ever reads is harmless waste, but three things gated on THIS
+// helper are not: (a) unconditionally pre-creating uboot_boot_count/
+// boot_count where nothing reads them serves no purpose; (b) deriving
+// mender_boot_part_prev's initial value from the running root partition
+// when the FAT file is absent (TASK-S55-004's HOLE B fix) is meaningless
+// noise for a board whose real fallback lives elsewhere entirely; (c) most
+// importantly, FAILING THE WHOLE INSTALL when one of these writes fails
+// (TASK-S55-004's fail-closed hardening) must never apply to a board whose
+// own working mechanism (RPi4's tryboot via cmdline.txt, CM5's
+// extlinux/sysboot) doesn't depend on these files at all -- that would be a
+// new, unrelated failure mode for boards this sprint isn't fixing anything
+// on.
+//
+// boot.scr alone is NOT sufficient: CM5 ships one too (built as a harmless
+// fallback -- its vendor U-Boot silently no-ops `source boot.scr`, real
+// boot goes through extlinux.conf/sysboot instead, see
+// otapulse-boot-script_1.0.bbappend's do_deploy:append:rockchip-rk3588-evb
+// comment) alongside a REAL extlinux/extlinux.conf on the same FAT
+// partition -- excluding boards with that file present is what correctly
+// keeps CM5 out despite its boot.scr existing. loader/entries (systemd-boot)
+// is checked too for defense-in-depth even though Dragon Q6A's A/B is
+// handled entirely by otapulse-systemd-boot-bridge, a separate mechanism
+// that never reaches this Go code at all -- a future systemd-boot-based
+// board landing here by accident must not silently qualify.
+func isBootScrNumericBoard(bootDir string) bool {
+	if _, err := os.Stat(filepath.Join(bootDir, "boot.scr")); err != nil {
+		return false
+	}
+	if isVideoCoreTrybootPlatform(bootDir) {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(bootDir, "loader", "entries")); err == nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(bootDir, "extlinux", "extlinux.conf")); err == nil {
 		return false
 	}
 	return true
