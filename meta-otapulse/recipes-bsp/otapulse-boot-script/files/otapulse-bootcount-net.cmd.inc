@@ -51,10 +51,20 @@
 # back as 50 or 32 — so every comparison below tests both forms rather than
 # doing math on an ambiguously-typed value). Every value WRITTEN back to the
 # FAT is an explicit 0x-prefixed hex literal, so there is no write-side
-# ambiguity either. This fragment never CREATES a FAT file — the on-device
-# agent is responsible for pre-creating mender_boot_part_prev and
-# uboot_boot_count before arming a switch (file_bootenv.go); U-Boot's
-# fatwrite here only ever overwrites an existing 1-byte file.
+# ambiguity either.
+#
+# Fable review correction (2026-09-12): U-Boot's fatwrite DOES create a
+# file that does not yet exist (verified: this is how uboot_boot_count
+# first appears on a board that has never had a pending switch before).
+# The on-device agent (file_bootenv.go) does NOT pre-create
+# uboot_boot_count today either -- its cycle-start and commit-time writers
+# both gate on os.Stat succeeding first (i.e. "reset the counter IF it
+# already exists"), never create it. TASK-S55-004 is the task that changes
+# this to unconditional pre-creation (so U-Boot only ever needs to
+# overwrite, matching the original intent below) -- until that lands, the
+# very first arm on a given board relies on THIS fragment's own fatwrite
+# create-on-write behavior for uboot_boot_count, same as it always has for
+# mender_boot_part_prev's sentinel write.
 #
 # Power-cut-safe write ordering in the revert branch below: mender_boot_part
 # first, then the mender_boot_part_prev sentinel, then the counter reset. A
@@ -103,7 +113,15 @@ if load ${bootiface} ${mmcdev}:${mmcpart} ${scriptaddr} mender_boot_part_prev; t
         # truncated uboot_boot_count read would leave scriptaddr2 holding
         # whatever was left in DRAM from a prior boot/session, an
         # unpredictable value this ladder was never designed to compare
-        # against.
+        # against. A genuinely missing/zero-length file (e.g. a torn agent
+        # write at cycle start, before TASK-S55-004's fail-closed hardening
+        # lands) now reads back as 0x00, which the ladder below treats as
+        # "unrecognised -> clamp to atmax" -- i.e. it reverts immediately
+        # rather than silently never triggering. That is the deliberately
+        # accepted fail-safe direction for a garbled/absent counter, the
+        # same policy already used for an unrecognised mender_boot_part_prev
+        # value: when in doubt, revert to the known-good slot rather than
+        # trust an ambiguous pending-switch state.
         mw.b ${scriptaddr2} 0x00
         setenv ubcount 48
         if load ${bootiface} ${mmcdev}:${mmcpart} ${scriptaddr2} uboot_boot_count; then
