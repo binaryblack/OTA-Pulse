@@ -19,6 +19,47 @@
 
 BOOT_PART_FILE="/data/ota/mender_boot_part"
 
+# ── NVIDIA Tegra (Jetson): bounded wait for clock sync before commit ───────
+# BUG-432: this devkit class's RTC has no working battery backup, so every
+# power-cycle boots with a bogus floor clock (observed live: "2023-12-24")
+# until systemd-timesyncd corrects it over the network. Immediately after
+# this script returns, the agent's Go state machine (state.go's
+# updateCommitState) sends a TLS-secured status report to the real OTA
+# server as its very next step, BEFORE actually committing. If the clock is
+# still wrong at that moment, the real server certificate's notBefore looks
+# like it is in the future and TLS verification fails with
+# X509_V_ERR_CERT_NOT_YET_VALID ("openssl verify rc: 9") — that failure
+# counts against the commit's retry budget, and exhausting it forces a
+# spurious rollback of an otherwise fully successful slot switch. Confirmed
+# live via journalctl streamed across a real reboot on a Jetson Xavier NX.
+# custom-base-image.bb's Dragon Q6A comment already documents this exact
+# TLS-after-power-cycle failure class for boards with unreliable RTCs;
+# Jetson is the previously-unhandled case. Self-gates on nvbootctrl +
+# rootfs A/B enabled, same check switch-boot-slot.sh's try_nvbootctrl uses,
+# so this can only ever fire on genuine Tegra/Jetson boards. Bounded to 60s
+# and NEVER fails the commit even if the clock never syncs — matches this
+# script's existing "never exit non-zero here" contract for every platform
+# but the RPi4 wrong-slot guard below.
+if command -v nvbootctrl >/dev/null 2>&1 && command -v timedatectl >/dev/null 2>&1; then
+    nvbootctrl -t rootfs is-rootfs-ab-enabled >/dev/null 2>&1
+    AB_STATUS=$?
+    if [ "$AB_STATUS" = "1" ] || [ "$AB_STATUS" = "2" ]; then
+        WAITED=0
+        SYNCED="no"
+        while [ "$WAITED" -lt 60 ]; do
+            SYNCED=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+            [ "$SYNCED" = "yes" ] && break
+            sleep 1
+            WAITED=$((WAITED + 1))
+        done
+        if [ "$SYNCED" = "yes" ]; then
+            echo "ArtifactCommit_Enter: clock NTP-synced after ${WAITED}s wait (Tegra RTC-less boot, BUG-432)"
+        else
+            echo "ArtifactCommit_Enter: WARNING - clock still not NTP-synced after ${WAITED}s wait; proceeding anyway (may hit a TLS cert-not-yet-valid retry, BUG-432)"
+        fi
+    fi
+fi
+
 find_fat_boot() {
     for dev in /dev/disk/by-partlabel/boot /dev/mmcblk*p1 /dev/nvme*n1p1 /dev/sd?1; do
         [ -b "$dev" ] || continue
@@ -125,8 +166,56 @@ if [ -d "$MNT/loader/entries" ]; then
     exit 0
 fi
 
+# ── TODO-049/S55: generic boot.scr-numeric boards (imx8mp-frdm,
+#    orange-pi-zero2w, beagleplay-ti today) — wrong-slot commit guard ───────
+# Extends the RPi4 guard above to the second board class this project's
+# rollback safety net depends on getting right. Unlike RPi4 there is nothing
+# to PROMOTE here (mender_boot_part on the FAT boot partition IS already the
+# permanent pointer soc-ota-agent wrote — no separate try-vs-permanent file
+# distinction on this board class), so this block is PURELY the verification
+# guard: refuse the commit if the currently running root partition does not
+# actually match what /data/ota/mender_boot_part says it should be. Without
+# this, a commit reached by mistake (or by a bootloader-level revert this
+# script's own caller failed to detect) would let CommitUpdate() report
+# success for a device that is not actually running the target it thinks it
+# committed.
+#
+# boot.scr alone is not sufficient to identify this class — CM5 ships one as
+# a harmless dead fallback (vendor U-Boot no-ops `source boot.scr`; real
+# boot goes through extlinux/sysboot instead) alongside a REAL
+# extlinux/extlinux.conf on the same FAT partition, so that must be excluded
+# too. Mirrors installer/file_bootenv.go's isBootScrNumericBoard exactly
+# (boot.scr present AND NOT VideoCore AND NOT systemd-boot AND NOT extlinux)
+# — keep both checks in sync by hand if either changes.
+if [ -f "$MNT/boot.scr" ] && [ ! -f "$MNT/config.txt" ] && [ ! -f "$MNT/cmdline.txt" ] \
+   && [ ! -d "$MNT/loader/entries" ] && [ ! -f "$MNT/extlinux/extlinux.conf" ] \
+   && [ -f "$BOOT_PART_FILE" ]; then
+    TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+    FAT_REAL=$(readlink -f "$FAT_DEV" 2>/dev/null || echo "$FAT_DEV")
+    DISK_PREFIX=$(printf '%s' "$FAT_REAL" | sed -E 's/[0-9]+$//')
+    EXPECTED_DEV="${DISK_PREFIX}${TARGET_PART}"
+
+    RUNNING_ROOT=$(grep -oE 'root=[^ ]+' /proc/cmdline 2>/dev/null | head -1 | sed -E 's/^root=//')
+    if [ -z "$RUNNING_ROOT" ]; then
+        RUNNING_ROOT=$(findmnt -n -o SOURCE / 2>/dev/null)
+    fi
+    RUNNING_ROOT_REAL=$(readlink -f "$RUNNING_ROOT" 2>/dev/null || echo "$RUNNING_ROOT")
+    EXPECTED_DEV_REAL=$(readlink -f "$EXPECTED_DEV" 2>/dev/null || echo "$EXPECTED_DEV")
+
+    if [ -z "$RUNNING_ROOT_REAL" ] || [ "$RUNNING_ROOT_REAL" != "$EXPECTED_DEV_REAL" ]; then
+        echo "ArtifactCommit_Enter: REFUSING commit — running root ($RUNNING_ROOT_REAL) does not match OTA target ($EXPECTED_DEV_REAL) from $BOOT_PART_FILE (boot.scr-numeric board)"
+        cleanup
+        exit 1
+    fi
+
+    echo "ArtifactCommit_Enter: boot.scr-numeric board — running root ($RUNNING_ROOT_REAL) matches OTA target, nothing further to do (mender_boot_part is already the permanent pointer)"
+    cleanup
+    exit 0
+fi
+
 # ── All other platforms: nothing to do. NEVER exit non-zero here — only the
-#    RPi4 wrong-slot guard above is allowed to fail the commit. ────────────
-echo "ArtifactCommit_Enter: not an RPi4 or systemd-boot platform — nothing to do"
+#    RPi4 and boot.scr-numeric wrong-slot guards above are allowed to fail
+#    the commit. ─────────────────────────────────────────────────────────
+echo "ArtifactCommit_Enter: not an RPi4, systemd-boot, or boot.scr-numeric platform — nothing to do"
 cleanup
 exit 0

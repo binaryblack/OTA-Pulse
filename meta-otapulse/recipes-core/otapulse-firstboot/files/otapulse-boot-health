@@ -206,6 +206,39 @@ file_based_boot_health() {
         exit 0
     fi
 
+    # TODO-049/S55, closes HOLE A: a bootloader-level revert (the U-Boot
+    # fragment in otapulse-bootcount-net.cmd.inc, spliced into boot.scr) may
+    # have ALREADY reverted mender_boot_part back to the old slot and booted
+    # it successfully, BEFORE this script ever ran — it neutralises
+    # FAT_PREV_PART_FILE to the sentinel byte 'X' (0x58) once it acts, since
+    # fatwrite has no delete. Without this check, the code below would treat
+    # this boot as just another ordinary attempt on the (wrongly-believed)
+    # NEW slot: it would count toward FAT_BC, and — since the U-Boot revert
+    # already succeeded and the device is genuinely healthy — this boot
+    # would stay under MAX_BOOT_RETRIES and simply "let the boot continue"
+    # with upgrade_available STILL SET TO 1. The agent then starts on the
+    # OLD slot with ua=1, and VerifyReboot() (dual_rootfs_device.go) only
+    # checks upgrade_available, not which artifact is actually running — so
+    # it would proceed straight to CommitUpdate() and report the deployment
+    # SUCCESSFUL, even though the device silently stayed on its old rootfs.
+    # Detecting the sentinel here and clearing upgrade_available BEFORE the
+    # agent ever starts makes the agent see ua=0 at boot instead: no pending
+    # install, no false commit — the same outcome a real, correctly-reported
+    # failed deployment would produce.
+    if [ -s "$FAT_PREV_PART_FILE" ]; then
+        PREV_MARKER=$(tr -d '\n' < "$FAT_PREV_PART_FILE" 2>/dev/null || true)
+        if [ "$PREV_MARKER" = "X" ]; then
+            log "BOOTCOUNT-NET revert detected (mender_boot_part_prev=X) — a bootloader-level revert already happened before this boot; clearing upgrade_available so the agent does not falsely commit"
+            write_ota "$UPGRADE_AVAIL_FILE" "0" || log "WARNING: failed to clear upgrade_available after a detected bootloader-level revert"
+            printf '0' > "$FAT_BOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT boot_count after a detected bootloader-level revert"
+            printf '0' > "$FAT_UBOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT uboot_boot_count after a detected bootloader-level revert"
+            rm -f "$FAT_PREV_PART_FILE"
+            sync
+            cleanup
+            exit 0
+        fi
+    fi
+
     # ── Upgrade pending: count this boot attempt (FAT-resident counter) ────
     # NOTE: persistence of the incremented count is best-effort (fallback to
     # in-memory on write failure), mirroring Class A's rationale — the revert
