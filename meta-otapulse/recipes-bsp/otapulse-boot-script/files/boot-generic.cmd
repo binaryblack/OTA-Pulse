@@ -57,8 +57,14 @@ else
     setenv bootpart 2
 fi
 
+# TODO-049/S55: generic pre-kernel boot-count self-revert net, spliced in at
+# build time by otapulse-boot-script_1.0.bb's do_configure -- see
+# files/otapulse-bootcount-net.cmd.inc for the full mechanism. Sets
+# ${recoveryargs} (consumed below) and may revert ${bootpart}.
+@@OTAPULSE_BOOTCOUNT_NET@@
+
 # Build boot arguments
-setenv bootargs console=${console} root=/dev/mmcblk${mmcdev}p${bootpart} rootwait rw
+setenv bootargs console=${console} root=/dev/mmcblk${mmcdev}p${bootpart} rootwait rw${recoveryargs}
 
 echo "OTAPulse: Booting from /dev/mmcblk${mmcdev}p${bootpart}"
 

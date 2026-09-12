@@ -24,6 +24,7 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 SRC_URI = " \
     file://boot-generic.cmd \
     file://boot-imx8mp.cmd \
+    file://otapulse-bootcount-net.cmd.inc \
 "
 
 S = "${WORKDIR}"
@@ -73,31 +74,98 @@ python do_configure() {
         f.write(selected)
 
     bb.note(f"OTAPulse: Using boot script: {selected}")
+
+    # TODO-049/S55: splice the shared generic pre-kernel boot-count
+    # self-revert fragment (otapulse-bootcount-net.cmd.inc) into any
+    # boot-${MACHINE}.cmd that contains the literal marker line
+    # "@@OTAPULSE_BOOTCOUNT_NET@@". Boards with no marker pass through
+    # byte-identical (just copied to boot.expanded.cmd) -- do_compile always
+    # mkimages boot.expanded.cmd, never the raw selected file, so this is the
+    # single place either path is decided.
+    MARKER = "@@OTAPULSE_BOOTCOUNT_NET@@"
+    src_path = os.path.join(workdir, selected)
+    with open(src_path) as f:
+        lines = f.readlines()
+
+    marker_idx = next((i for i, l in enumerate(lines) if MARKER in l), None)
+    expanded_path = os.path.join(workdir, 'boot.expanded.cmd')
+
+    if marker_idx is None:
+        with open(expanded_path, 'w') as f:
+            f.writelines(lines)
+        bb.note(f"OTAPulse: {selected} has no {MARKER} marker -- boot.expanded.cmd is a verbatim copy")
+        return
+
+    # Contract check 1: the marker must come after bootpart has already
+    # been resolved by the including script -- otherwise the fragment's
+    # revert logic has nothing valid to overwrite.
+    before_marker = "".join(lines[:marker_idx])
+    if "bootpart" not in before_marker:
+        bb.fatal(
+            f"OTAPulse: {selected} has {MARKER} before any 'bootpart' "
+            f"reference -- the board script must resolve bootpart (2/3) "
+            f"BEFORE including the bootcount-net fragment."
+        )
+
+    # Contract check 2: something after the marker (the bootargs line) must
+    # consume the fragment's recoveryargs variable reference, or the
+    # panic=15/init= safety net is silently dropped from the kernel command
+    # line.
+    #
+    # RECOVERYARGS_REF is built via string concatenation rather than typed
+    # directly as a dollar-brace reference in this python source: bitbake's
+    # own metadata-expansion pass scans the ENTIRE raw text of a task
+    # function -- comments included, since expansion is plain text
+    # substitution with no notion of a Python comment -- looking for that
+    # exact two-character opener followed by a name and a closing brace, and
+    # would try to treat "recoveryargs" as a bitbake datastore variable
+    # (which it is not; it is only ever a U-Boot environment variable
+    # inside the compiled .cmd/.scr file). Concatenation keeps the dollar
+    # sign and the opening brace in separate string literals so that
+    # two-character opener never appears contiguously anywhere in this
+    # function's raw source text, sidestepping the ambiguity entirely
+    # rather than relying on how any particular bitbake version happens to
+    # handle an unresolvable reference.
+    after_marker = "".join(lines[marker_idx + 1:])
+    RECOVERYARGS_REF = "$" + "{recoveryargs}"
+    if RECOVERYARGS_REF not in after_marker:
+        bb.fatal(
+            "OTAPulse: " + selected + " includes " + MARKER + " but no later "
+            "line appends \"" + RECOVERYARGS_REF + "\" to bootargs -- the "
+            "fragment's pending-boot panic=15/init= safety net would never "
+            "reach the kernel command line."
+        )
+
+    inc_path = os.path.join(workdir, 'otapulse-bootcount-net.cmd.inc')
+    with open(inc_path) as f:
+        fragment_lines = f.readlines()
+
+    expanded = lines[:marker_idx] + fragment_lines + lines[marker_idx + 1:]
+    with open(expanded_path, 'w') as f:
+        f.writelines(expanded)
+    bb.note(f"OTAPulse: spliced {MARKER} in {selected} -- boot.expanded.cmd written ({len(fragment_lines)} fragment lines)")
 }
 
 addtask configure before do_compile after do_unpack
 
 # Compile boot script
+#
+# TODO-049/S55: always mkimage boot.expanded.cmd (written by do_configure's
+# Python step, either a verbatim copy of the selected boot-*.cmd or that
+# file with the bootcount-net fragment spliced in at its
+# @@OTAPULSE_BOOTCOUNT_NET@@ marker) -- never the raw selected file
+# directly, so there is exactly one path regardless of whether a given
+# board opted into the marker.
 do_compile() {
-    # Read boot script selection from marker file (written by do_configure)
-    if [ -f "${WORKDIR}/.boot_cmd_selected" ]; then
-        BOOT_CMD=$(cat "${WORKDIR}/.boot_cmd_selected")
-    else
-        # Fallback detection in shell if marker file missing
-        if [ -f "${WORKDIR}/boot-${MACHINE}.cmd" ]; then
-            BOOT_CMD="boot-${MACHINE}.cmd"
-        elif echo "${MACHINE}" | grep -qi "imx8" && [ -f "${WORKDIR}/boot-imx8mp.cmd" ]; then
-            BOOT_CMD="boot-imx8mp.cmd"
-        else
-            BOOT_CMD="boot-generic.cmd"
-        fi
+    if [ ! -f "${WORKDIR}/boot.expanded.cmd" ]; then
+        bbfatal "OTAPulse: boot.expanded.cmd missing -- do_configure did not run or failed silently"
     fi
 
-    bbnote "OTAPulse: Compiling $BOOT_CMD for ${UBOOT_MKIMAGE_ARCH}"
+    bbnote "OTAPulse: Compiling boot.expanded.cmd for ${UBOOT_MKIMAGE_ARCH}"
 
     mkimage -A ${UBOOT_MKIMAGE_ARCH} -O linux -T script -C none \
         -n "OTAPulse Boot Script" \
-        -d ${WORKDIR}/${BOOT_CMD} ${WORKDIR}/boot.scr
+        -d ${WORKDIR}/boot.expanded.cmd ${WORKDIR}/boot.scr
 }
 
 # No runtime installation needed - boot.scr goes to boot partition via deploy
@@ -106,10 +174,15 @@ do_install() {
     :
 }
 
-# Deploy boot.scr to image directory for WKS
+# Deploy boot.scr to image directory for WKS.
+# Also deploy the expanded plaintext source (boot.cmd) alongside it -- not
+# consumed by anything at boot time, purely so a `bitbake -c deploy` diff
+# against a prior build shows the EXACT text a marker-splice produced,
+# without needing to disassemble boot.scr's mkimage wrapper to check.
 do_deploy() {
     install -d ${DEPLOYDIR}
     install -m 0644 ${WORKDIR}/boot.scr ${DEPLOYDIR}/boot.scr
+    install -m 0644 ${WORKDIR}/boot.expanded.cmd ${DEPLOYDIR}/boot.cmd
 }
 
 addtask deploy after do_compile before do_build
