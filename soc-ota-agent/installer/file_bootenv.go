@@ -469,7 +469,16 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error
 	bootDir := filepath.Dir(bootFile)
 	oldData, statErr := os.ReadFile(bootFile)
 	oldPart := strings.TrimSpace(string(oldData))
-	if statErr != nil {
+	// Fable's TASK-S55-004 review: the spec is "absent OR unparseable", not
+	// just "absent" (statErr != nil) — an EXISTING-but-empty or garbled FAT
+	// mender_boot_part previously produced the same oldPart="" as a missing
+	// file, which then fell all the way through armPendingSwitchRollback's
+	// own no-op check silently, fail-OPEN on exactly the numeric boards this
+	// task is supposed to fail closed for. partitionNumberToSlot returns ""
+	// for any value that is not a real A/B partition number, so this one
+	// check (via slotToPartitionNumber's inverse) covers both "file missing"
+	// and "file present but garbage".
+	if statErr != nil || f.partitionNumberToSlot(oldPart) == "" {
 		oldPart = f.resolveOldPartForRollback(bootDir)
 	}
 	if err := f.armPendingSwitchRollback(bootDir, oldPart, partNum); err != nil {
@@ -519,28 +528,36 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error
 	return nil
 }
 
-// resolveOldPartForRollback (TASK-S55-004, closes HOLE B) is called only when
-// bootDir's mender_boot_part file is absent -- a boot.scr-numeric board's
-// FIRST-EVER OTA has no such file yet (otapulse-partition-setup only ever
-// initializes /data/ota/mender_boot_part, never the FAT copy -- nothing
-// writes the FAT copy until this very sync, or an earlier
-// ArtifactReboot_Enter_01 section 2 run). Previously this left the
+// resolveOldPartForRollback (TASK-S55-004, closes HOLE B) is called whenever
+// bootDir's mender_boot_part file is absent OR unparseable (not a valid A/B
+// partition number — Fable's TASK-S55-004 review: the original code only
+// checked "absent", but an EXISTING garbled/empty file must be treated the
+// same way, or a numeric board fails OPEN instead of closed). A boot.scr-
+// numeric board's FIRST-EVER OTA has no such file yet at all
+// (otapulse-partition-setup only ever initializes /data/ota/mender_boot_part,
+// never the FAT copy -- nothing writes the FAT copy until this very sync, or
+// an earlier ArtifactReboot_Enter_01 section 2 run). Previously this left the
 // prev-backup/counter-arming logic below with no rollback target to record
 // on that first OTA. Derive it from the currently booted root partition
 // instead: on a first-ever OTA the running slot IS the only slot that has
 // ever been proven to boot, so it is exactly the correct rollback target.
-// Returns "" (a no-op for the caller) on any board that isn't
-// isBootScrNumericBoard, or if detection fails.
+// Returns "" (which armPendingSwitchRollback then fails closed on, for a
+// numeric board) on any board that isn't isBootScrNumericBoard, or if
+// detection fails.
 func (f *FileBasedBootEnv) resolveOldPartForRollback(bootDir string) string {
 	if !isBootScrNumericBoard(bootDir) {
 		return ""
 	}
-	detected, err := f.detectCurrentPartitionNumber()
+	// f.detectFn, not detectCurrentPartitionNumber directly -- the
+	// injectable field every other detection-dependent test in this file
+	// already stubs (see ReconcileToBootedSlot's tests), so this path is
+	// actually testable without needing a real /proc/self/mounts match.
+	detected, err := f.detectFn()
 	if err != nil || detected == "" {
-		log.Warnf("FileBasedBootEnv: mender_boot_part absent and could not derive a rollback target from the running root partition: %v", err)
+		log.Warnf("FileBasedBootEnv: mender_boot_part absent/unparseable and could not derive a rollback target from the running root partition: %v", err)
 		return ""
 	}
-	log.Infof("FileBasedBootEnv: mender_boot_part absent (first-ever OTA on this board) — derived rollback target %s from the running root partition", detected)
+	log.Infof("FileBasedBootEnv: mender_boot_part absent/unparseable (first-ever OTA on this board, or a garbled FAT copy) — derived rollback target %s from the running root partition", detected)
 	return detected
 }
 
@@ -579,11 +596,25 @@ func (f *FileBasedBootEnv) resolveOldPartForRollback(bootDir string) string {
 // working mechanisms for those boards (tryboot, extlinux/sysboot) must never
 // be made to depend on a FAT write they never needed.
 func (f *FileBasedBootEnv) armPendingSwitchRollback(bootDir, oldPart, partNum string) error {
-	if oldPart == "" || oldPart == partNum {
+	if oldPart == partNum {
 		return nil
 	}
-
 	numericBoard := isBootScrNumericBoard(bootDir)
+	if oldPart == "" {
+		// Fable's TASK-S55-004 review: the caller already tried the FAT
+		// file AND the running-root fallback (resolveOldPartForRollback)
+		// before calling this — an empty oldPart at this point means BOTH
+		// failed to produce any rollback target at all. On a numeric board
+		// that is exactly the unrecoverable state this sprint exists to
+		// prevent: a slot switch with nothing recorded to revert to. Fail
+		// closed here too, not just on a later write failure. Every other
+		// board keeps the original silent no-op — there was never a
+		// rollback target for them to lose in the first place.
+		if numericBoard {
+			return errors.New("boot.scr-numeric board: no rollback target available (FAT mender_boot_part absent/unparseable and the running root partition could not be determined) — refusing to proceed with a slot switch that has no recorded fallback")
+		}
+		return nil
+	}
 	if !numericBoard {
 		// TASK-S55-009's RPi4/Jetson regression check greps the journal for
 		// this exact line to prove the fail-closed hardening above never
@@ -637,13 +668,16 @@ func (f *FileBasedBootEnv) armPendingSwitchRollback(bootDir, oldPart, partNum st
 	// budget.
 	//
 	// TASK-S55-004: on a numericBoard, pre-create these counters
-	// UNCONDITIONALLY (not "reset if present") — U-Boot's fatwrite only
-	// ever overwrites an existing file, never creates one, so the
-	// fragment's own first arm on a fresh board depends on this agent
-	// having already created the file at least once. Every other board
-	// keeps the original conservative "reset only if already present"
-	// behavior, since nothing there ever creates or reads these files going
-	// forward.
+	// UNCONDITIONALLY (not "reset if present"). U-Boot's fatwrite CAN
+	// create a file that doesn't exist yet (confirmed during TASK-S55-002's
+	// review — do not repeat the earlier, corrected claim that it can
+	// only overwrite); the fragment's own load-fail default already
+	// handles an absent counter safely either way. Pre-creating it here
+	// is still worthwhile for a deterministic '0' starting value instead
+	// of whatever the fragment's own scratch-register default happens to
+	// be on a board's very first arm. Every other board keeps the
+	// original conservative "reset only if already present" behavior,
+	// since nothing there ever creates or reads these files going forward.
 	var counterWriteErr error
 	for _, name := range []string{"uboot_boot_count", "boot_count"} {
 		counterPath := filepath.Join(bootDir, name)

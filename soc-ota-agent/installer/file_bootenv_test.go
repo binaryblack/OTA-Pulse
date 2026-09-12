@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -417,11 +418,9 @@ func TestTrybootRebootArgument_MatchesFirmwareContract(t *testing.T) {
 
 // --- TASK-S55-004 (TODO-049/S55) -------------------------------------------
 //
-// NOTE: these tests were written and hand-verified against this file's
-// logic, but could NOT be executed on the machine they were authored on —
-// no Go toolchain is installed on that host (bitbake fetches/builds its own
-// during a real image build). Run them for real as part of TASK-S55-007's
-// build, before trusting this comment away: `go test ./installer/...`.
+// Executed with a real `go test ./installer/...` (golang:1.21 docker image,
+// matching go.mod) during authoring, not just hand-verified — see this
+// task's tasks.yaml completion_note for the exact command and result.
 
 func TestIsBootScrNumericBoard(t *testing.T) {
 	write := func(dir string, rel ...string) {
@@ -456,30 +455,78 @@ func TestIsBootScrNumericBoard(t *testing.T) {
 
 func TestResolveOldPartForRollback(t *testing.T) {
 	env, _ := newTempFileBasedBootEnv(t)
+	env.detectFn = func() (string, error) { return "2", nil } // running slot-a
 
 	nonNumeric := t.TempDir() // no boot.scr -> always "", regardless of running root
 	assert.Equal(t, "", env.resolveOldPartForRollback(nonNumeric))
 
 	numeric := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(numeric, "boot.scr"), []byte("x\n"), 0644))
-	// detectCurrentPartitionNumber reads /proc/self/mounts for the real "/"
-	// mount of THIS test process — host-dependent, and not this test's
-	// concern. This call must simply not panic; the real assertion this
-	// test makes is the nonNumeric case above (the gating), which is what
-	// TASK-S55-004 actually changed.
-	assert.NotPanics(t, func() { env.resolveOldPartForRollback(numeric) })
+	assert.Equal(t, "2", env.resolveOldPartForRollback(numeric),
+		"a numeric board's first-ever OTA must derive the rollback target from the running root partition")
 }
 
-func TestArmPendingSwitchRollback_NoOpWhenOldPartEmptyOrUnchanged(t *testing.T) {
+// Fable's TASK-S55-004 review, R1: when detection itself fails (not just
+// when the board is non-numeric), resolveOldPartForRollback must return ""
+// — and armPendingSwitchRollback must then fail closed for that board,
+// exactly as if the FAT file and the running-root fallback had both come up
+// empty. This is the "no rollback target available at all" case.
+func TestResolveOldPartForRollback_DetectionFailureFailsClosedDownstream(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	env.detectFn = func() (string, error) { return "", errors.New("no root mount found") }
+
+	numeric := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(numeric, "boot.scr"), []byte("x\n"), 0644))
+	assert.Equal(t, "", env.resolveOldPartForRollback(numeric))
+
+	err := env.armPendingSwitchRollback(numeric, env.resolveOldPartForRollback(numeric), "3")
+	require.Error(t, err, "a numeric board with NO rollback target at all (FAT absent AND running-root detection failed) must fail closed")
+	assert.Contains(t, err.Error(), "no rollback target available")
+}
+
+// R1's other half: an EXISTING but garbled/empty FAT mender_boot_part must
+// be treated the same as an absent one, not silently accepted as a (wrong)
+// literal value. This is exercised at the syncBootSlotToBootPartitionOnce
+// call site (partitionNumberToSlot(oldPart) == "" triggers the same
+// resolveOldPartForRollback fallback as statErr != nil) — proven here via
+// partitionNumberToSlot directly, since the full mount-discovery path is not
+// sandboxable (see newTempFileBasedBootEnv's own doc comment).
+func TestPartitionNumberToSlot_RejectsGarbledValue(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	assert.Equal(t, "", env.partitionNumberToSlot(""), "an empty/garbled mender_boot_part must not resolve to a real slot")
+	assert.Equal(t, "", env.partitionNumberToSlot("9"), "a value that is neither rootfsPartA nor rootfsPartB must not resolve to a real slot")
+	assert.Equal(t, "a", env.partitionNumberToSlot("2"), "sanity: a genuinely valid partition number must still resolve")
+}
+
+// oldPart == partNum ("nothing is actually switching") is always a true
+// no-op, on every board — there was never a real switch to arm a rollback
+// for.
+func TestArmPendingSwitchRollback_NoOpWhenUnchanged(t *testing.T) {
 	env, _ := newTempFileBasedBootEnv(t)
 	bootDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "boot.scr"), []byte("x\n"), 0644))
 
-	require.NoError(t, env.armPendingSwitchRollback(bootDir, "", "3"))
 	require.NoError(t, env.armPendingSwitchRollback(bootDir, "2", "2"))
 
 	_, err := os.Stat(filepath.Join(bootDir, "mender_boot_part_prev"))
-	assert.True(t, os.IsNotExist(err), "no-op cases must not write a rollback backup")
+	assert.True(t, os.IsNotExist(err), "an unchanged slot must not write a rollback backup")
+}
+
+// oldPart == "" ("no rollback target could be determined at all") behaves
+// DIFFERENTLY per board class since Fable's TASK-S55-004 review (R1): a
+// non-numeric board stays a silent no-op (there was never a rollback target
+// to lose), but a numeric board now fails closed — see
+// TestResolveOldPartForRollback_DetectionFailureFailsClosedDownstream for
+// the fail-closed half of this.
+func TestArmPendingSwitchRollback_EmptyOldPartIsNoOpOnlyOnNonNumericBoard(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	nonNumeric := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(nonNumeric, "config.txt"), []byte("x\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(nonNumeric, "cmdline.txt"), []byte("x\n"), 0644))
+
+	require.NoError(t, env.armPendingSwitchRollback(nonNumeric, "", "3"))
+	_, err := os.Stat(filepath.Join(nonNumeric, "mender_boot_part_prev"))
+	assert.True(t, os.IsNotExist(err))
 }
 
 // The actual TODO-049 fix: on a boot.scr-numeric board, uboot_boot_count and
@@ -544,6 +591,30 @@ func TestArmPendingSwitchRollback_NumericBoardFailsClosedOnWriteFailure(t *testi
 	err := env.armPendingSwitchRollback(bootDir, "2", "3")
 	require.Error(t, err, "a numeric board that cannot write its rollback backup must fail closed")
 	assert.Contains(t, err.Error(), "refusing to proceed")
+}
+
+// Fable's TASK-S55-004 review, R3: only the _prev write failure was covered
+// above — a COUNTER file write failure (uboot_boot_count/boot_count) must
+// fail closed too, independently of whether _prev itself succeeded.
+func TestArmPendingSwitchRollback_NumericBoardFailsClosedOnCounterWriteFailure(t *testing.T) {
+	env, _ := newTempFileBasedBootEnv(t)
+	bootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "boot.scr"), []byte("x\n"), 0644))
+	require.True(t, isBootScrNumericBoard(bootDir), "sanity: this dir must be detected as numeric, or the rest of this test proves nothing")
+
+	// mender_boot_part_prev itself is left writable (a real file path, no
+	// blocker) — only uboot_boot_count is blocked, proving the counter
+	// write failure alone is sufficient to fail closed.
+	blocker := filepath.Join(bootDir, "uboot_boot_count")
+	require.NoError(t, os.MkdirAll(blocker, 0755))
+
+	err := env.armPendingSwitchRollback(bootDir, "2", "3")
+	require.Error(t, err, "a numeric board that cannot write a bootcount-net counter must fail closed, even if the _prev backup itself succeeded")
+	assert.Contains(t, err.Error(), "refusing to proceed")
+
+	prev, readErr := os.ReadFile(filepath.Join(bootDir, "mender_boot_part_prev"))
+	require.NoError(t, readErr, "the _prev backup write itself should have succeeded before the counter write failed")
+	assert.Equal(t, "2\n", string(prev))
 }
 
 // The same failure mode on a non-numeric board must stay best-effort — no
