@@ -188,7 +188,14 @@ func TestClientAuthDepthZeroSelfSignedCert(t *testing.T) {
 	defer ts.Close()
 
 	ac, err := NewApiClient(
-		Config{ServerCert: "testdata/server.zero.depth.self.signed.crt"},
+		// BUG-433: the default TLS transport is now Go's crypto/tls, which does
+		// not reproduce OpenSSL's X509_V_ERR-specific verify strings this test
+		// asserts on. Force the (still fully supported) OpenSSL path via a dummy
+		// SSLEngine so this keeps testing the real OpenSSL cert-chain behavior.
+		Config{
+			ServerCert:  "testdata/server.zero.depth.self.signed.crt",
+			HttpsClient: &HttpsClient{SSLEngine: "bug433-force-openssl-test-path"},
+		},
 	)
 	assert.NotNil(t, ac)
 	assert.NoError(t, err)
@@ -217,7 +224,14 @@ func TestClientAuthEndEntityKeyTooSmall(t *testing.T) {
 	defer ts.Close()
 
 	ac, err := NewApiClient(
-		Config{ServerCert: "testdata/server.crt"},
+		// BUG-433: the default TLS transport is now Go's crypto/tls, which does
+		// not reproduce OpenSSL's X509_V_ERR-specific verify strings this test
+		// asserts on. Force the (still fully supported) OpenSSL path via a dummy
+		// SSLEngine so this keeps testing the real OpenSSL cert-chain behavior.
+		Config{
+			ServerCert:  "testdata/server.crt",
+			HttpsClient: &HttpsClient{SSLEngine: "bug433-force-openssl-test-path"},
+		},
 	)
 	assert.NotNil(t, ac)
 	assert.NoError(t, err)
@@ -279,7 +293,14 @@ func TestClientAuthHostValidationError(t *testing.T) {
 	defer ts.Close()
 
 	ac, err := NewApiClient(
-		Config{ServerCert: "testdata/server.unknown-authority.crt"},
+		// BUG-433: the default TLS transport is now Go's crypto/tls, which does
+		// not reproduce OpenSSL's X509_V_ERR-specific verify strings this test
+		// asserts on. Force the (still fully supported) OpenSSL path via a dummy
+		// SSLEngine so this keeps testing the real OpenSSL cert-chain behavior.
+		Config{
+			ServerCert:  "testdata/server.unknown-authority.crt",
+			HttpsClient: &HttpsClient{SSLEngine: "bug433-force-openssl-test-path"},
+		},
 	)
 	assert.NotNil(t, ac)
 	assert.NoError(t, err)
@@ -309,7 +330,14 @@ func TestClientAuthNotValidCertificate(t *testing.T) {
 	defer ts.Close()
 
 	ac, err := NewApiClient(
-		Config{ServerCert: "testdata/server.ca.key.too.small.crt"},
+		// BUG-433: the default TLS transport is now Go's crypto/tls, which does
+		// not reproduce OpenSSL's X509_V_ERR-specific verify strings this test
+		// asserts on. Force the (still fully supported) OpenSSL path via a dummy
+		// SSLEngine so this keeps testing the real OpenSSL cert-chain behavior.
+		Config{
+			ServerCert:  "testdata/server.ca.key.too.small.crt",
+			HttpsClient: &HttpsClient{SSLEngine: "bug433-force-openssl-test-path"},
+		},
 	)
 	assert.NotNil(t, ac)
 	assert.NoError(t, err)

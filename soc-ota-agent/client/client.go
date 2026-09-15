@@ -16,6 +16,8 @@ package client
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -594,7 +596,98 @@ func newOpenSSLCtx(conf Config) (*openssl.Ctx, error) {
 	return ctx, nil
 }
 
+// useOpenSSLTLS reports whether conf requires the cgo OpenSSL TLS binding.
+// The only reason this binding still exists (BUG-433) is HSM/PKCS#11-backed
+// private keys, which Go's crypto/tls cannot load: a "pkcs11:" URI Key or an
+// explicit SSLEngine. Every other configuration uses Go's native crypto/tls
+// stack, which does not exhibit BUG-433's Orange-Pi record-layer corruption.
+func useOpenSSLTLS(conf Config) bool {
+	if conf.HttpsClient == nil {
+		return false
+	}
+	return strings.HasPrefix(conf.HttpsClient.Key, pkcs11URIPrefix) ||
+		conf.HttpsClient.SSLEngine != ""
+}
+
+// selectTLSStack logs and returns which TLS stack a given Config selects.
+// The exact "TLS stack: go" / "TLS stack: openssl" wording is relied upon by
+// BUG-433's hardware-validation step (grepped from the device journal), so
+// keep it stable if this is ever touched again.
+func selectTLSStack(conf Config) (useOpenSSL bool) {
+	useOpenSSL = useOpenSSLTLS(conf)
+	if useOpenSSL {
+		log.Info("TLS stack: openssl (pkcs11/SSLEngine key configured)")
+	} else {
+		log.Info("TLS stack: go")
+	}
+	return useOpenSSL
+}
+
+// buildGoTLSConfig builds a *tls.Config for the Go-native crypto/tls
+// transport (BUG-433). RootCAs starts from the system pool and has
+// conf.ServerCert appended when set; a ServerCert that is set but cannot be
+// read or parsed is logged and otherwise ignored (system-only trust is used
+// instead), matching the OpenSSL path's loadServerTrust/LoadVerifyLocations
+// posture exactly — neither path treats a bad ServerCert as fatal to client
+// construction; verification still fails later, at connection time, if
+// system trust alone isn't enough. Client certificate/key are loaded from
+// conf.HttpsClient when both are given (never pkcs11/SSLEngine — those are
+// routed to the OpenSSL path by selectTLSStack before this is ever called);
+// a bad client cert/key pair IS a hard error here, same as the OpenSSL
+// path's loadClientTrust.
+func buildGoTLSConfig(conf Config) (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: conf.NoVerify,
+	}
+
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if conf.ServerCert != "" {
+		// Same posture as the OpenSSL path's loadServerTrust/LoadVerifyLocations:
+		// a ServerCert that can't be read or parsed is logged, never returned as
+		// a hard error here — the caller ends up with system-only trust (which,
+		// same as today, will simply fail verification later at connection time
+		// if that isn't enough) rather than NewApiClient/NewWebsocketDialer
+		// refusing to construct a client at all.
+		certBytes, err := ioutil.ReadFile(conf.ServerCert)
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.Warnf(errMissingServerCertF, conf.ServerCert)
+			} else {
+				log.Errorf("Failed to read the server certificate file %q. Err %s",
+					conf.ServerCert, err.Error())
+			}
+		} else if ok := pool.AppendCertsFromPEM(certBytes); !ok {
+			log.Errorf("No PEM certificate found in the server certificate file %q",
+				conf.ServerCert)
+		}
+	}
+	tlsConfig.RootCAs = pool
+
+	if conf.HttpsClient != nil &&
+		conf.HttpsClient.Certificate != "" && conf.HttpsClient.Key != "" {
+		cert, err := tls.LoadX509KeyPair(conf.HttpsClient.Certificate, conf.HttpsClient.Key)
+		if err != nil {
+			return nil, errors.Wrap(err,
+				"Failed to load the HttpsClient certificate/key pair")
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsConfig, nil
+}
+
 func newHttpsClient(conf Config) (*http.Client, error) {
+	if selectTLSStack(conf) {
+		return newHttpsClientOpenSSL(conf)
+	}
+	return newHttpsClientGo(conf)
+}
+
+func newHttpsClientOpenSSL(conf Config) (*http.Client, error) {
 	ctx, err := newOpenSSLCtx(conf)
 	if err != nil {
 		return nil, err
@@ -616,6 +709,35 @@ func newHttpsClient(conf Config) (*http.Client, error) {
 
 	client := newHttpClient()
 	client.Transport = &transport
+	return client, nil
+}
+
+// newHttpsClientGo is the BUG-433 fix: an http.Client backed by Go's native
+// crypto/tls instead of the cgo github.com/mendersoftware/openssl binding.
+// HTTP/1.1 only (ForceAttemptHTTP2 false) to keep the existing streaming
+// download + Range-resume semantics (client/update_resumer.go) unchanged.
+func newHttpsClientGo(conf Config) (*http.Client, error) {
+	tlsConfig, err := buildGoTLSConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+
+	disableKeepAlive := false
+	idleConnTimeoutSeconds := 0
+	if conf.Connectivity != nil {
+		disableKeepAlive = conf.Connectivity.DisableKeepAlive
+		idleConnTimeoutSeconds = conf.Connectivity.IdleConnTimeoutSeconds
+	}
+	transport := &http.Transport{
+		Proxy:             http.ProxyFromEnvironment,
+		DisableKeepAlives: disableKeepAlive,
+		IdleConnTimeout:   time.Duration(idleConnTimeoutSeconds) * time.Second,
+		TLSClientConfig:   tlsConfig,
+		ForceAttemptHTTP2: false,
+	}
+
+	client := newHttpClient()
+	client.Transport = transport
 	return client, nil
 }
 
@@ -755,6 +877,13 @@ func unmarshalErrorMessage(r io.Reader) string {
 }
 
 func newWebsocketDialerTLS(conf Config) (*websocket.Dialer, error) {
+	if selectTLSStack(conf) {
+		return newWebsocketDialerTLSOpenSSL(conf)
+	}
+	return newWebsocketDialerTLSGo(conf)
+}
+
+func newWebsocketDialerTLSOpenSSL(conf Config) (*websocket.Dialer, error) {
 	ctx, err := newOpenSSLCtx(conf)
 	if err != nil {
 		return nil, err
@@ -764,6 +893,23 @@ func newWebsocketDialerTLS(conf Config) (*websocket.Dialer, error) {
 		NetDialTLSContext: func(_ context.Context, network string, addr string) (net.Conn, error) {
 			return dialOpenSSL(ctx, &conf, network, addr)
 		},
+	}
+
+	return &dialer, nil
+}
+
+// newWebsocketDialerTLSGo is the BUG-433 fix's websocket counterpart: builds
+// the dialer's TLSClientConfig from Go's native crypto/tls instead of the
+// cgo OpenSSL binding, leaving the dialer's own (already HTTP/1.1) dial/
+// handshake path untouched.
+func newWebsocketDialerTLSGo(conf Config) (*websocket.Dialer, error) {
+	tlsConfig, err := buildGoTLSConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := websocket.Dialer{
+		TLSClientConfig: tlsConfig,
 	}
 
 	return &dialer, nil
