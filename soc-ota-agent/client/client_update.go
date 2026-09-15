@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -34,6 +35,52 @@ import (
 const (
 	minimumImageSize int64 = 4096 //kB
 )
+
+// RetryAfterError (BUG-442) wraps an *APIError from a 503 or 429 response
+// to the update-fetch request that included a Retry-After header, so
+// app/state.go's fetchStoreRetryState can honor the server's own back-off
+// hint (e.g. TASK-S56-004's OTA_MAX_CONCURRENT_DOWNLOADS cap answering 503
+// download_busy) instead of falling through to the generic exponential
+// poll/backoff schedule. Embeds *APIError (rather than just the plain
+// error) and defines its own Unwrap so errors.As(err, &apiErr)/errors.Is
+// keep working exactly as they did before this type existed — one Unwrap
+// reaches the *APIError, a second reaches whatever it itself wraps.
+type RetryAfterError struct {
+	*APIError
+	Status int
+	After  time.Duration
+}
+
+func (e *RetryAfterError) Unwrap() error {
+	return e.APIError
+}
+
+func (e *RetryAfterError) Error() string {
+	return fmt.Sprintf("%s (Retry-After: %s)", e.APIError.Error(), e.After)
+}
+
+// parseRetryAfter parses an HTTP Retry-After header value, per RFC 9110
+// §10.2.3: either delta-seconds (an integer) or an HTTP-date. Returns 0 for
+// an absent, unparseable, negative, or already-past value — callers treat 0
+// as "no hint given, fall back to the normal schedule".
+func parseRetryAfter(header string) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(header); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
 
 type RequestProcessingFunc func(response *http.Response) (interface{}, error)
 
@@ -193,10 +240,21 @@ func (u *UpdateClient) FetchUpdate(
 	log.Debugf("Received fetch update response %v+", r)
 
 	if r.StatusCode != http.StatusOK {
-		err = NewAPIError(errors.New("error receiving scheduled update information"), r)
+		apiErr := NewAPIError(errors.New("error receiving scheduled update information"), r)
+		// BUG-442: a 503 (e.g. TASK-S56-004's OTA_MAX_CONCURRENT_DOWNLOADS
+		// cap answering "download_busy") or 429 may carry a Retry-After
+		// hint. Read it before closing the body (NewAPIError already
+		// consumed the body above; the header is unaffected either way).
+		if r.StatusCode == http.StatusServiceUnavailable || r.StatusCode == http.StatusTooManyRequests {
+			after := parseRetryAfter(r.Header.Get("Retry-After"))
+			r.Body.Close()
+			log.Errorf("Error fetching scheduled update info: code (%d), Retry-After: %s",
+				r.StatusCode, after)
+			return nil, -1, &RetryAfterError{APIError: apiErr, Status: r.StatusCode, After: after}
+		}
 		r.Body.Close()
 		log.Errorf("Error fetching scheduled update info: code (%d)", r.StatusCode)
-		return nil, -1, err
+		return nil, -1, apiErr
 	}
 
 	contentLength := r.ContentLength

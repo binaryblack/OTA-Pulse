@@ -208,11 +208,17 @@ func (s *stateTestController) HandleBootstrapArtifact(_ store.Store) error {
 
 type waitStateTest struct {
 	baseState
+
+	// lastWait records the wait duration passed to the most recent Wait()
+	// call, so tests can assert on it (e.g. BUG-442's Retry-After honoring)
+	// without a real timer/channel wait actually elapsing.
+	lastWait time.Duration
 }
 
 func (c *waitStateTest) Wait(next, same State, wait time.Duration, wake chan bool) (State, bool) {
 	log.Debugf("Fake waiting for %f seconds, going from state %s to state %s",
 		wait.Seconds(), same.Id(), next.Id())
+	c.lastWait = wait
 	return next, false
 }
 
@@ -854,7 +860,7 @@ func TestStateUpdateFetchRetry(t *testing.T) {
 	}
 
 	// Final attempt should fail completely.
-	s.(*fetchStoreRetryState).WaitState = &waitStateTest{baseState{
+	s.(*fetchStoreRetryState).WaitState = &waitStateTest{baseState: baseState{
 		id: datastore.MenderStateCheckWait,
 	}}
 

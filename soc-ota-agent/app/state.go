@@ -1157,6 +1157,31 @@ func (fir *fetchStoreRetryState) Cancel() bool {
 func (fir *fetchStoreRetryState) Handle(ctx *StateContext, c Controller) (State, bool) {
 	log.Debugf("Handle fetch install retry state")
 
+	// BUG-442: if the fetch failed because the server itself asked us to
+	// come back later (e.g. TASK-S56-004's OTA_MAX_CONCURRENT_DOWNLOADS cap
+	// answering 503 download_busy with a Retry-After header), honor that
+	// hint directly instead of falling through to the generic exponential
+	// poll/backoff schedule below, and do NOT count this attempt against
+	// the retry budget (ctx.fetchInstallAttempts stays untouched) — the
+	// server explicitly asked us to come back, this isn't a failure to
+	// retry past.
+	var retryAfterErr *client.RetryAfterError
+	if errors.As(fir.err, &retryAfterErr) && retryAfterErr.After > 0 {
+		wait := retryAfterErr.After
+		if maxWait := c.GetUpdatePollInterval(); wait > maxWait {
+			wait = maxWait
+		}
+		if wait < time.Second {
+			wait = time.Second
+		}
+		log.Infof(
+			"Server requested Retry-After %s (bounded to %s); "+
+				"retrying fetch without counting against the retry budget",
+			retryAfterErr.After, wait,
+		)
+		return fir.Wait(NewUpdateFetchState(&fir.update), fir, wait, ctx.WakeupChan)
+	}
+
 	intvl, err := client.GetExponentialBackoffTime(
 		ctx.fetchInstallAttempts,
 		c.GetUpdatePollInterval(),
