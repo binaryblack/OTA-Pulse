@@ -16,6 +16,9 @@ package client
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -667,6 +670,26 @@ func buildGoTLSConfig(conf Config) (*tls.Config, error) {
 	}
 	tlsConfig.RootCAs = pool
 
+	// GAP-SEC-F4 parity: the OpenSSL path enforces a minimum key strength on
+	// every certificate in the chain via SSL_CTX's security level (see
+	// newOpenSSLCtx's modernCipherList comment); Go's crypto/tls has no
+	// equivalent built-in mechanism, so without this hook the Go stack (now
+	// the default for nearly every device, per BUG-433) would silently drop
+	// that check. VerifyPeerCertificate runs AFTER Go's own default chain
+	// verification already succeeded (trust, expiry, hostname) — it only
+	// ever sees chains Go already anchored to RootCAs, so a self-signed leaf
+	// reaching this hook is only possible if that exact leaf is itself
+	// present in RootCAs (Go's verifier rejects any self-signed cert that
+	// isn't its own trust anchor with "certificate signed by unknown
+	// authority" before this hook is ever called) — nothing extra to check
+	// for that here. Skipped entirely when NoVerify is set, mirroring the
+	// OpenSSL path exactly: dialOpenSSL returns immediately on conf.NoVerify
+	// without ever calling conn.VerifyResult(), i.e. OpenSSL performs no
+	// certificate checks of any kind (not just hostname) once NoVerify is on.
+	if !conf.NoVerify {
+		tlsConfig.VerifyPeerCertificate = verifyGapSecF4KeyStrength
+	}
+
 	if conf.HttpsClient != nil &&
 		conf.HttpsClient.Certificate != "" && conf.HttpsClient.Key != "" {
 		cert, err := tls.LoadX509KeyPair(conf.HttpsClient.Certificate, conf.HttpsClient.Key)
@@ -678,6 +701,60 @@ func buildGoTLSConfig(conf Config) (*tls.Config, error) {
 	}
 
 	return tlsConfig, nil
+}
+
+// minRSAKeyBits and minECDSACurveBits are GAP-SEC-F4's key-strength floor,
+// ported from the OpenSSL path's security-level-2 intent (reject RSA/DSA
+// keys under 2048 bits and elliptic curves under 256 bits). Ed25519 keys are
+// always allowed: they are fixed at 256 bits and considered strong at any
+// occurrence, so there is no weak variant to reject.
+const (
+	minRSAKeyBits     = 2048
+	minECDSACurveBits = 256
+)
+
+// verifyGapSecF4KeyStrength is buildGoTLSConfig's tls.Config.VerifyPeerCertificate
+// hook (see the comment at its call site for why it's needed and why it's
+// safe to skip the self-signed-leaf case). It runs once per completed
+// handshake, over every already-trust-verified chain, and rejects any
+// certificate anywhere in those chains — leaf or intermediate/root — whose
+// key falls below the GAP-SEC-F4 floor.
+func verifyGapSecF4KeyStrength(_ [][]byte, verifiedChains [][]*x509.Certificate) error {
+	for _, chain := range verifiedChains {
+		for _, cert := range chain {
+			if err := checkGapSecF4KeyStrength(cert); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func checkGapSecF4KeyStrength(cert *x509.Certificate) error {
+	switch pub := cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if bits := pub.N.BitLen(); bits < minRSAKeyBits {
+			return errors.Errorf(
+				"GAP-SEC-F4: certificate %q has an RSA key of %d bits, "+
+					"below the required %d-bit minimum",
+				cert.Subject, bits, minRSAKeyBits)
+		}
+	case *ecdsa.PublicKey:
+		if bits := pub.Curve.Params().BitSize; bits < minECDSACurveBits {
+			return errors.Errorf(
+				"GAP-SEC-F4: certificate %q has an ECDSA key on a %d-bit "+
+					"curve, below the required %d-bit (P-256) minimum",
+				cert.Subject, bits, minECDSACurveBits)
+		}
+	case ed25519.PublicKey:
+		// Always strong enough; nothing to check.
+	default:
+		return errors.Errorf(
+			"GAP-SEC-F4: certificate %q uses an unsupported public key "+
+				"algorithm %T (only RSA, ECDSA and Ed25519 are accepted)",
+			cert.Subject, pub)
+	}
+	return nil
 }
 
 func newHttpsClient(conf Config) (*http.Client, error) {

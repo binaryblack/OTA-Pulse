@@ -212,26 +212,28 @@ func TestClientAuthDepthZeroSelfSignedCert(t *testing.T) {
 	assert.Nil(t, rsp)
 }
 
-// X509_V_ERR_EE_KEY_TOO_SMALL
+// GAP-SEC-F4 on the Go stack (BUG-433): a weak end-entity key must still be
+// rejected, now via buildGoTLSConfig's VerifyPeerCertificate hook instead of
+// OpenSSL's X509_V_ERR_EE_KEY_TOO_SMALL. Uses a freshly generated, self-
+// signed weak RSA cert (its own trust anchor) rather than the old
+// localhostCertShortEEKey/testdata/server.crt fixture pairing: that pairing
+// shares only a Subject DN, not a key, so under Go's crypto/tls it fails
+// Go's OWN default chain verification first ("signed by unknown authority")
+// and never reaches the hook at all (confirmed empirically) — it remains a
+// valid OpenSSL-path fixture (see TestClientAuthDepthZeroSelfSignedCert
+// and TestClientAuthNotValidCertificate below) but can't exercise this hook.
 func TestClientAuthEndEntityKeyTooSmall(t *testing.T) {
-	if openssl.GetSecurityLevelGlobal() < 2 {
-		t.Skip("skipping TestClientAuthEndEntityKeyTooSmall - security level < 2")
-	}
+	const weakRSABits = 1024
+	certPEM, keyPEM, certFile := newEphemeralRSAServerCert(t, weakRSABits)
+
 	ts := startTestHTTPS(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
-		localhostCertShortEEKey,
-		localhostKeyShortEEKey)
+		certPEM,
+		keyPEM)
 	defer ts.Close()
 
 	ac, err := NewApiClient(
-		// BUG-433: the default TLS transport is now Go's crypto/tls, which does
-		// not reproduce OpenSSL's X509_V_ERR-specific verify strings this test
-		// asserts on. Force the (still fully supported) OpenSSL path via a dummy
-		// SSLEngine so this keeps testing the real OpenSSL cert-chain behavior.
-		Config{
-			ServerCert:  "testdata/server.crt",
-			HttpsClient: &HttpsClient{SSLEngine: "bug433-force-openssl-test-path"},
-		},
+		Config{ServerCert: certFile},
 	)
 	assert.NotNil(t, ac)
 	assert.NoError(t, err)
@@ -244,7 +246,10 @@ func TestClientAuthEndEntityKeyTooSmall(t *testing.T) {
 	}
 	rsp, err := client.Request(ac, ts.URL, msger)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "end entity key too short")
+	if err != nil {
+		assert.Contains(t, err.Error(), "GAP-SEC-F4")
+		assert.Contains(t, err.Error(), fmt.Sprintf("%d bits", weakRSABits))
+	}
 	assert.Nil(t, rsp)
 }
 

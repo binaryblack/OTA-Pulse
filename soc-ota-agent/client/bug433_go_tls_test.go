@@ -22,8 +22,10 @@ package client
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -32,6 +34,7 @@ import (
 	"io"
 	"io/ioutil"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -211,6 +214,77 @@ func TestBuildGoTLSConfigClientCertificateBadKey(t *testing.T) {
 	require.Error(t, err)
 }
 
+// --- GAP-SEC-F4 key-strength hook (VerifyPeerCertificate) ---
+
+func TestBuildGoTLSConfigInstallsVerifyPeerCertificateByDefault(t *testing.T) {
+	tlsConfig, err := buildGoTLSConfig(Config{})
+	require.NoError(t, err)
+	require.NotNil(t, tlsConfig.VerifyPeerCertificate,
+		"the GAP-SEC-F4 key-strength hook must be installed by default")
+}
+
+func TestBuildGoTLSConfigOmitsVerifyPeerCertificateUnderNoVerify(t *testing.T) {
+	// Mirrors the OpenSSL path exactly: dialOpenSSL returns immediately on
+	// conf.NoVerify without ever calling conn.VerifyResult(), performing NO
+	// certificate checks of any kind once NoVerify is set — not just
+	// hostname. The Go path's hook must be skipped the same way.
+	tlsConfig, err := buildGoTLSConfig(Config{NoVerify: true})
+	require.NoError(t, err)
+	require.Nil(t, tlsConfig.VerifyPeerCertificate)
+}
+
+func TestCheckGapSecF4KeyStrength(t *testing.T) {
+	weakRSAKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+	okRSAKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	weakECDSAKey, err := ecdsa.GenerateKey(elliptic.P224(), rand.Reader)
+	require.NoError(t, err)
+	okECDSAKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ed25519Pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		pub     interface{}
+		wantErr bool
+	}{
+		"RSA 1024 bits rejected":  {pub: &weakRSAKey.PublicKey, wantErr: true},
+		"RSA 2048 bits accepted":  {pub: &okRSAKey.PublicKey, wantErr: false},
+		"ECDSA P-224 rejected":    {pub: &weakECDSAKey.PublicKey, wantErr: true},
+		"ECDSA P-256 accepted":    {pub: &okECDSAKey.PublicKey, wantErr: false},
+		"Ed25519 always accepted": {pub: ed25519Pub, wantErr: false},
+	}
+
+	for name, tc := range tests {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			cert := &x509.Certificate{
+				Subject:   pkix.Name{CommonName: name},
+				PublicKey: tc.pub,
+			}
+			err := checkGapSecF4KeyStrength(cert)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "GAP-SEC-F4")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCheckGapSecF4KeyStrengthUnsupportedAlgorithm(t *testing.T) {
+	cert := &x509.Certificate{
+		Subject:   pkix.Name{CommonName: "unsupported-key-algo"},
+		PublicKey: "not-a-real-key", // no x509 cert ever has this, but proves the default case
+	}
+	err := checkGapSecF4KeyStrength(cert)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "GAP-SEC-F4")
+	require.Contains(t, err.Error(), "unsupported public key algorithm")
+}
+
 // --- Real streaming download + mid-stream Range resume over the Go stack ---
 
 const bug433BigDownloadSize = 32 * 1024 * 1024 // 32 MiB, per fix_design item 2
@@ -302,6 +376,48 @@ func writeEphemeralCertKeyPair(t *testing.T) (certFile, keyFile string) {
 	require.NoError(t, keyOut.Close())
 
 	return certFile, keyFile
+}
+
+// newEphemeralRSAServerCert generates a throw-away SELF-SIGNED RSA server
+// certificate of the given key size, valid for 127.0.0.1/::1, and returns
+// its PEM cert/key bytes (for feeding directly into startTestHTTPS) plus the
+// cert written out as a file (for use as Config.ServerCert — this cert is
+// its own trust anchor). Used by the GAP-SEC-F4 key-strength hook tests:
+// unlike client/https_server_test.go's localhostCertShortEEKey (whose
+// Subject DN matches testdata/server.crt but whose KEY does not — Go's own
+// default chain verification rejects that pairing outright, with "signed by
+// unknown authority", before ever reaching the VerifyPeerCertificate hook;
+// confirmed empirically), a cert that IS its own configured root always
+// clears Go's default verification and reaches the hook, so weak-vs-strong
+// key strength is the only thing left for the hook to reject or accept on.
+func newEphemeralRSAServerCert(t *testing.T, bits int) (certPEM, keyPEM []byte, certFile string) {
+	t.Helper()
+
+	priv, err := rsa.GenerateKey(rand.Reader, bits)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "bug433-weak-key-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyPEM = pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	})
+
+	certFile = filepath.Join(t.TempDir(), "weak-server-cert.pem")
+	require.NoError(t, ioutil.WriteFile(certFile, certPEM, 0o600))
+
+	return certPEM, keyPEM, certFile
 }
 
 // TestGoTLSBigDownloadWithMidStreamRangeResume exercises fix_design item 2
