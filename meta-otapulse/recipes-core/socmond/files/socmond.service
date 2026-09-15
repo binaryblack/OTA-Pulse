@@ -1,8 +1,12 @@
 [Unit]
 Description=SoC Monitoring Daemon
 Documentation=https://github.com/example/soc-monitoring
-After=network-online.target local-fs.target
-Wants=network-online.target
+# BUG-441: see soc-ota-agent.service's comment — this daemon also speaks TLS
+# to the OTA server, so it shares the same cold-clock/cert-validation race on
+# any RTC-less/dead-RTC board. Wants=, never Requires=: a timed-out wait must
+# never block this unit from starting.
+After=network-online.target local-fs.target time-sync.target
+Wants=network-online.target systemd-time-wait-sync.service
 
 [Service]
 Type=notify

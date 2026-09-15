@@ -14,8 +14,18 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 # creates /data — by the time systemd would start this agent, data.mount has
 # already been asked to exist, matching the same Requires=data.mount ordering
 # already used by the socMonitoring/support copies of this file.
-After=network-online.target systemd-resolved.service otapulse-partition-setup.service data.mount
-Wants=network-online.target
+#
+# BUG-441 (fleet-wide generalisation of BUG-432/BUG-435): this agent's very
+# first TLS call to the OTA server can race a cold/wrong boot clock on any
+# board with no RTC or a dead RTC battery, failing certificate validation
+# (X509_V_ERR_CERT_NOT_YET_VALID) and, on a post-commit status report,
+# triggering a spurious rollback of an otherwise successful update.
+# time-sync.target is reached once systemd-time-wait-sync.service (enabled
+# fleet-wide by the otapulse-timesync recipe, bounded to 120s) confirms the
+# clock is NTP-synced or its bound is hit. Wants=, never Requires=: a
+# timed-out wait must never block this unit from starting.
+After=network-online.target systemd-resolved.service otapulse-partition-setup.service data.mount time-sync.target
+Wants=network-online.target systemd-time-wait-sync.service
 Requires=otapulse-partition-setup.service data.mount
 Conflicts=mender.service mender-client.service
 

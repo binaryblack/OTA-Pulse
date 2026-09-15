@@ -2,8 +2,14 @@
 Description=OTAPulse Auto-Provisioning
 Documentation=https://github.com/binaryblack/OTA-Pulse
 # Run after network is available, partitions are set up, and machine-id is restored
-After=network-online.target otapulse-partition-setup.service otapulse-machine-id.service
-Wants=network-online.target
+# BUG-441: see soc-ota-agent.service's comment — provisioning also speaks TLS
+# to the OTA server on every boot, so it shares the same cold-clock/cert-
+# validation race on any RTC-less/dead-RTC board. Wants=, never Requires=: a
+# timed-out wait must never block this unit from starting. soc-ota-tunneld
+# inherits this ordering transitively via its own After=otapulse-auto-
+# provision.service.
+After=network-online.target otapulse-partition-setup.service otapulse-machine-id.service time-sync.target
+Wants=network-online.target systemd-time-wait-sync.service
 # NOTE: this unit intentionally has NO ConditionPathExists on
 # /data/otapulse/.auto-provisioned. otapulse-auto-provision must run on
 # EVERY boot (including after an OTA) so it can re-align the Remote SSH
