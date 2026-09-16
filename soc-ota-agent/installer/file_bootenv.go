@@ -72,6 +72,32 @@ type FileBasedBootEnv struct {
 	// exists as a field only so unit tests can inject a fake for
 	// ReconcileToBootedSlot.
 	detectFn func() (string, error)
+
+	// bootDeviceCandidates and bootMountPoint are test-only seams for
+	// syncBootSlotToBootPartitionOnce (BUG-446): left nil/"" in production,
+	// which preserves the real hardcoded candidate-device list and the real
+	// "/mnt/boot" mount point exactly as before. Unit tests running on a
+	// developer workstation (as opposed to an ephemeral CI container) can
+	// have real block devices at the hardcoded candidate paths (e.g.
+	// /dev/sda1) that are ALSO already mounted elsewhere on that host (e.g.
+	// as a secondary data disk) — deviceAlreadyMounted then filters them
+	// out exactly like a genuine Jetson/Tegra "no boot partition" board
+	// would, non-deterministically taking the BUG-239 soft-no-op path
+	// instead of the intended "candidate exists, mount fails" hard-failure
+	// path the file_bootenv_test.go fixtures rely on. Overriding these two
+	// fields lets a test point at a guaranteed-non-existent-in-/proc/mounts
+	// candidate file and a temp-dir-scoped mount point instead, so the test
+	// never touches real host paths like /mnt/boot.
+	bootDeviceCandidates []string
+	bootMountPoint       string
+
+	// bootSyncMaxAttempts (BUG-446) overrides syncBootSlotToBootPartition's
+	// retry count when non-zero; production leaves it 0, which keeps the
+	// real BUG-361 retry-with-backoff behavior (4 attempts, 2s/4s/6s/8s
+	// sleeps). Tests that need a deterministic real sync FAILURE (as
+	// opposed to the BUG-239 soft no-op) set it to 1 so a single guaranteed
+	// failure doesn't also cost ~20s of real sleep per WriteEnv call.
+	bootSyncMaxAttempts int
 }
 
 // NewFileBasedBootEnv creates a new file-based boot environment handler.
@@ -326,7 +352,10 @@ func deviceAlreadyMounted(dev string, mountLines []string) bool {
 // a transient card hiccup while still failing loudly (and safely) if the boot
 // partition is genuinely gone.
 func (f *FileBasedBootEnv) syncBootSlotToBootPartition(partNum string) error {
-	const maxAttempts = 4
+	maxAttempts := 4
+	if f.bootSyncMaxAttempts != 0 {
+		maxAttempts = f.bootSyncMaxAttempts
+	}
 	retryDelay := 2 * time.Second
 
 	var lastErr error
@@ -392,14 +421,19 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error
 	// If boot partition not mounted, try to mount it
 	if bootFile == "" {
 		log.Debug("FileBasedBootEnv: Boot partition not mounted, attempting to mount")
-		// Common boot partition devices across platforms
-		bootDevices := []string{
-			"/dev/disk/by-partlabel/boot", // GPT label (OTAPulse standard)
-			"/dev/disk/by-label/boot",     // Filesystem label
-			"/dev/disk/by-label/BOOT",     // Filesystem label (uppercase)
-			"/dev/mmcblk1p1",              // eMMC (i.MX8, etc.)
-			"/dev/mmcblk0p1",              // SD card
-			"/dev/sda1",                   // USB/SATA
+		// Common boot partition devices across platforms. bootDeviceCandidates
+		// (BUG-446) lets tests override this list; nil in production, which
+		// is exactly this hardcoded default.
+		bootDevices := f.bootDeviceCandidates
+		if bootDevices == nil {
+			bootDevices = []string{
+				"/dev/disk/by-partlabel/boot", // GPT label (OTAPulse standard)
+				"/dev/disk/by-label/boot",     // Filesystem label
+				"/dev/disk/by-label/BOOT",     // Filesystem label (uppercase)
+				"/dev/mmcblk1p1",              // eMMC (i.MX8, etc.)
+				"/dev/mmcblk0p1",              // SD card
+				"/dev/sda1",                   // USB/SATA
+			}
 		}
 		triedCandidate := false
 		for _, dev := range bootDevices {
@@ -423,7 +457,10 @@ func (f *FileBasedBootEnv) syncBootSlotToBootPartitionOnce(partNum string) error
 				continue
 			}
 			triedCandidate = true
-			mountPoint := "/mnt/boot"
+			mountPoint := f.bootMountPoint
+			if mountPoint == "" {
+				mountPoint = "/mnt/boot"
+			}
 			if err := os.MkdirAll(mountPoint, 0755); err != nil {
 				log.Warnf("FileBasedBootEnv: Failed to create mount point: %v", err)
 				continue

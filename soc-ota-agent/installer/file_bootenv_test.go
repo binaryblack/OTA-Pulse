@@ -44,14 +44,27 @@ func (r *recordingCommander) Command(name string, arg ...string) *system.Cmd {
 }
 
 // newTempFileBasedBootEnv builds a FileBasedBootEnv whose state files all
-// live under a fresh temp directory, backed by a recordingCommander. The boot
-// partition mount points syncBootSlotToBootPartition probes ("/mnt/boot",
-// "/boot/firmware", "/boot") and the boot devices it tries to mount
-// ("/dev/mmcblk1p1", etc.) are hardcoded in file_bootenv.go and do not exist
-// in the test sandbox, so syncBootSlotToBootPartition — and therefore
-// writeMenderBootPart — reliably fails here. That is exactly the "failing FAT
-// sync" scenario GAP-OTA-004 hardened WriteEnv against, and it lets us prove
-// ordering without needing to fake the filesystem mount itself.
+// live under a fresh temp directory, backed by a recordingCommander. The real
+// boot partition mount points syncBootSlotToBootPartition probes ("/mnt/boot",
+// "/boot/firmware", "/boot") and the real hardcoded candidate boot devices
+// ("/dev/mmcblk1p1", "/dev/sda1", etc.) are assumed absent in a clean CI
+// sandbox, which would make syncBootSlotToBootPartition reliably fail here
+// without any extra help. BUG-446: that assumption does NOT hold on every
+// machine — a developer workstation can have a real, ALREADY-MOUNTED
+// /dev/sda1 (e.g. a secondary data disk), which deviceAlreadyMounted then
+// filters out exactly like BUG-239's genuine "no boot partition on this
+// board" case, non-deterministically taking the soft no-op path instead of
+// the "candidate exists, mount fails" hard failure these tests need. To stay
+// deterministic on any host, we point FileBasedBootEnv's test-only
+// bootDeviceCandidates/bootMountPoint seams (see file_bootenv.go) at a
+// synthetic candidate file and a mount point that both live under this test's
+// own temp dir — guaranteed to exist (os.Stat succeeds), guaranteed to never
+// appear in the host's real /proc/self/mounts (so it's never treated as
+// "already mounted"), and guaranteed to never touch a real system path like
+// the production default of /mnt/boot. The recordingCommander then still
+// fails the resulting "mount" call harmlessly, reproducing the intended
+// "failing FAT sync" scenario GAP-OTA-004 hardened WriteEnv against, without
+// needing to fake the filesystem mount itself.
 func newTempFileBasedBootEnv(t *testing.T) (*FileBasedBootEnv, *recordingCommander) {
 	t.Helper()
 	dir := t.TempDir()
@@ -61,6 +74,16 @@ func newTempFileBasedBootEnv(t *testing.T) (*FileBasedBootEnv, *recordingCommand
 	env.bootCountFile = filepath.Join(dir, "boot_count")
 	env.upgradeAvailFile = filepath.Join(dir, "upgrade_available")
 	env.menderBootPartFile = filepath.Join(dir, "mender_boot_part")
+
+	fakeBootDev := filepath.Join(dir, "fake-boot-device")
+	require.NoError(t, os.WriteFile(fakeBootDev, []byte{}, 0644))
+	env.bootDeviceCandidates = []string{fakeBootDev}
+	env.bootMountPoint = filepath.Join(dir, "mnt-boot")
+	// Single attempt: these tests only need to prove a real sync failure
+	// occurs and in what order, not exercise BUG-361's retry/backoff, which
+	// would otherwise cost ~20s of real time.Sleep per WriteEnv call.
+	env.bootSyncMaxAttempts = 1
+
 	return env, cmd
 }
 
