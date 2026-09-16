@@ -74,10 +74,15 @@ func (h *UpdateResumer) Read(buf []byte) (int, error) {
 
 		h.req.Header.Set("Range", fmt.Sprintf("bytes=%d-", h.offset))
 
+		// BUG-447: log the break ONCE, here — the retry loop below used to
+		// re-log this same (outer, stale) err on every iteration while the
+		// real per-attempt failure from getStreamFromPartialContent was
+		// shadowed and never printed, which made a server answering a Range
+		// request with 200 look like three fresh TLS failures in the journal.
+		log.Errorf("Download connection broken: %s", err.Error())
+
 		var res *http.Response
 		for {
-			log.Errorf("Download connection broken: %s", err.Error())
-
 			waitTime, err := GetExponentialBackoffTime(h.retryAttempts, h.maxWait, 0)
 			if err != nil {
 				return int(h.offset - origOffset),
@@ -99,6 +104,10 @@ func (h *UpdateResumer) Read(buf []byte) (int, error) {
 
 			stream, err := h.getStreamFromPartialContent(res)
 			if err != nil {
+				log.Errorf("Download resume rejected: %s", err.Error())
+				if res != nil && res.Body != nil {
+					res.Body.Close()
+				}
 				continue
 			}
 
