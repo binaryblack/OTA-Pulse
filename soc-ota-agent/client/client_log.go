@@ -68,7 +68,14 @@ func makeLogUploadRequest(server string, logs *LogData) (*http.Request, error) {
 		logs.DeploymentID)
 	url := buildApiURL(server, path)
 
-	hreq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(logs.Messages))
+	// BUG-446: this was http.MethodPost from day one (never exercised by any
+	// test until this bug filed one), but the deployment-log endpoint is a
+	// PUT, exactly like the sibling status-report endpoint
+	// (client_status.go's makeStatusReportRequest) and like the real
+	// server's expectation (client/test/server.go's logReq has always
+	// required http.MethodPut, unchanged since the initial release). A real
+	// device hitting a real server would get a 405 on every log upload.
+	hreq, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(logs.Messages))
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to create log sending HTTP request")
 	}
