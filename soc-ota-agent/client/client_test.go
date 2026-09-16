@@ -546,6 +546,7 @@ func TestErrorUnmarshaling(t *testing.T) {
 	}
 
 	for name, test := range tests {
+		test := test // BUG-446: go.mod's `go 1.21` predates Go 1.22's per-iteration loop variables; t.Parallel() below means every subtest's closure runs after this loop has finished advancing, so without this copy every subtest would see only the last iteration's test.
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			res := unmarshalErrorMessage(strings.NewReader(test.input))

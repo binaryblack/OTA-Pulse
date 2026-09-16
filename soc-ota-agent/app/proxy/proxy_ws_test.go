@@ -364,6 +364,23 @@ func TestProxyWsConnectCustomCert(t *testing.T) {
 
 	conffromfile := conf.MenderConfigFromFile{
 		ServerCertificate: "../../client/test/server.crt",
+		HttpsClient: client.HttpsClient{
+			// BUG-446/BUG-433: this test server has no ClientAuth
+			// requirement, so this cert/key pair is never actually
+			// requested or transmitted - it exists only so this config has
+			// a complete HttpsClient to attach SSLEngine to. This is shared
+			// by TestProxyWsConnectCustomCertWithReverseProxy below, which
+			// needs its own call routed through the OpenSSL stack: the
+			// dial path client.go's dialOpenSSL is the ONLY one that ever
+			// consults ProxyURLFromHostPortGetter - the Go stack's
+			// websocket dialer falls back to http.ProxyFromEnvironment
+			// directly, which (per its own doc comment) refuses to proxy
+			// any loopback target, so a Go-stack case could never be
+			// observed going through that test's local proxy at all.
+			Certificate: "../../client/testdata/client.crt",
+			Key:         "../../client/testdata/client-cert.key",
+			SSLEngine:   "bug433-force-openssl-test-path",
+		},
 	}
 	testconf := &conf.MenderConfig{MenderConfigFromFile: conffromfile}
 	httpConfig := testconf.GetHttpConfig()
@@ -412,6 +429,11 @@ func TestProxyWsConnectMutualTLS(t *testing.T) {
 		HttpsClient: client.HttpsClient{
 			Certificate: "../../client/testdata/client.crt",
 			Key:         "../../client/testdata/client-cert.key",
+			// BUG-446/BUG-433: see the matching comment in
+			// TestProxyWsConnectCustomCert above - forces the OpenSSL stack
+			// so TestProxyWsConnectMutualTLSWithReverseProxy's call can
+			// actually be observed going through its local proxy.
+			SSLEngine: "bug433-force-openssl-test-path",
 		},
 	}
 	testconf := &conf.MenderConfig{MenderConfigFromFile: conffromfile}

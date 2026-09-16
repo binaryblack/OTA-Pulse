@@ -1042,13 +1042,39 @@ var mtlsTests = map[string]struct {
 		conf: conf.MenderConfigFromFile{
 			ServerCertificate: "../client/test/server.crt",
 			HttpsClient: client.HttpsClient{
-				Certificate: "../client/testdata/server.crt", // Wrong
-				Key:         "../client/testdata/client-cert.key",
+				// BUG-446: this must be a cert/key pair that is internally
+				// CONSISTENT (so tls.LoadX509KeyPair/loadClientTrust succeed
+				// at construction time and the handshake actually happens)
+				// but not the certificate the test server's ClientCAs pool
+				// below trusts (that pool only contains
+				// ../client/testdata/client.crt). ../client/test/server.crt
+				// + server.key is exactly such a pair - a real, valid,
+				// self-signed cert unrelated to client.crt.
+				Certificate: "../client/test/server.crt", // Wrong: untrusted by the server's ClientCAs, but a real matching pair
+				Key:         "../client/test/server.key",
+				// BUG-433/BUG-446: this table is shared by both
+				// TestMutualTLSClientConnection AND
+				// TestMutualTLSClientConnectionWithReverseProxy, and the
+				// HTTPS_PROXY-forwarding path (client.go's dialOpenSSL,
+				// which is the only dial path that ever consults
+				// ProxyURLFromHostPortGetter) exists ONLY on the OpenSSL
+				// stack - the Go stack's transports always use
+				// http.ProxyFromEnvironment directly, which refuses to
+				// proxy ANY loopback target (see its doc comment), so a Go
+				// stack case could never be observed going through the
+				// reverse-proxy test's local proxy at all. Force OpenSSL so
+				// this case's traffic is actually exercised over the
+				// proxy - it also sidesteps the Go stack's TLS 1.3
+				// empty-certificate-message optimization (RFC 8446 §4.4.2)
+				// that would otherwise make the server report "certificate
+				// required" instead of rejecting an actually-presented,
+				// untrusted certificate.
+				SSLEngine: "bug433-force-openssl-test-path",
 			},
 		},
 		assertFunc: func(t assert.TestingT, s *storeErrorLog, err error, srvLog []byte, msgAndArgs ...interface{}) {
 			assert.Error(t, err)
-			assert.Contains(t, s.errors, "bad certificate")
+			assert.Contains(t, s.errors, "unknown ca")
 		},
 	},
 	"Error: Wrong server certificate": {
@@ -1057,6 +1083,14 @@ var mtlsTests = map[string]struct {
 			HttpsClient: client.HttpsClient{
 				Certificate: "../client/testdata/client.crt",
 				Key:         "../client/testdata/client-cert.key",
+				// BUG-433: the default TLS transport is Go's crypto/tls,
+				// which reports an untrusted self-signed root as "x509:
+				// certificate signed by unknown authority", not OpenSSL's
+				// "depth zero self-signed certificate" this test asserts
+				// on. Force the (still fully supported) OpenSSL path via a
+				// dummy SSLEngine, mirroring client_auth_test.go's
+				// bug433-force-openssl-test-path pins.
+				SSLEngine: "bug433-force-openssl-test-path",
 			},
 		},
 		assertFunc: func(t assert.TestingT, s *storeErrorLog, err error, srvLog []byte, msgAndArgs ...interface{}) {
@@ -1072,9 +1106,15 @@ var mtlsTests = map[string]struct {
 				// Key: "../client/testdata/client-cert.key", // Missing
 			},
 		},
+		// BUG-446: conf.MenderConfigFromFile.GetHttpConfig -> maybeHTTPSClient
+		// requires BOTH Certificate and Key non-empty or it drops HttpsClient
+		// entirely, so this case (like "No client certificate" below) always
+		// configures literally zero client certificates - there is never a
+		// certificate for the server to call "bad"; the server's real,
+		// correct response is to report one is required at all.
 		assertFunc: func(t assert.TestingT, s *storeErrorLog, err error, srvLog []byte, msgAndArgs ...interface{}) {
 			assert.Error(t, err)
-			assert.Contains(t, s.errors, "bad certificate")
+			assert.Contains(t, s.errors, "certificate required")
 		},
 	},
 	"Error: No client certificate": {
@@ -1087,7 +1127,7 @@ var mtlsTests = map[string]struct {
 		},
 		assertFunc: func(t assert.TestingT, s *storeErrorLog, err error, srvLog []byte, msgAndArgs ...interface{}) {
 			assert.Error(t, err)
-			assert.Contains(t, s.errors, "bad certificate")
+			assert.Contains(t, s.errors, "certificate required")
 		},
 	},
 	"Success: Correct configuration": {
@@ -1096,6 +1136,15 @@ var mtlsTests = map[string]struct {
 			HttpsClient: client.HttpsClient{
 				Certificate: "../client/testdata/client.crt",
 				Key:         "../client/testdata/client-cert.key",
+				// BUG-446: force OpenSSL so this case's traffic is one of
+				// the 3 (out of 5 - see TestMutualTLSClientConnectionWith
+				// ReverseProxy's NewTestHttpProxy count comment) that can
+				// actually be observed going through the reverse-proxy
+				// test's local proxy - see the sibling comment on "Error:
+				// Wrong client certificate" above for why only the OpenSSL
+				// stack's dialOpenSSL ever consults the proxy at all for a
+				// loopback target.
+				SSLEngine: "bug433-force-openssl-test-path",
 			},
 		},
 		assertFunc: func(t assert.TestingT, s *storeErrorLog, err error, srvLog []byte, msgAndArgs ...interface{}) {
@@ -1146,7 +1195,7 @@ func TestMutualTLSClientConnection(t *testing.T) {
 			defer eraseLastErrorLogHook()
 
 			test.conf.ServerURL = srv.URL
-			test.conf.Servers = []client.MenderServer{{srv.URL}}
+			test.conf.Servers = []client.MenderServer{{ServerURL: srv.URL}}
 
 			ms := store.NewMemStore()
 			mender := newTestMender(conf.MenderConfig{
@@ -1194,7 +1243,22 @@ func TestMutualTLSClientConnection(t *testing.T) {
 }
 
 func TestMutualTLSClientConnectionWithReverseProxy(t *testing.T) {
-	httpProxy, err := cltest.NewTestHttpProxy(len(mtlsTests), true)
+	// BUG-446: not len(mtlsTests) (5). client.go's dialOpenSSL is the ONLY
+	// dial path that ever consults ProxyURLFromHostPortGetter - the Go
+	// stack's transports use http.ProxyFromEnvironment directly, which
+	// (per its own doc comment) refuses to proxy any loopback target, so a
+	// Go-stack case can never be observed going through this local proxy at
+	// all. Of mtlsTests' 5 cases, "No client private key" and "No client
+	// certificate" each leave HttpsClient.Certificate or .Key empty by
+	// design (that IS the scenario under test), which zeroes out the whole
+	// HttpsClient before construction (conf.maybeHTTPSClient) and forces
+	// the Go stack unconditionally - no SSLEngine pin can change that
+	// without destroying the very scenario being tested. Only the other 3
+	// cases ("Wrong client certificate", "Wrong server certificate",
+	// "Success: Correct configuration") have a complete HttpsClient and are
+	// pinned to the OpenSSL stack, so 3 is the real, achievable count.
+	const numCasesUsingOpenSSL = 3
+	httpProxy, err := cltest.NewTestHttpProxy(numCasesUsingOpenSSL, true)
 	require.NoError(t, err)
 	defer func() {
 		err := httpProxy.Stop()

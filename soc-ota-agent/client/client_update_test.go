@@ -137,7 +137,18 @@ func TestParseUpdateResponse(t *testing.T) {
 		{200, []byte(correctUpdateResponse), false, true, http.StatusOK},
 		{200, []byte(correctUpdateResponseMultipleDevices), false, true, http.StatusOK},
 		{200, []byte(updateResponseEmptyDevices), true, false, 0},
-		{204, []byte(""), false, true, http.StatusNoContent},
+		// BUG-446: this was `false` (no error), masked for who knows how
+		// long by client_update_test.go's own loop-variable-capture bug
+		// (fixed alongside this - every t.Parallel() subtest was silently
+		// re-testing only the LAST iteration's case, so this one's own
+		// assertion never actually ran against its own data). 204 maps to
+		// the real, deliberate sentinel client.ErrNoDeploymentAvailable
+		// (client_update.go's processUpdateResponse), checked via
+		// errors.Is at 3 real call sites (app/mender.go:391,
+		// app/state.go:685 and :2229) specifically to distinguish "no
+		// update available" from a genuine failure - it IS an error
+		// return by design, just not a fatal one to its callers.
+		{204, []byte(""), true, true, http.StatusNoContent},
 		{404, []byte(`{
 		 "error": "Not found"
 		 }`), true, true, http.StatusNotFound},
@@ -150,6 +161,7 @@ func TestParseUpdateResponse(t *testing.T) {
 	}
 
 	for c, tt := range updateTest {
+		tt := tt // BUG-446: go.mod's `go 1.21` predates Go 1.22's per-iteration loop variables; t.Parallel() below means every subtest's closure runs after this loop has finished advancing, so without this copy every subtest would silently re-test only the last iteration's case.
 		caseName := strconv.Itoa(c)
 		t.Run(caseName, func(t *testing.T) {
 			t.Parallel()

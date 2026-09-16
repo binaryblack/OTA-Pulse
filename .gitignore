@@ -50,3 +50,11 @@ logs/
 
 # Allow example public keys for OTA-Pulse (these are placeholders, not real secrets)
 !meta-otapulse/recipes-core/signing-keys/files/example-*.pem
+
+# BUG-446: throwaway soc-ota-agent test-only TLS fixture keys (self-signed,
+# localhost-only, protect nothing real), shared by client/*_test.go and
+# app/*_test.go's mTLS tests via their fixed relative testdata paths.
+# Regenerable via soc-ota-agent/client/testdata/generate_fixtures.sh and
+# soc-ota-agent/client/test/generate_fixtures.sh.
+!soc-ota-agent/client/testdata/*.key
+!soc-ota-agent/client/test/*.key

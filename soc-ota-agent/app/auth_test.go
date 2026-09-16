@@ -568,8 +568,33 @@ func TestAuthManagerFinalizer(t *testing.T) {
 	// should invoke the finalizer which kills the go routine.
 	am = nil
 
-	runtime.GC()
-	// Give the Go routine a little bit of cleanup time.
-	time.Sleep(400 * time.Millisecond)
-	assert.Equal(t, goRoutines, runtime.NumGoroutine())
+	// BUG-446: runtime.GC() blocks until the collection itself completes,
+	// but it does NOT wait for finalizers it queued to actually run - those
+	// execute later on a separate runtime-managed goroutine, and the
+	// goroutine the finalizer kills takes a little additional time to
+	// actually exit after that. A single GC() + fixed sleep was a
+	// sleep-and-hope: too short under load (flaky), unnecessarily long
+	// otherwise. Poll instead - but NOT via assert.Eventually: it runs each
+	// condition check on a brand-new goroutine (see its implementation),
+	// which is itself alive and counted by runtime.NumGoroutine() while
+	// that very check executes, permanently off-by-one against a baseline
+	// captured before any polling started - assert.Eventually can never
+	// observe an exact goroutine-count match. Poll manually instead, in
+	// this same goroutine, re-triggering GC() (a finalizer not yet queued
+	// on one pass will be by a later one) until the count actually drops
+	// back to baseline, bounded so a real regression still fails instead
+	// of hanging.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runtime.GC()
+		if n := runtime.NumGoroutine(); n == goRoutines {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf(
+				"goroutine count did not return to baseline %d within 5s (still %d)",
+				goRoutines, n,
+			)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
