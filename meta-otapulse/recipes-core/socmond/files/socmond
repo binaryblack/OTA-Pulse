@@ -875,6 +875,23 @@ trap cleanup SIGTERM SIGINT
 
 # Main daemon loop
 main() {
+    # BUG-453: single-instance guard. socmond-watchdog's no-systemd raw-spawn
+    # fallback (and any other stray invocation) must never run alongside an
+    # already-live instance — a second daemon silently steals the upload
+    # loop's role at its own 300s interval, and whichever instance is pinned
+    # to a stale/wrong server target then swallows crash/metric uploads with
+    # no visible error. Refuse to start rather than kill the existing
+    # instance: killing here would race the same way the bug does, just one
+    # level deeper.
+    if [ -f "${PID_FILE}" ]; then
+        existing_pid=$(cat "${PID_FILE}" 2>/dev/null)
+        if [ -n "${existing_pid}" ] && kill -0 "${existing_pid}" 2>/dev/null; then
+            log "socmond already running as pid ${existing_pid} (${PID_FILE}) — refusing to start a second instance (BUG-453)"
+            exit 0
+        fi
+        log "stale ${PID_FILE} (pid ${existing_pid:-unknown} not running) — continuing startup"
+    fi
+
     log "Starting socmond (device_id=${DEVICE_ID})"
     log "Server URL: ${SERVER_URL}"
     log "API Key source: $([ -f "${API_KEY_FILE}" ] && [ -s "${API_KEY_FILE}" ] && echo 'file' || echo 'config')"

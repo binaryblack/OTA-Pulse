@@ -143,13 +143,38 @@ main() {
             log "socmond check failed (${consecutive_failures}/${max_failures})"
 
             if [ ${consecutive_failures} -ge ${max_failures} ]; then
-                # Try to restart socmond first
-                log "Attempting to restart socmond"
-                # Use init script if available, otherwise try to start directly
-                if [ -x /etc/init.d/socmond ]; then
+                # BUG-453: restarting via raw pkill+fork races systemd, which
+                # independently restarts socmond.service (Restart=on-failure)
+                # the moment pkill's SIGTERM kills its tracked MainPID —
+                # producing TWO live instances, only one of them managed.
+                # The unmanaged one silently owns (or steals) the upload
+                # loop, with no error anywhere. Always prefer systemctl when
+                # systemd is actually running this system; never pkill+fork
+                # a managed unit out from under it.
+                if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+                    sub_state=$(systemctl show -p SubState --value socmond 2>/dev/null)
+                    case "${sub_state}" in
+                        activating|deactivating|reloading)
+                            # systemd is already mid-transition on this unit
+                            # (e.g. its own Restart=on-failure already fired) —
+                            # racing it with our own restart is exactly the
+                            # BUG-453 mechanism. Give it room instead.
+                            log "socmond.service is ${sub_state} — systemd is already recovering it, not racing with our own restart"
+                            ;;
+                        *)
+                            log "Attempting to restart socmond via systemctl (unit state: ${sub_state:-unknown})"
+                            systemctl restart socmond 2>/dev/null || true
+                            ;;
+                    esac
+                elif [ -x /etc/init.d/socmond ]; then
+                    log "Attempting to restart socmond via init script"
                     /etc/init.d/socmond restart 2>/dev/null || true
                 else
-                    # Kill and restart
+                    # True no-systemd, no-init-script fallback (e.g. a bare
+                    # Buildroot dev image). socmond's own single-instance
+                    # guard (BUG-453) still refuses a duplicate start even
+                    # here, so this can never race a live instance.
+                    log "Attempting to restart socmond via raw pkill+fork (no systemd, no init script)"
                     pkill -x socmond 2>/dev/null || true
                     sleep 1
                     /usr/bin/socmond &
