@@ -101,15 +101,6 @@ python do_configure() {
     with open(src_path) as f:
         lines = f.readlines()
 
-    marker_idx = next((i for i, l in enumerate(lines) if MARKER in l), None)
-    expanded_path = os.path.join(workdir, 'boot.expanded.cmd')
-
-    if marker_idx is None:
-        with open(expanded_path, 'w') as f:
-            f.writelines(lines)
-        bb.note(f"OTAPulse: {selected} has no {MARKER} marker -- boot.expanded.cmd is a verbatim copy")
-        return
-
     def is_code(line):
         # Whole-line hush comments only (this project's boot scripts never
         # use trailing inline "#" comments after a real command) -- good
@@ -117,6 +108,19 @@ python do_configure() {
         # in a comment", which is exactly the false-pass Fable's review
         # found against the naive substring check this replaces.
         return not line.strip().startswith('#')
+
+    # Marker detection must also ignore comment lines -- a board script is
+    # allowed to explain in a comment that it deliberately does NOT carry
+    # the marker (e.g. boot-rockchip-rk3588-evb.cmd), and that explanatory
+    # mention must not itself be treated as an active marker.
+    marker_idx = next((i for i, l in enumerate(lines) if MARKER in l and is_code(l)), None)
+    expanded_path = os.path.join(workdir, 'boot.expanded.cmd')
+
+    if marker_idx is None:
+        with open(expanded_path, 'w') as f:
+            f.writelines(lines)
+        bb.note(f"OTAPulse: {selected} has no {MARKER} marker -- boot.expanded.cmd is a verbatim copy")
+        return
 
     def assigns(line, varname):
         # Matches both "setenv VAR ..." and the "test -n ... || setenv VAR
