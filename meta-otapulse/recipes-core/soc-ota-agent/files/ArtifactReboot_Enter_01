@@ -68,7 +68,6 @@ if ! mount "$FAT_DEV" "$MNT" 2>/dev/null; then
 fi
 
 cleanup() { umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; }
-
 # ── 1. RPi4 direct-boot (VideoCore) tryboot one-shot, commit-after-verified-boot
 # ─────────────────────────────────────────────────────────────────────────────
 # VideoCore direct-boot platform = config.txt + cmdline.txt on the FAT boot part.
@@ -293,8 +292,24 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
     cp "$MNT/extlinux/extlinux.conf" "$MNT/extlinux/extlinux-prev.conf"
     sed -i "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${TARGET_LABEL}/g" \
         "$MNT/extlinux/extlinux.conf"
+    # BUG-440 Phase 1(b), applied dynamically every install (not just at
+    # image-bake time) so it also reaches boards already deployed in the
+    # field via routine OTA, not only a fresh full flash: without panic=/
+    # init=, a boot-fs failure (e.g. a zeroed superblock) hangs forever in
+    # mount_root with no counter able to ever advance. Same values/pattern
+    # as the RPi4 tryboot edit above, scoped to the `append` line only.
+    if ! sed -n '/^[[:space:]]*append/p' "$MNT/extlinux/extlinux.conf" | grep -q 'rootdelay='; then
+        sed -i -E '/^[[:space:]]*append/ s/(^|[[:space:]])rootwait([[:space:]]|$)/\1rootdelay=20\2/' \
+            "$MNT/extlinux/extlinux.conf"
+    fi
+    if ! sed -n '/^[[:space:]]*append/p' "$MNT/extlinux/extlinux.conf" | grep -q 'panic='; then
+        sed -i '/^[[:space:]]*append/ s/$/ panic=15/' "$MNT/extlinux/extlinux.conf"
+    fi
+    if ! sed -n '/^[[:space:]]*append/p' "$MNT/extlinux/extlinux.conf" | grep -q 'init='; then
+        sed -i '/^[[:space:]]*append/ s#$# init=/sbin/init#' "$MNT/extlinux/extlinux.conf"
+    fi
     sync
-    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL} (extlinux-prev.conf preserved)" >&2
+    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL} (extlinux-prev.conf preserved, panic=/rootdelay= ensured)" >&2
 fi
 
 # ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────
