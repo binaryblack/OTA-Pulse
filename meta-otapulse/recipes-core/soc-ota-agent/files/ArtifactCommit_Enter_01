@@ -218,9 +218,47 @@ if [ -f "$MNT/boot.scr" ] && ! { [ -f "$MNT/config.txt" ] && [ -f "$MNT/cmdline.
     exit 0
 fi
 
+# ── TODO-056/BUG-440 Phase 2: Radxa CM5 / extlinux (U-Boot distroboot)
+#    board — wrong-slot commit guard + bootcount reset ─────────────────────
+# extlinux/extlinux.conf's own root=PARTLABEL= line IS the permanent slot
+# pointer here (ArtifactReboot_Enter_01 section 3 already rewrote it), so
+# the guard is simpler than the boot.scr-numeric case above: read root=
+# straight out of extlinux.conf instead of a separate FAT marker file.
+if [ -f "$MNT/extlinux/extlinux.conf" ]; then
+    EXPECTED_LABEL=$(grep -oE 'root=PARTLABEL=rootfs_[ab]' "$MNT/extlinux/extlinux.conf" | head -1 | sed 's/root=PARTLABEL=//')
+    RUNNING_ROOT=$(grep -oE 'root=[^ ]+' /proc/cmdline 2>/dev/null | head -1 | sed -E 's/^root=//')
+    RUNNING_ROOT_REAL=$(readlink -f "$RUNNING_ROOT" 2>/dev/null || echo "$RUNNING_ROOT")
+    EXPECTED_DEV_REAL=$(readlink -f "/dev/disk/by-partlabel/${EXPECTED_LABEL}" 2>/dev/null || echo "")
+
+    if [ -z "$EXPECTED_LABEL" ] || [ -z "$RUNNING_ROOT_REAL" ] || [ "$RUNNING_ROOT_REAL" != "$EXPECTED_DEV_REAL" ]; then
+        echo "ArtifactCommit_Enter: REFUSING commit — running root ($RUNNING_ROOT_REAL) does not match extlinux.conf's root=PARTLABEL=${EXPECTED_LABEL:-<unreadable>}"
+        cleanup
+        exit 1
+    fi
+
+    # Confirmed-good boot: clear the pending-revert fallback and reset the
+    # U-Boot-side bootcount so the next install cycle starts clean. The
+    # counter is BOOTCOUNT_EXT's own 2-byte format (drivers/bootcount/
+    # bootcount_ext.c: byte0=0xbc magic, byte1=count) written as a plain
+    # file -- no fw_setenv, no persistent U-Boot env, matching cm5-bootcount-
+    # ext.cfg's design (see multiboard_yocto's u-boot-rockchip_%.bbappend).
+    if [ -f "$MNT/extlinux/extlinux-prev.conf" ]; then
+        rm -f "$MNT/extlinux/extlinux-prev.conf"
+        sync
+    fi
+    if [ -d /data ]; then
+        mkdir -p /data/ota
+        printf '\274\000' > /data/ota/uboot_bootcount
+        sync
+    fi
+    echo "ArtifactCommit_Enter: extlinux (CM5) board — running root matches root=PARTLABEL=${EXPECTED_LABEL}, cleared extlinux-prev.conf + reset uboot_bootcount"
+    cleanup
+    exit 0
+fi
+
 # ── All other platforms: nothing to do. NEVER exit non-zero here — only the
-#    RPi4 and boot.scr-numeric wrong-slot guards above are allowed to fail
-#    the commit. ─────────────────────────────────────────────────────────
-echo "ArtifactCommit_Enter: not an RPi4, systemd-boot, or boot.scr-numeric platform — nothing to do"
+#    RPi4, boot.scr-numeric, and extlinux wrong-slot guards above are
+#    allowed to fail the commit. ────────────────────────────────────────────
+echo "ArtifactCommit_Enter: not an RPi4, systemd-boot, boot.scr-numeric, or extlinux platform — nothing to do"
 cleanup
 exit 0

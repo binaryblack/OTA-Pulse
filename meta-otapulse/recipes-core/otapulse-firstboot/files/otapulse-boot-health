@@ -355,6 +355,21 @@ trap cleanup EXIT INT TERM
 # own Automatic Boot Assessment (see ArtifactReboot_Enter_01 sections 3/4) —
 # this script is a no-op there.
 if [ ! -f "$MNT/cmdline.txt" ]; then
+    # BUG-440/GAP: mirror installer/file_bootenv.go's isBootScrNumericBoard
+    # exactly (same check order, same two paths). boot.scr alone is NOT
+    # sufficient to qualify for Class B -- CM5 ships a harmless, never-executed
+    # boot.scr fallback (vendor U-Boot no-ops `source boot.scr`) alongside a
+    # REAL extlinux/extlinux.conf that its bootloader actually reads via
+    # sysboot. Without this exclusion, CM5's FAT (dead boot.scr + the agent's
+    # unconditional mender_boot_part write) satisfies the old Class B
+    # condition below, so this script would rewrite FAT files sysboot never
+    # reads, clear upgrade_available, and disarm the one working (agent-driven)
+    # revert path on its 3rd boot -- confirmed live 2026-09-23, see BUG-440.
+    if [ -d "$MNT/loader/entries" ] || [ -f "$MNT/extlinux/extlinux.conf" ]; then
+        log "extlinux/systemd-boot present on $FAT_DEV — bootloader's own Automatic Boot Assessment applies, nothing to do"
+        cleanup
+        exit 0
+    fi
     if [ -f "$MNT/boot.scr" ] && [ -f "$MNT/mender_boot_part" ]; then
         log "No cmdline.txt but boot.scr + mender_boot_part present on $FAT_DEV — file-based-boot board, using FAT-persisted rollback"
         file_based_boot_health
