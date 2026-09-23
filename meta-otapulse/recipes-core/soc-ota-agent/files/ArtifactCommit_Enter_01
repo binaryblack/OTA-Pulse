@@ -227,7 +227,22 @@ fi
 if [ -f "$MNT/extlinux/extlinux.conf" ]; then
     EXPECTED_LABEL=$(grep -oE 'root=PARTLABEL=rootfs_[ab]' "$MNT/extlinux/extlinux.conf" | head -1 | sed 's/root=PARTLABEL=//')
     RUNNING_ROOT=$(grep -oE 'root=[^ ]+' /proc/cmdline 2>/dev/null | head -1 | sed -E 's/^root=//')
-    RUNNING_ROOT_REAL=$(readlink -f "$RUNNING_ROOT" 2>/dev/null || echo "$RUNNING_ROOT")
+    # BUG (found live 2026-09-23, E2E-001): RUNNING_ROOT is kernel boot-param
+    # syntax ("PARTLABEL=rootfs_b"), NOT a filesystem path -- readlink -f on
+    # it directly never resolves to a real device and can never match
+    # EXPECTED_DEV_REAL, so this guard refused every commit unconditionally.
+    # Resolve by scheme, same as EXPECTED_DEV_REAL does for PARTLABEL.
+    case "$RUNNING_ROOT" in
+        PARTLABEL=*)
+            RUNNING_ROOT_REAL=$(readlink -f "/dev/disk/by-partlabel/${RUNNING_ROOT#PARTLABEL=}" 2>/dev/null || echo "")
+            ;;
+        PARTUUID=*)
+            RUNNING_ROOT_REAL=$(readlink -f "/dev/disk/by-partuuid/${RUNNING_ROOT#PARTUUID=}" 2>/dev/null || echo "")
+            ;;
+        *)
+            RUNNING_ROOT_REAL=$(readlink -f "$RUNNING_ROOT" 2>/dev/null || echo "$RUNNING_ROOT")
+            ;;
+    esac
     EXPECTED_DEV_REAL=$(readlink -f "/dev/disk/by-partlabel/${EXPECTED_LABEL}" 2>/dev/null || echo "")
 
     if [ -z "$EXPECTED_LABEL" ] || [ -z "$RUNNING_ROOT_REAL" ] || [ "$RUNNING_ROOT_REAL" != "$EXPECTED_DEV_REAL" ]; then
