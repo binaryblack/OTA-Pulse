@@ -101,15 +101,6 @@ python do_configure() {
     with open(src_path) as f:
         lines = f.readlines()
 
-    marker_idx = next((i for i, l in enumerate(lines) if MARKER in l), None)
-    expanded_path = os.path.join(workdir, 'boot.expanded.cmd')
-
-    if marker_idx is None:
-        with open(expanded_path, 'w') as f:
-            f.writelines(lines)
-        bb.note(f"OTAPulse: {selected} has no {MARKER} marker -- boot.expanded.cmd is a verbatim copy")
-        return
-
     def is_code(line):
         # Whole-line hush comments only (this project's boot scripts never
         # use trailing inline "#" comments after a real command) -- good
@@ -117,6 +108,26 @@ python do_configure() {
         # in a comment", which is exactly the false-pass Fable's review
         # found against the naive substring check this replaces.
         return not line.strip().startswith('#')
+
+    # BUG-440/TODO-056: marker detection itself must exclude comment lines
+    # too, not just the later contract checks below -- CM5's own
+    # boot-rockchip-rk3588-evb.cmd EXPLAINS in a header comment that it does
+    # NOT carry the marker ("...does NOT carry the @@OTAPULSE_BOOTCOUNT_NET@@
+    # marker..."), which a naive `MARKER in l` substring search (searching
+    # ALL lines, comments included) misreads as a real marker use, then
+    # fails do_configure because CM5's dead boot.scr correctly never resolves
+    # bootpart/scriptaddr before that comment line. Never caught before
+    # 2026-09-23 because this board had never actually been built. The 3 real
+    # target boards (imx8mp-lpddr4-frdm, orange-pi-zero2w, beagleplay-ti)
+    # carry the marker as a genuine bare code line, unaffected by this fix.
+    marker_idx = next((i for i, l in enumerate(lines) if MARKER in l and is_code(l)), None)
+    expanded_path = os.path.join(workdir, 'boot.expanded.cmd')
+
+    if marker_idx is None:
+        with open(expanded_path, 'w') as f:
+            f.writelines(lines)
+        bb.note(f"OTAPulse: {selected} has no {MARKER} marker -- boot.expanded.cmd is a verbatim copy")
+        return
 
     def assigns(line, varname):
         # Matches both "setenv VAR ..." and the "test -n ... || setenv VAR
