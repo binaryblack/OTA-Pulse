@@ -185,11 +185,14 @@ GOOS=linux GOARCH=arm64 make build
 Use the artifact generation tools to create OTA packages:
 
 ```bash
-# Full rootfs update
+# Single-file update (e.g. replacing one binary or config file on the
+# device -- for a full A/B rootfs image update, see the Yocto/Buildroot
+# build output instead, not this Update Module tool)
 ./support/modules-artifact-gen/single-file-artifact-gen \
   --artifact-name release-1.2.0 \
   --device-type your-device \
-  --file rootfs.ext4 \
+  --file app-binary \
+  --dest-dir /opt/myapp \
   --output-path release-1.2.0.otapulse
 
 # Application update

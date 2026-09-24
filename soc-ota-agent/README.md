@@ -29,7 +29,7 @@ soc-ota-agent check-update
 ### Install from File
 
 ```bash
-soc-ota-agent install /path/to/artifact.mender
+soc-ota-agent install /path/to/artifact.otapulse
 ```
 
 ### Commit Update

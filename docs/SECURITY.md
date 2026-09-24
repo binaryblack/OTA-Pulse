@@ -68,7 +68,7 @@ mender-artifact write rootfs-image \
   -n "release-1.0.1" \
   -f your-rootfs.ext4 \
   --key artifact-signing-private.pem \
-  -o artifact-signed.mender
+  -o artifact-signed.otapulse
 ```
 
 Or enable automatic signing during Yocto build:

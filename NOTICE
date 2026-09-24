@@ -56,6 +56,6 @@ BusyBox). This is an ordinary Yocto/BitBake project characteristic, not
 specific to this repository's own code. Whether and how source-offer
 obligations apply depends on whether OTA-Pulse itself distributes built
 images (as opposed to only the meta-otapulse layer/recipes) to end
-customers -- a distribution-model question outside this NOTICE file's
-scope; see tracker/todos/TODO-058.yaml for the open item requesting a
-counsel determination.
+customers -- a distribution-model question this NOTICE file does not
+resolve; it needs a counsel determination, tracked in the project's issue
+tracker (outside this repository) as a still-open item.
