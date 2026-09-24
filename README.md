@@ -119,8 +119,9 @@ soc-ota-agent show-artifact
 # Check for updates
 soc-ota-agent check-update
 
-# Install update from file
-soc-ota-agent install /path/to/artifact.mender
+# Install update from file (.otapulse is current; legacy .mender files are
+# still accepted)
+soc-ota-agent install /path/to/artifact.otapulse
 
 # View pending deployment
 soc-ota-agent show-provides
@@ -189,7 +190,7 @@ Use the artifact generation tools to create OTA packages:
   --artifact-name release-1.2.0 \
   --device-type your-device \
   --file rootfs.ext4 \
-  --output-path release-1.2.0.mender
+  --output-path release-1.2.0.otapulse
 
 # Application update
 ./support/modules-artifact-gen/directory-artifact-gen \
@@ -197,7 +198,7 @@ Use the artifact generation tools to create OTA packages:
   --device-type your-device \
   --dest-dir /opt/myapp \
   --source-dir ./app-files \
-  --output-path app-update-1.0.mender
+  --output-path app-update-1.0.otapulse
 ```
 
 ## Security
