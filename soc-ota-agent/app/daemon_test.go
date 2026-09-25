@@ -24,13 +24,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/mendersoftware/mender-artifact/artifact"
-	"github.com/mendersoftware/mender-artifact/handlers"
 	"github.com/binaryblack/OTA-Pulse/client"
 	"github.com/binaryblack/OTA-Pulse/conf"
 	"github.com/binaryblack/OTA-Pulse/datastore"
 	"github.com/binaryblack/OTA-Pulse/installer"
 	"github.com/binaryblack/OTA-Pulse/store"
+	"github.com/mendersoftware/mender-artifact/artifact"
+	"github.com/mendersoftware/mender-artifact/handlers"
 )
 
 type FakeDevice struct {

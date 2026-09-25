@@ -35,9 +35,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/mendersoftware/mender-artifact/artifact"
-	"github.com/mendersoftware/mender-artifact/awriter"
-	"github.com/mendersoftware/mender-artifact/handlers"
 	"github.com/binaryblack/OTA-Pulse/app/updatecontrolmap"
 	"github.com/binaryblack/OTA-Pulse/client"
 	cltest "github.com/binaryblack/OTA-Pulse/client/test"
@@ -47,6 +44,9 @@ import (
 	"github.com/binaryblack/OTA-Pulse/store"
 	stest "github.com/binaryblack/OTA-Pulse/system/testing"
 	"github.com/binaryblack/OTA-Pulse/tests"
+	"github.com/mendersoftware/mender-artifact/artifact"
+	"github.com/mendersoftware/mender-artifact/awriter"
+	"github.com/mendersoftware/mender-artifact/handlers"
 )
 
 const defaultKeyPassphrase = ""

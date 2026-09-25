@@ -72,17 +72,17 @@ var (
 	DefaultDataStore   = getenvWithFallback("OTAPULSE_DATASTORE_DIR", "MENDER_DATASTORE_DIR", "/var/lib/otapulse")
 
 	// Key file names - new OTAPulse naming
-	DefaultKeyFile     = "otapulse-agent.pem"
-	LegacyKeyFile      = "mender-agent.pem" // For backward compatibility
+	DefaultKeyFile = "otapulse-agent.pem"
+	LegacyKeyFile  = "mender-agent.pem" // For backward compatibility
 
 	DefaultConfFile         = path.Join(GetConfDirPath(), "otapulse.conf")
 	DefaultFallbackConfFile = path.Join(GetStateDirPath(), "otapulse.conf")
 
 	// Legacy Mender paths for fallback support
-	LegacyConfDir      = "/etc/mender"
-	LegacyDataDir      = "/usr/share/mender"
-	LegacyDataStore    = "/var/lib/mender"
-	LegacyConfFile     = path.Join(LegacyConfDir, "mender.conf")
+	LegacyConfDir   = "/etc/mender"
+	LegacyDataDir   = "/usr/share/mender"
+	LegacyDataStore = "/var/lib/mender"
+	LegacyConfFile  = path.Join(LegacyConfDir, "mender.conf")
 )
 
 var (

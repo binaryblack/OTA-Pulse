@@ -20,8 +20,8 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/mendersoftware/mender-artifact/utils"
 	"github.com/binaryblack/OTA-Pulse/store"
+	"github.com/mendersoftware/mender-artifact/utils"
 )
 
 const (

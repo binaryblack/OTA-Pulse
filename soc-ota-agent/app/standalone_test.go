@@ -23,9 +23,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mendersoftware/mender-artifact/artifact"
-	"github.com/mendersoftware/mender-artifact/awriter"
-	"github.com/mendersoftware/mender-artifact/handlers"
 	"github.com/binaryblack/OTA-Pulse/client"
 	"github.com/binaryblack/OTA-Pulse/conf"
 	"github.com/binaryblack/OTA-Pulse/datastore"
@@ -34,6 +31,9 @@ import (
 	"github.com/binaryblack/OTA-Pulse/statescript"
 	"github.com/binaryblack/OTA-Pulse/store"
 	"github.com/binaryblack/OTA-Pulse/tests"
+	"github.com/mendersoftware/mender-artifact/artifact"
+	"github.com/mendersoftware/mender-artifact/awriter"
+	"github.com/mendersoftware/mender-artifact/handlers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
