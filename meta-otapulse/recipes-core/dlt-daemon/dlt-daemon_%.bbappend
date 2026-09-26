@@ -15,6 +15,20 @@
 # an IPv6 loopback literal, matching that convention.
 EXTRA_OECMAKE += "-DWITH_DLT_USE_IPv6=OFF"
 
+# BUG-474: upstream's default PACKAGECONFIG compiles in udp-connection
+# (-DWITH_UDP_CONNECTION=ON) and dlt-adaptor-udp (-DWITH_DLT_ADAPTOR_UDP=ON)
+# unconditionally. udp-connection makes dlt-daemon bind 0.0.0.0:3490 and
+# multicast the entire live log stream, in plaintext, to 225.0.0.37:3491 on
+# the LAN -- proven live to leak real journald content from every board.
+# dlt.conf's UDPConnectionSetup = 0 disables this at runtime; removing the
+# PACKAGECONFIG here is belt-and-braces so a future dlt.conf regression
+# can't silently re-enable it (the capability is never compiled in at all).
+# dlt-adaptor-udp is a separate standalone relay binary/service upstream
+# also enables by default; not observed active on any board in this fleet
+# (dlt-adaptor-udp.service is not-found in the built package), but dropped
+# for the same defense-in-depth reason -- no board should ever need it.
+PACKAGECONFIG:remove = "udp-connection dlt-adaptor-udp"
+
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
 SRC_URI += " \
