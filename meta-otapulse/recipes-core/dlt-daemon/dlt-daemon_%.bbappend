@@ -16,18 +16,36 @@
 EXTRA_OECMAKE += "-DWITH_DLT_USE_IPv6=OFF"
 
 # BUG-474: upstream's default PACKAGECONFIG compiles in udp-connection
-# (-DWITH_UDP_CONNECTION=ON) and dlt-adaptor-udp (-DWITH_DLT_ADAPTOR_UDP=ON)
-# unconditionally. udp-connection makes dlt-daemon bind 0.0.0.0:3490 and
-# multicast the entire live log stream, in plaintext, to 225.0.0.37:3491 on
-# the LAN -- proven live to leak real journald content from every board.
-# dlt.conf's UDPConnectionSetup = 0 disables this at runtime; removing the
-# PACKAGECONFIG here is belt-and-braces so a future dlt.conf regression
-# can't silently re-enable it (the capability is never compiled in at all).
-# dlt-adaptor-udp is a separate standalone relay binary/service upstream
-# also enables by default; not observed active on any board in this fleet
-# (dlt-adaptor-udp.service is not-found in the built package), but dropped
-# for the same defense-in-depth reason -- no board should ever need it.
-PACKAGECONFIG:remove = "udp-connection dlt-adaptor-udp"
+# (-DWITH_UDP_CONNECTION=ON) unconditionally. This makes dlt-daemon bind
+# 0.0.0.0:3490 and multicast the entire live log stream, in plaintext, to
+# 225.0.0.37:3491 on the LAN -- proven live to leak real journald content
+# from every board. dlt.conf's UDPConnectionSetup = 0 disables this at
+# runtime; removing the PACKAGECONFIG here is belt-and-braces so a future
+# dlt.conf regression can't silently re-enable it (the capability is never
+# compiled in at all) -- confirmed via a real build: CMakeCache.txt flips
+# WITH_UDP_CONNECTION from ON to OFF with this change.
+#
+# dlt-adaptor-udp/dlt-adaptor (the standalone dlt-adaptor-udp CLI relay
+# tool and its shared code) are ALSO removed, for a genuinely different
+# reason: upstream's CMakeLists.txt builds and installs the dlt-adaptor-udp
+# binary AND service whenever EITHER WITH_DLT_ADAPTOR_UDP OR
+# WITH_DLT_ADAPTOR is ON -- removing only dlt-adaptor-udp from
+# PACKAGECONFIG (an earlier version of this fix) had NO effect, since
+# dlt-adaptor alone still triggered the same build (caught by review,
+# confirmed via the same real-build CMakeCache/do_install log evidence).
+# Their systemd unit was never a live risk regardless -- it ships only in
+# the separate dlt-daemon-systemd package, which neither production image
+# installs (see docs/dlt-daemon-recipe-spike.md's package split) -- but the
+# adaptor BINARY does ship in the main dlt-daemon package devices actually
+# install, so it's still an unnecessary UDP-relay tool sitting on every
+# board's disk; removed for the same defense-in-depth reason as
+# udp-connection, not because it was found actively listening.
+# dlt-adaptor-stdin (a different, non-network stdin-only adaptor) is
+# deliberately NOT touched here -- it isn't part of this vulnerability's
+# actual network-relay code path and wasn't verified against the same
+# CMakeLists.txt build-gating chain; removing it would be an unjustified
+# scope expansion of this security fix.
+PACKAGECONFIG:remove = "udp-connection dlt-adaptor-udp dlt-adaptor"
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
