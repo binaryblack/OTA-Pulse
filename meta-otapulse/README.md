@@ -59,11 +59,11 @@ Add to `local.conf`:
 OTA_SERVER_URL = "https://your-ota-server.com"
 ```
 
-**That's it!** Build your image and `.mender` artifacts will be generated automatically.
+**That's it!** Build your image and `.otapulse` artifacts will be generated automatically.
 
 ```bash
 bitbake your-image
-# Output: tmp/deploy/images/<MACHINE>/your-image-<MACHINE>.mender
+# Output: tmp/deploy/images/<MACHINE>/your-image-<MACHINE>.otapulse
 ```
 
 ---
@@ -71,7 +71,7 @@ bitbake your-image
 ## What `inherit otapulse` Does Automatically
 
 - Adds `soc-ota-agent` to the image
-- Enables mender artifact generation (`.mender` files)
+- Enables mender artifact generation (`.otapulse` files; the underlying format is unchanged Mender binary tar, `mender-artifact` remains the tool used to read/write/sign it)
 - Adds ext4 to IMAGE_FSTYPES (required for mender)
 - Includes partition tools (gptfdisk)
 - Disables SPDX (externalsrc compatibility)

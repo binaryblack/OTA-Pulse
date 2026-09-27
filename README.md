@@ -119,8 +119,9 @@ soc-ota-agent show-artifact
 # Check for updates
 soc-ota-agent check-update
 
-# Install update from file
-soc-ota-agent install /path/to/artifact.mender
+# Install update from file (.otapulse is current; legacy .mender files are
+# still accepted)
+soc-ota-agent install /path/to/artifact.otapulse
 
 # View pending deployment
 soc-ota-agent show-provides
@@ -184,12 +185,15 @@ GOOS=linux GOARCH=arm64 make build
 Use the artifact generation tools to create OTA packages:
 
 ```bash
-# Full rootfs update
+# Single-file update (e.g. replacing one binary or config file on the
+# device -- for a full A/B rootfs image update, see the Yocto/Buildroot
+# build output instead, not this Update Module tool)
 ./support/modules-artifact-gen/single-file-artifact-gen \
   --artifact-name release-1.2.0 \
   --device-type your-device \
-  --file rootfs.ext4 \
-  --output-path release-1.2.0.mender
+  --file app-binary \
+  --dest-dir /opt/myapp \
+  --output-path release-1.2.0.otapulse
 
 # Application update
 ./support/modules-artifact-gen/directory-artifact-gen \
@@ -197,7 +201,7 @@ Use the artifact generation tools to create OTA packages:
   --device-type your-device \
   --dest-dir /opt/myapp \
   --source-dir ./app-files \
-  --output-path app-update-1.0.mender
+  --output-path app-update-1.0.otapulse
 ```
 
 ## Security

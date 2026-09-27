@@ -242,7 +242,7 @@ mender-artifact write rootfs-image \
   -t your-device-type \
   -n "release-1.0.1" \
   -f tmp/deploy/images/your-machine/soc-monitoring-image-your-machine.ext4 \
-  -o release-1.0.1.mender
+  -o release-1.0.1.otapulse
 ```
 
 ### 3. Upload and Deploy

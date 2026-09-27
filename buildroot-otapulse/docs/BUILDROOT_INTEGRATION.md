@@ -228,7 +228,7 @@ After building, find outputs in `output/images/`:
 |------|-------------|
 | `sdcard-ab-*.img` | Complete SD card image with A/B partitions |
 | `rootfs.ext4` | Root filesystem image |
-| `*.mender` | Mender-compatible OTA artifact (if mender-artifact installed) |
+| `*.otapulse` | OTA artifact (if mender-artifact installed; still Mender's binary tar format under the hood, legacy `*.mender` files remain valid too) |
 
 ## Deploying
 
@@ -330,23 +330,23 @@ mender-artifact write rootfs-image \
     --file output/images/rootfs.ext4 \
     --key /path/to/private-key.pem \
     --compression gzip \
-    --output-path release-1.2.0.mender
+    --output-path release-1.2.0.otapulse
 ```
 
 ### Verify Artifact
 
 ```bash
 # Verify signature with public key
-mender-artifact validate release-1.2.0.mender \
+mender-artifact validate release-1.2.0.otapulse \
     --key /path/to/artifact-verify-key.pem
 
 # Show artifact contents
-mender-artifact read release-1.2.0.mender
+mender-artifact read release-1.2.0.otapulse
 ```
 
 ### Upload to OTA Server
 
-Upload the `.mender` file to your OTA management server and create a deployment targeting your device type.
+Upload the `.otapulse` file to your OTA management server and create a deployment targeting your device type.
 
 ## Platform-Specific Notes
 

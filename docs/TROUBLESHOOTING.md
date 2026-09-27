@@ -179,7 +179,7 @@ fw_printenv
 
 3. Artifact is signed:
    ```bash
-   mender-artifact read artifact.mender | grep -i signature
+   mender-artifact read artifact.otapulse | grep -i signature
    ```
 
 **Solution:**
@@ -265,7 +265,7 @@ CM5 / RK3588S with systemd-boot EFI ABA — see
 # Clear stuck state (use with caution)
 systemctl stop soc-ota-agent
 rm /var/lib/otapulse/state
-rm /var/lib/otapulse/*.mender
+rm /var/lib/otapulse/*.otapulse /var/lib/otapulse/*.mender 2>/dev/null || true
 systemctl start soc-ota-agent
 ```
 

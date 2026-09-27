@@ -168,7 +168,7 @@ mender-artifact write rootfs-image \
     -f my-image-<MACHINE>.ext4 \
     -n "v1.2.0" \
     -t "<MACHINE>" \
-    -o my-update-v1.2.0.mender
+    -o my-update-v1.2.0.otapulse
 
 # Upload to OTA server and deploy
 # Device will automatically download, install, and reboot

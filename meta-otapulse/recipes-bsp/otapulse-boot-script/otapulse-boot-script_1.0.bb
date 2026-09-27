@@ -109,10 +109,17 @@ python do_configure() {
         # found against the naive substring check this replaces.
         return not line.strip().startswith('#')
 
-    # Marker detection must also ignore comment lines -- a board script is
-    # allowed to explain in a comment that it deliberately does NOT carry
-    # the marker (e.g. boot-rockchip-rk3588-evb.cmd), and that explanatory
-    # mention must not itself be treated as an active marker.
+    # BUG-440/TODO-056: marker detection itself must exclude comment lines
+    # too, not just the later contract checks below -- CM5's own
+    # boot-rockchip-rk3588-evb.cmd EXPLAINS in a header comment that it does
+    # NOT carry the marker ("...does NOT carry the @@OTAPULSE_BOOTCOUNT_NET@@
+    # marker..."), which a naive `MARKER in l` substring search (searching
+    # ALL lines, comments included) misreads as a real marker use, then
+    # fails do_configure because CM5's dead boot.scr correctly never resolves
+    # bootpart/scriptaddr before that comment line. Never caught before
+    # 2026-09-23 because this board had never actually been built. The 3 real
+    # target boards (imx8mp-lpddr4-frdm, orange-pi-zero2w, beagleplay-ti)
+    # carry the marker as a genuine bare code line, unaffected by this fix.
     marker_idx = next((i for i, l in enumerate(lines) if MARKER in l and is_code(l)), None)
     expanded_path = os.path.join(workdir, 'boot.expanded.cmd')
 
