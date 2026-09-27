@@ -28,10 +28,10 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
-	"github.com/mendersoftware/mender-artifact/artifact"
-	"github.com/mendersoftware/mender-artifact/handlers"
 	"github.com/binaryblack/OTA-Pulse/conf"
 	"github.com/binaryblack/OTA-Pulse/system"
+	"github.com/mendersoftware/mender-artifact/artifact"
+	"github.com/mendersoftware/mender-artifact/handlers"
 )
 
 const (

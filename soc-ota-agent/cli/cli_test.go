@@ -29,7 +29,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/binaryblack/OTA-Pulse/app"
 	"github.com/binaryblack/OTA-Pulse/client"
 	"github.com/binaryblack/OTA-Pulse/conf"
@@ -40,6 +39,7 @@ import (
 	"github.com/binaryblack/OTA-Pulse/system"
 	stest "github.com/binaryblack/OTA-Pulse/system/testing"
 	"github.com/binaryblack/OTA-Pulse/tests"
+	"github.com/mendersoftware/mender-artifact/artifact"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"

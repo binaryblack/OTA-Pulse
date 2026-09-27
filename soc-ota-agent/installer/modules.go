@@ -30,9 +30,9 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/binaryblack/OTA-Pulse/system"
 	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/mendersoftware/mender-artifact/handlers"
-	"github.com/binaryblack/OTA-Pulse/system"
 )
 
 type ModuleInstaller struct {

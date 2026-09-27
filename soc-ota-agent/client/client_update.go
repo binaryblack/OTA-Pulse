@@ -219,13 +219,13 @@ func (u *UpdateClient) FetchUpdate(
 	url string,
 	maxWait time.Duration,
 ) (io.ReadCloser, int64, error) {
-	
+
 	// Check network quality before initiating download
 	// Critical for deployments in areas with unreliable connectivity
 	if !CheckNetworkQuality() {
 		return nil, -1, errors.New("Network quality insufficient for OTA download. Will retry later.")
 	}
-	
+
 	req, err := makeUpdateFetchRequest(url)
 	if err != nil {
 		return nil, -1, errors.Wrapf(err, "failed to create update fetch request")

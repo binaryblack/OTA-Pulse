@@ -25,8 +25,6 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/mendersoftware/mender-artifact/areader"
-	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/binaryblack/OTA-Pulse/app/updatecontrolmap"
 	"github.com/binaryblack/OTA-Pulse/client"
 	"github.com/binaryblack/OTA-Pulse/conf"
@@ -37,6 +35,8 @@ import (
 	"github.com/binaryblack/OTA-Pulse/statescript"
 	"github.com/binaryblack/OTA-Pulse/store"
 	"github.com/binaryblack/OTA-Pulse/utils"
+	"github.com/mendersoftware/mender-artifact/areader"
+	"github.com/mendersoftware/mender-artifact/artifact"
 )
 
 type Controller interface {

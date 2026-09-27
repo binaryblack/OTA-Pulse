@@ -22,11 +22,11 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/binaryblack/OTA-Pulse/conf"
+	"github.com/binaryblack/OTA-Pulse/statescript"
 	"github.com/mendersoftware/mender-artifact/areader"
 	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/mendersoftware/mender-artifact/handlers"
-	"github.com/binaryblack/OTA-Pulse/conf"
-	"github.com/binaryblack/OTA-Pulse/statescript"
 )
 
 type Rebooter interface {

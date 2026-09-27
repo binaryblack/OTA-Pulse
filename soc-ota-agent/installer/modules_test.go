@@ -28,8 +28,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/binaryblack/OTA-Pulse/system"
+	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -21,9 +21,9 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/binaryblack/OTA-Pulse/system"
 	"github.com/mendersoftware/mender-artifact/artifact"
 	"github.com/mendersoftware/mender-artifact/handlers"
-	"github.com/binaryblack/OTA-Pulse/system"
 )
 
 // A stub installer that fails nearly every step. For use as a stub when we
