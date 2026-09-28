@@ -738,6 +738,10 @@ func (f *FileBasedBootEnv) armPendingSwitchRollback(bootDir, oldPart, partNum st
 	return nil
 }
 
+// uBootEnvConfigPath is the libubootenv/fw_printenv config file consulted by
+// uBootEnvWorks. A var only so tests can point it at a temp file.
+var uBootEnvConfigPath = "/etc/fw_env.config"
+
 // uBootEnvWorks reports whether a WORKING U-Boot environment is present: the
 // fw_printenv binary exists AND can actually read the environment. Boards may
 // ship u-boot-fw-utils without having a real U-Boot env (RPi4/VideoCore direct
@@ -749,10 +753,44 @@ func uBootEnvWorks() bool {
 	if err != nil {
 		return false
 	}
+	// BUG-436: a fw_env.config that EXISTS but has no active entry (the
+	// u-boot-env-config recipe's shipped all-commented placeholder, on every
+	// board with no real U-Boot env - Dragon Q6A/systemd-boot, RPi4/VideoCore)
+	// configures no env device, so fw_printenv can never succeed there - and
+	// libubootenv's fw_printenv SIGSEGVs on it instead of exiting cleanly
+	// (the same crash BUG-178 guards against in cli.initDualRootfsDevice).
+	// This probe runs twice per install (WriteEnv writes mender_boot_part and
+	// mender_boot_part_hex, each syncing the FAT) and once per commit
+	// (ClearDirectBootBackup), so each OTA produced sig=11 audit lines (and
+	// coredumps wherever the core pipeline catches them). Answer "no working
+	// env" statically in exactly that
+	// case; the result is the same false the crashed exec already produced.
+	// A MISSING config still falls through to the real probe (unchanged).
+	if fwEnvConfigExistsWithoutActiveEntries(uBootEnvConfigPath) {
+		return false
+	}
 	// fw_printenv with no args dumps the whole environment; a board with no
 	// U-Boot env returns a non-zero exit. Output is discarded — we only need
 	// the exit status. Read-only, so safe to run during an OTA install.
 	if err := exec.Command(path).Run(); err != nil {
+		return false
+	}
+	return true
+}
+
+// fwEnvConfigExistsWithoutActiveEntries reports whether path is a readable
+// file with no non-blank, non-comment line (BUG-436). An unreadable or
+// missing file returns false so the caller keeps its original exec probe.
+func fwEnvConfigExistsWithoutActiveEntries(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
 		return false
 	}
 	return true
