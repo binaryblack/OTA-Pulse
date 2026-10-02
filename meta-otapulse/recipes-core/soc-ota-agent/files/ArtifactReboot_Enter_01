@@ -279,17 +279,21 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
     else
         TARGET_LABEL="rootfs_a"
     fi
-    # TODO-056/BUG-440 Phase 2: preserve the OLD (currently-booted, known-good)
-    # extlinux.conf as extlinux-prev.conf BEFORE rewriting root= -- this is
-    # what the U-Boot-side altbootcmd (cm5-bootcount-ext.cfg's CONFIG_PREBOOT)
-    # falls back to via `sysboot mmc 0:2 any ${scriptaddr} /extlinux/extlinux-prev.conf`
-    # if the new slot never boots far enough to clear its bootcount. Distinct
-    # from switch-boot-slot.sh's own extlinux.conf.bak (a same-cycle undo
-    # safety copy for a failed sed, never consulted by the bootloader) --
-    # extlinux-prev.conf is the bootloader-readable fallback and must always
-    # be the PREVIOUS cycle's good config, so it is only refreshed here, once
-    # per install, not on every switch-boot-slot.sh call.
+    # BUG-440: arm the U-Boot extlinux boot-count net (multiboard_yocto
+    # u-boot-rockchip/0001-cm5-otapulse-extlinux-net-preboot.patch). U-Boot
+    # treats the presence of extlinux-prev.conf as "a slot switch is
+    # pending", counts boot attempts in the 1-byte FAT-root file otabcnt,
+    # and on the 5th boot sysboots extlinux-prev.conf -- the OLD, known-good
+    # config preserved here BEFORE root= is rewritten. Counter first (reset
+    # to '0'), then the prev conf, so U-Boot never sees an armed net with a
+    # stale counter from an earlier cycle. extlinux-prev.conf is refreshed
+    # once per install; switch-boot-slot.sh's extlinux.conf.bak is a
+    # separate same-cycle undo copy the bootloader never reads.
+    # ArtifactCommit_Enter_01 disarms this; otapulse-boot-health cleans up
+    # after a revert.
+    printf '0' > "$MNT/otabcnt"
     cp "$MNT/extlinux/extlinux.conf" "$MNT/extlinux/extlinux-prev.conf"
+    sync
     sed -i "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${TARGET_LABEL}/g" \
         "$MNT/extlinux/extlinux.conf"
     # BUG-440 Phase 1(b), applied dynamically every install (not just at
@@ -309,7 +313,7 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
         sed -i '/^[[:space:]]*append/ s#$# init=/sbin/init#' "$MNT/extlinux/extlinux.conf"
     fi
     sync
-    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL} (extlinux-prev.conf preserved, panic=/rootdelay= ensured)" >&2
+    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL} (extlinux-prev.conf preserved, otabcnt armed, panic=/rootdelay= ensured)" >&2
 fi
 
 # ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────

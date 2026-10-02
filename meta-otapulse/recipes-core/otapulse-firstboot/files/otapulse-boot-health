@@ -29,8 +29,11 @@
 # What this does (runs from systemd BEFORE soc-ota-agent.service, so it works
 # even when the agent never starts):
 #   0. If neither class applies (no FAT boot partition, or a U-Boot-env board,
-#      or an extlinux/systemd-boot board — those manage their own fallback
-#      elsewhere) -> no-op, exit 0.
+#      or a systemd-boot board — those manage their own fallback elsewhere)
+#      -> no-op, exit 0. An extlinux board (Radxa CM5) gets its own small
+#      branch, extlinux_boot_health(): it only finalises or cleans up after
+#      the U-Boot extlinux boot-count net (BUG-440) and never counts boots
+#      itself.
 #   1. If no upgrade is pending (upgrade_available != 1) -> exit 0 (defensively
 #      reset boot_count to 0 and drop any stale rollback backup — pure hygiene).
 #   2. Otherwise increment boot_count and persist it.
@@ -330,6 +333,149 @@ file_based_boot_health() {
     exit 0
 }
 
+# BUG-440: extlinux/sysboot boards (Radxa CM5). The slot pointer is
+# extlinux/extlinux.conf's root= line, and the pre-kernel net is the U-Boot
+# hush script baked into the CM5 U-Boot default env (multiboard_yocto
+# u-boot-rockchip/0001-cm5-otapulse-extlinux-net-preboot.patch). Its state on
+# the FAT:
+#   extlinux/extlinux-prev.conf  present = a slot switch is pending (armed);
+#                                written by ArtifactReboot_Enter_01 sec. 3,
+#                                removed by ArtifactCommit_Enter_01
+#   otabcnt                      '0'..'4' attempts, 'X' disarmed,
+#                                'V' = U-Boot reverted to extlinux-prev.conf
+# U-Boot cannot delete files or write into subdirectories, so after a revert
+# it keeps booting extlinux-prev.conf until Linux on the reverted slot makes
+# that permanent. This function does that (and nothing else): it never
+# counts boots or reverts by itself -- the agent's own commit/rollback
+# handles a new slot that boots but is unhealthy, and U-Boot handles one
+# that never gets this far.
+#
+# Always exits the whole script.
+running_partlabel() {
+    _root=$(grep -oE 'root=[^ ]+' /proc/cmdline 2>/dev/null | head -1 | sed -E 's/^root=//' || true)
+    case "$_root" in
+        PARTLABEL=*)
+            echo "${_root#PARTLABEL=}"
+            return 0
+            ;;
+    esac
+    _dev=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    [ -n "$_dev" ] || return 0
+    blkid -s PARTLABEL -o value "$_dev" 2>/dev/null || true
+}
+
+conf_partlabel() {
+    grep -oE 'root=PARTLABEL=rootfs_[ab]' "$1" 2>/dev/null | head -1 | sed 's/root=PARTLABEL=//' || true
+}
+
+extlinux_boot_health() {
+    XCONF="$MNT/extlinux/extlinux.conf"
+    XPREV="$MNT/extlinux/extlinux-prev.conf"
+    XBC="$MNT/otabcnt"
+
+    # BUG-317: same guard as the other branches. Every decision below either
+    # reads or writes /data/ota state, and the 'V' branch must clear
+    # upgrade_available BEFORE it makes extlinux.conf point at the running
+    # slot -- doing the FAT half alone would let the agent's commit guard
+    # pass on the old slot (HOLE A). Untouched, U-Boot just keeps booting
+    # extlinux-prev.conf, so deferring is always safe.
+    if ! mountpoint -q /data 2>/dev/null; then
+        log "/data not mounted yet — deferring to the agent, touching nothing (extlinux)"
+        cleanup
+        exit 0
+    fi
+
+    XBC_VAL=""
+    if [ -f "$XBC" ]; then
+        XBC_VAL=$(head -c 1 "$XBC" 2>/dev/null || true)
+    fi
+
+    if [ ! -f "$XPREV" ]; then
+        # Idle. U-Boot ignores otabcnt without extlinux-prev.conf, so a
+        # leftover value is inert -- normalise it anyway so the state on the
+        # FAT always reads as what it is.
+        if [ -n "$XBC_VAL" ] && [ "$XBC_VAL" != "X" ]; then
+            printf 'X' > "$XBC" 2>/dev/null && sync && \
+                log "extlinux: no pending switch — normalised stale otabcnt '$XBC_VAL' to X"
+        fi
+        cleanup
+        exit 0
+    fi
+
+    RUN_LABEL=$(running_partlabel)
+    PREV_LABEL=$(conf_partlabel "$XPREV")
+    CONF_LABEL=$(conf_partlabel "$XCONF")
+
+    if [ "$XBC_VAL" = "V" ]; then
+        if [ -z "$PREV_LABEL" ] || [ "$RUN_LABEL" != "$PREV_LABEL" ]; then
+            log "WARNING: otabcnt=V but running root '${RUN_LABEL}' is not extlinux-prev.conf's '${PREV_LABEL}' — leaving the revert state untouched"
+            cleanup
+            exit 0
+        fi
+        log "EXTLINUX-NET revert detected (otabcnt=V, running ${RUN_LABEL} = extlinux-prev.conf) — U-Boot reverted a pending slot that never booted; making the revert permanent and clearing upgrade_available so the agent does not falsely commit"
+        # HOLE A first (see the guard comment above). If it cannot be
+        # cleared, stop: U-Boot keeps booting the good slot meanwhile.
+        if ! write_ota "$UPGRADE_AVAIL_FILE" "0"; then
+            log "ERROR: failed to clear upgrade_available — leaving the revert state for the next boot"
+            cleanup
+            exit 0
+        fi
+        RUN_PARTNUM=$(readlink -f "/dev/disk/by-partlabel/${RUN_LABEL}" 2>/dev/null | grep -oE '[0-9]+$' || true)
+        if [ -n "$RUN_PARTNUM" ]; then
+            write_ota "$OTA_DIR/mender_boot_part" "$RUN_PARTNUM" \
+                || log "WARNING: failed to mirror the reverted slot into $OTA_DIR/mender_boot_part"
+            if [ -f "$MNT/mender_boot_part" ]; then
+                printf '%s' "$RUN_PARTNUM" > "$MNT/mender_boot_part" 2>/dev/null \
+                    || log "WARNING: failed to mirror the reverted slot into the FAT mender_boot_part"
+            fi
+        fi
+        if cp "$XPREV" "$XCONF.tmp" 2>/dev/null && mv "$XCONF.tmp" "$XCONF" 2>/dev/null; then
+            sync
+            rm -f "$XPREV"
+            printf 'X' > "$XBC" 2>/dev/null || true
+            sync
+            log "extlinux: revert made permanent — extlinux.conf now root=PARTLABEL=${RUN_LABEL}, extlinux-prev.conf removed, otabcnt=X"
+        else
+            rm -f "$XCONF.tmp" 2>/dev/null || true
+            log "ERROR: failed to restore extlinux.conf from extlinux-prev.conf — leaving the revert state for the next boot"
+        fi
+        cleanup
+        exit 0
+    fi
+
+    UPGRADE_AVAIL=$(read_ota "$UPGRADE_AVAIL_FILE" "0")
+    if [ "$UPGRADE_AVAIL" = "1" ]; then
+        # A switch is genuinely pending: ArtifactCommit_Enter_01 disarms on
+        # a good commit, the agent's rollback (or U-Boot) handles a bad one.
+        log "extlinux: slot switch pending (running ${RUN_LABEL}, extlinux.conf ${CONF_LABEL}, otabcnt '${XBC_VAL}') — leaving it to the agent / U-Boot net"
+        cleanup
+        exit 0
+    fi
+
+    # No pending upgrade but still armed: the cycle ended (commit, agent
+    # rollback) without its cleanup landing. Disarm, and if extlinux.conf
+    # does not point at the slot we are actually running on while
+    # extlinux-prev.conf does, follow the running slot -- it is the one
+    # proven to boot this far.
+    if [ -n "$PREV_LABEL" ] && [ "$RUN_LABEL" = "$PREV_LABEL" ] && [ "$CONF_LABEL" != "$RUN_LABEL" ]; then
+        if cp "$XPREV" "$XCONF.tmp" 2>/dev/null && mv "$XCONF.tmp" "$XCONF" 2>/dev/null; then
+            sync
+            log "extlinux: no pending upgrade and extlinux.conf pointed at ${CONF_LABEL} while running ${RUN_LABEL} — restored extlinux.conf from extlinux-prev.conf"
+        else
+            rm -f "$XCONF.tmp" 2>/dev/null || true
+            log "ERROR: failed to restore extlinux.conf from extlinux-prev.conf — leaving the net armed"
+            cleanup
+            exit 0
+        fi
+    fi
+    rm -f "$XPREV"
+    printf 'X' > "$XBC" 2>/dev/null || true
+    sync
+    log "extlinux: no pending upgrade — removed stale extlinux-prev.conf, otabcnt=X"
+    cleanup
+    exit 0
+}
+
 # ── 1. Direct-boot board detection ──────────────────────────────────────────
 FAT_DEV=$(find_fat_boot || true)
 if [ -z "$FAT_DEV" ]; then
@@ -351,9 +497,9 @@ trap cleanup EXIT INT TERM
 # partition — handle those with the original (Class A) logic below. A board
 # with no cmdline.txt but a boot.scr + mender_boot_part (Class B — e.g. Orange
 # Pi Zero 2W) gets its own branch (see file-based-boot section further down).
-# Anything else (extlinux / systemd-boot EFI) is handled by the bootloader's
-# own Automatic Boot Assessment (see ArtifactReboot_Enter_01 sections 3/4) —
-# this script is a no-op there.
+# systemd-boot EFI is handled by the bootloader's own Automatic Boot
+# Assessment (see ArtifactReboot_Enter_01 section 4) — this script is a no-op
+# there. extlinux boards go to extlinux_boot_health() (BUG-440).
 if [ ! -f "$MNT/cmdline.txt" ]; then
     # BUG-440/GAP: mirror installer/file_bootenv.go's isBootScrNumericBoard
     # exactly (same check order, same two paths). boot.scr alone is NOT
@@ -365,8 +511,14 @@ if [ ! -f "$MNT/cmdline.txt" ]; then
     # condition below, so this script would rewrite FAT files sysboot never
     # reads, clear upgrade_available, and disarm the one working (agent-driven)
     # revert path on its 3rd boot -- confirmed live 2026-09-23, see BUG-440.
-    if [ -d "$MNT/loader/entries" ] || [ -f "$MNT/extlinux/extlinux.conf" ]; then
-        log "extlinux/systemd-boot present on $FAT_DEV — bootloader's own Automatic Boot Assessment applies, nothing to do"
+    if [ -d "$MNT/loader/entries" ]; then
+        log "systemd-boot present on $FAT_DEV — bootloader's own Automatic Boot Assessment applies, nothing to do"
+        cleanup
+        exit 0
+    fi
+    if [ -f "$MNT/extlinux/extlinux.conf" ]; then
+        log "extlinux present on $FAT_DEV — extlinux/U-Boot boot-count net board"
+        extlinux_boot_health
         cleanup
         exit 0
     fi

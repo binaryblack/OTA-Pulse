@@ -251,22 +251,16 @@ if [ -f "$MNT/extlinux/extlinux.conf" ]; then
         exit 1
     fi
 
-    # Confirmed-good boot: clear the pending-revert fallback and reset the
-    # U-Boot-side bootcount so the next install cycle starts clean. The
-    # counter is BOOTCOUNT_EXT's own 2-byte format (drivers/bootcount/
-    # bootcount_ext.c: byte0=0xbc magic, byte1=count) written as a plain
-    # file -- no fw_setenv, no persistent U-Boot env, matching cm5-bootcount-
-    # ext.cfg's design (see multiboard_yocto's u-boot-rockchip_%.bbappend).
+    # Confirmed-good boot: disarm the U-Boot extlinux boot-count net (see
+    # ArtifactReboot_Enter_01 section 3). Removing extlinux-prev.conf is what
+    # disarms it -- U-Boot only counts while that file exists -- so it goes
+    # first; the 'X' in otabcnt is belt and braces for a torn rm.
     if [ -f "$MNT/extlinux/extlinux-prev.conf" ]; then
         rm -f "$MNT/extlinux/extlinux-prev.conf"
-        sync
     fi
-    if [ -d /data ]; then
-        mkdir -p /data/ota
-        printf '\274\000' > /data/ota/uboot_bootcount
-        sync
-    fi
-    echo "ArtifactCommit_Enter: extlinux (CM5) board — running root matches root=PARTLABEL=${EXPECTED_LABEL}, cleared extlinux-prev.conf + reset uboot_bootcount"
+    printf 'X' > "$MNT/otabcnt"
+    sync
+    echo "ArtifactCommit_Enter: extlinux (CM5) board — running root matches root=PARTLABEL=${EXPECTED_LABEL}, cleared extlinux-prev.conf + disarmed otabcnt"
     cleanup
     exit 0
 fi
