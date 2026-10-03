@@ -15,10 +15,13 @@
 package client
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +39,16 @@ type UpdateResumer struct {
 	contentLength int64
 	retryAttempts int
 	maxWait       time.Duration
+
+	// BUG-433 diagnosability (see download_break_diag.go): the TLS state
+	// and start point of the connection currently being read, and the
+	// kernel counters at the start of the current window (download start,
+	// or the previous break).
+	connTLS      *tls.ConnectionState
+	connProto    string
+	connStart    time.Time
+	connStartOff int64
+	diagBaseline netCounters
 }
 
 // Note: It is important that nothing has been read from the stream yet.
@@ -51,7 +64,32 @@ func NewUpdateResumer(stream io.ReadCloser,
 		req:           req,
 		contentLength: contentLength,
 		maxWait:       maxWait,
+		connStart:     time.Now(),
+		diagBaseline:  readNetCounters(),
 	}
+}
+
+// noteConnection records which connection the stream now comes from, for
+// the BUG-433 break diagnostics. Safe with a nil response.
+func (h *UpdateResumer) noteConnection(res *http.Response) {
+	h.connStart = time.Now()
+	h.connStartOff = h.offset
+	if res == nil {
+		h.connTLS, h.connProto = nil, ""
+		return
+	}
+	h.connTLS, h.connProto = res.TLS, res.Proto
+}
+
+// logBreakDiagnostics emits the one BUG-433 diagnostics line for a stream
+// break and starts a new counter window.
+func (h *UpdateResumer) logBreakDiagnostics(err error) {
+	now := readNetCounters()
+	log.Warn(formatDownloadBreakDiag(err, h.offset, h.contentLength,
+		h.offset-h.connStartOff, time.Since(h.connStart),
+		describeTLS(h.connTLS, h.connProto), os.Getenv("GODEBUG"),
+		runtime.GOMAXPROCS(0), h.diagBaseline, now, ifaceDriver))
+	h.diagBaseline = now
 }
 
 func (h *UpdateResumer) Read(buf []byte) (int, error) {
@@ -80,6 +118,7 @@ func (h *UpdateResumer) Read(buf []byte) (int, error) {
 		// shadowed and never printed, which made a server answering a Range
 		// request with 200 look like three fresh TLS failures in the journal.
 		log.Errorf("Download connection broken: %s", err.Error())
+		h.logBreakDiagnostics(err)
 
 		var res *http.Response
 		for {
@@ -112,6 +151,7 @@ func (h *UpdateResumer) Read(buf []byte) (int, error) {
 			}
 
 			h.stream = stream
+			h.noteConnection(res)
 			break
 		}
 
