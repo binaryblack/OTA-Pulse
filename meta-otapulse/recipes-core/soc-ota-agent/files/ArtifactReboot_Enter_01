@@ -279,17 +279,48 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
     else
         TARGET_LABEL="rootfs_a"
     fi
-    # TODO-056/BUG-440 Phase 2: preserve the OLD (currently-booted, known-good)
-    # extlinux.conf as extlinux-prev.conf BEFORE rewriting root= -- this is
-    # what the U-Boot-side altbootcmd (cm5-bootcount-ext.cfg's CONFIG_PREBOOT)
-    # falls back to via `sysboot mmc 0:2 any ${scriptaddr} /extlinux/extlinux-prev.conf`
-    # if the new slot never boots far enough to clear its bootcount. Distinct
-    # from switch-boot-slot.sh's own extlinux.conf.bak (a same-cycle undo
-    # safety copy for a failed sed, never consulted by the bootloader) --
-    # extlinux-prev.conf is the bootloader-readable fallback and must always
-    # be the PREVIOUS cycle's good config, so it is only refreshed here, once
-    # per install, not on every switch-boot-slot.sh call.
-    cp "$MNT/extlinux/extlinux.conf" "$MNT/extlinux/extlinux-prev.conf"
+    # BUG-440: arm the U-Boot extlinux boot-count net (multiboard_yocto
+    # u-boot-rockchip/0001-cm5-otapulse-extlinux-net-preboot.patch). U-Boot
+    # treats the presence of extlinux-prev.conf as "a slot switch is
+    # pending", counts boot attempts in the 1-byte FAT-root file otabcnt,
+    # and on the 5th boot sysboots extlinux-prev.conf, which must therefore
+    # boot the slot we are RUNNING NOW (the known-good one).
+    #
+    # It is built from the running slot, never copied from extlinux.conf:
+    # the agent's own switchBootSlot() (switch-boot-slot.sh try_extlinux)
+    # has normally ALREADY rewritten extlinux.conf to the target before this
+    # state script runs, so a copy would point the fallback at the very slot
+    # it must protect against. Exactly that happened in BOOTCOUNT-002's
+    # first live run (2026-10-03): the net reverted correctly, into the
+    # corrupted slot, and the board needed Maskrom recovery.
+    #
+    # If the running slot cannot be identified, or equals the target, do not
+    # arm at all -- no net is safer than a net aimed at the wrong slot.
+    # Counter first (reset to '0'), then the prev conf, so U-Boot never sees
+    # an armed net with a stale counter. ArtifactCommit_Enter_01 disarms;
+    # otapulse-boot-health finalises a revert.
+    RUN_LABEL=$(grep -oE 'root=PARTLABEL=rootfs_[ab]' /proc/cmdline 2>/dev/null | head -1 | sed 's/root=PARTLABEL=//')
+    if [ -z "$RUN_LABEL" ]; then
+        RUN_LABEL=$(blkid -s PARTLABEL -o value "$(findmnt -n -o SOURCE / 2>/dev/null)" 2>/dev/null || true)
+    fi
+    if { [ "$RUN_LABEL" = rootfs_a ] || [ "$RUN_LABEL" = rootfs_b ]; } && [ "$RUN_LABEL" != "$TARGET_LABEL" ]; then
+        printf '0' > "$MNT/otabcnt"
+        sed "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${RUN_LABEL}/g" \
+            "$MNT/extlinux/extlinux.conf" > "$MNT/extlinux/extlinux-prev.tmp"
+        if grep -q "root=PARTLABEL=${RUN_LABEL}" "$MNT/extlinux/extlinux-prev.tmp"; then
+            mv "$MNT/extlinux/extlinux-prev.tmp" "$MNT/extlinux/extlinux-prev.conf"
+            XNET_STATE="armed, fallback root=PARTLABEL=${RUN_LABEL}"
+        else
+            rm -f "$MNT/extlinux/extlinux-prev.tmp" "$MNT/extlinux/extlinux-prev.conf"
+            printf 'X' > "$MNT/otabcnt"
+            XNET_STATE="NOT armed (could not build extlinux-prev.conf)"
+        fi
+    else
+        rm -f "$MNT/extlinux/extlinux-prev.conf"
+        printf 'X' > "$MNT/otabcnt"
+        XNET_STATE="NOT armed (running slot '${RUN_LABEL}' unknown or equal to target ${TARGET_LABEL})"
+    fi
+    sync
     sed -i "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${TARGET_LABEL}/g" \
         "$MNT/extlinux/extlinux.conf"
     # BUG-440 Phase 1(b), applied dynamically every install (not just at
@@ -309,7 +340,7 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
         sed -i '/^[[:space:]]*append/ s#$# init=/sbin/init#' "$MNT/extlinux/extlinux.conf"
     fi
     sync
-    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL} (extlinux-prev.conf preserved, panic=/rootdelay= ensured)" >&2
+    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL}; extlinux net ${XNET_STATE}; panic=/rootdelay= ensured" >&2
 fi
 
 # ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────

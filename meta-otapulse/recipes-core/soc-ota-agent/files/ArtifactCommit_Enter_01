@@ -251,22 +251,33 @@ if [ -f "$MNT/extlinux/extlinux.conf" ]; then
         exit 1
     fi
 
-    # Confirmed-good boot: clear the pending-revert fallback and reset the
-    # U-Boot-side bootcount so the next install cycle starts clean. The
-    # counter is BOOTCOUNT_EXT's own 2-byte format (drivers/bootcount/
-    # bootcount_ext.c: byte0=0xbc magic, byte1=count) written as a plain
-    # file -- no fw_setenv, no persistent U-Boot env, matching cm5-bootcount-
-    # ext.cfg's design (see multiboard_yocto's u-boot-rockchip_%.bbappend).
+    # BUG-440: extlinux.conf alone is not proof -- anything that repoints it
+    # at the running slot (a bootloader-level revert finalised elsewhere, a
+    # manual recovery) makes the check above pass on the OLD slot. Seen live
+    # 2026-10-03: a corrupted deployment was committed as a success from the
+    # untouched old slot. Also require the running partition to be the
+    # install target the agent recorded in $BOOT_PART_FILE, the same check
+    # the boot.scr-numeric guard above makes.
+    if [ -s "$BOOT_PART_FILE" ]; then
+        TARGET_PART=$(tr -dc '0-9' < "$BOOT_PART_FILE")
+        RUNNING_PART=$(printf '%s' "$RUNNING_ROOT_REAL" | grep -oE '[0-9]+$' || true)
+        if [ -z "$TARGET_PART" ] || [ "$RUNNING_PART" != "$TARGET_PART" ]; then
+            echo "ArtifactCommit_Enter: REFUSING commit — running partition ${RUNNING_PART:-?} is not the install target ${TARGET_PART:-<unreadable>} from $BOOT_PART_FILE (extlinux board)"
+            cleanup
+            exit 1
+        fi
+    fi
+
+    # Confirmed-good boot: disarm the U-Boot extlinux boot-count net (see
+    # ArtifactReboot_Enter_01 section 3). Removing extlinux-prev.conf is what
+    # disarms it -- U-Boot only counts while that file exists -- so it goes
+    # first; the 'X' in otabcnt is belt and braces for a torn rm.
     if [ -f "$MNT/extlinux/extlinux-prev.conf" ]; then
         rm -f "$MNT/extlinux/extlinux-prev.conf"
-        sync
     fi
-    if [ -d /data ]; then
-        mkdir -p /data/ota
-        printf '\274\000' > /data/ota/uboot_bootcount
-        sync
-    fi
-    echo "ArtifactCommit_Enter: extlinux (CM5) board — running root matches root=PARTLABEL=${EXPECTED_LABEL}, cleared extlinux-prev.conf + reset uboot_bootcount"
+    printf 'X' > "$MNT/otabcnt"
+    sync
+    echo "ArtifactCommit_Enter: extlinux (CM5) board — running root matches root=PARTLABEL=${EXPECTED_LABEL}, cleared extlinux-prev.conf + disarmed otabcnt"
     cleanup
     exit 0
 fi
