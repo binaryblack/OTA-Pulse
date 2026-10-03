@@ -293,7 +293,9 @@ func (u *UpdateClient) FetchUpdate(
 		return nil, -1, errors.New("Image size is smaller than expected. Aborting.")
 	}
 
-	return NewUpdateResumer(r.Body, contentLength, maxWait, api, req), contentLength, nil
+	resumer := NewUpdateResumer(r.Body, contentLength, maxWait, api, req)
+	resumer.noteConnection(r)
+	return resumer, contentLength, nil
 }
 
 type UpdateResponse struct {
