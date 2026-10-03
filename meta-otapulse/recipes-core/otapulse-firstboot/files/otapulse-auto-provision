@@ -138,6 +138,19 @@ print(next((x.get('id', '') for x in items if x.get('device_id') == device_id), 
     echo "$uuid"
 }
 
+# The device's own SoCAPIKey, with soc-ota-agent's precedence: the main
+# config overrides the /data fallback copy when it carries the field (see
+# soc-ota-agent/app/mender.go newSoCAPIKeyReloader / conf.LoadConfig).
+# Echoes "" when neither file has one. Never fails under set -e.
+get_device_api_key() {
+    local key=""
+    [ -f "$MAIN_CONFIG_FILE" ] && key=$(read_json_field "$MAIN_CONFIG_FILE" SoCAPIKey)
+    if [ -z "$key" ] && [ -f "$CONFIG_FILE" ]; then
+        key=$(read_json_field "$CONFIG_FILE" SoCAPIKey)
+    fi
+    echo "$key"
+}
+
 # Write a freshly-minted sotc_ tunnel credential to disk, patch tunnel.conf's
 # proxyName to $1 (device_id), write the tunnel marker, and (re)start
 # soc-ota-tunneld. Shared by both tunnel-provisioning call sites (the
@@ -447,6 +460,7 @@ DEVICE_UUID=""
 API_KEY=""
 
 TUNNEL_PROVISIONED_VIA_TOKEN=""
+TUNNEL_PROVISIONED_VIA_DEVICE_KEY=""
 
 if [ "$MAIN_PROVISION_DONE" -eq 0 ]; then
     # === Full first-time provisioning: registration + API key =============
@@ -634,15 +648,55 @@ EOF
         log "Manual provisioning may be required: soc-ota-provision --server $SERVER_URL --token <token>"
     fi
 else
-    # === Tunnel self-heal only: resolve identity via admin auth ===========
+    # === Tunnel self-heal only ============================================
     # Main provisioning already happened; the device already has its API key.
-    # Do NOT touch device registration or mint a new API key here — only
-    # resolve JWT_TOKEN/ORG_ID/DEVICE_UUID for the CURRENT $DEVICE_ID (used
-    # only to look up the device's DEVICE_UUID for the rotate call below) so
-    # the tunnel-realignment section can re-mint the sotc credential.
+    # Do NOT touch device registration or mint a new API key here. First try
+    # the device-authenticated rotate (BUG-367, below). Only if that is not
+    # available, resolve JWT_TOKEN/ORG_ID/DEVICE_UUID for the CURRENT
+    # $DEVICE_ID via admin auth (used only to look up the device's
+    # DEVICE_UUID for the rotate call further down) so the
+    # tunnel-realignment section can re-mint the sotc credential.
     log "Tunnel credential is stale for current identity ($DEVICE_ID) — resolving for self-heal"
 
-    if [ -z "$OTAPULSE_ADMIN_EMAIL" ] || [ -z "$OTAPULSE_ADMIN_PASSWORD" ]; then
+    # BUG-367: preferred — rotate ONLY the tunnel credential with the
+    # device's own API key (POST /api/v1/tunnel-credential/rotate, X-API-Key
+    # + X-Device-ID). No admin session at all, so MFA cannot block it, and
+    # unlike re-provisioning (Method 0) it never rotates the API key. The
+    # server only accepts a key bound to this exact device. Any non-200
+    # (older backend without the route -> 404/405, org-scoped key -> 403,
+    # rate limit -> 429, ...) falls through to the admin-auth path below,
+    # unchanged.
+    DEVICE_API_KEY=$(get_device_api_key)
+    if [ -n "$DEVICE_API_KEY" ]; then
+        log "Attempting device-authenticated tunnel credential rotation..."
+        DEV_ROTATE_OUT=$(curl -s --max-time 30 \
+            -X POST "${SERVER_URL}/api/v1/tunnel-credential/rotate" \
+            -H "X-API-Key: $DEVICE_API_KEY" \
+            -H "X-Device-ID: $DEVICE_ID" \
+            -H "Content-Type: application/json" \
+            -d "{}" \
+            -w '\n%{http_code}' 2>/dev/null || printf '{}\n000')
+        DEV_ROTATE_CODE=$(printf '%s' "$DEV_ROTATE_OUT" | tail -n1)
+        DEV_ROTATE_BODY=$(printf '%s' "$DEV_ROTATE_OUT" | sed '$d')
+        if [ "$DEV_ROTATE_CODE" = "200" ]; then
+            DEV_SOTC=$(printf '%s' "$DEV_ROTATE_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tunnel_token') or '')" 2>/dev/null || true)
+            DEV_UUID=$(printf '%s' "$DEV_ROTATE_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('device_id') or '')" 2>/dev/null || true)
+            if write_tunnel_credential "$DEV_SOTC" "$DEVICE_ID" "$DEV_UUID"; then
+                TUNNEL_PROVISIONED_VIA_DEVICE_KEY=1
+                log "Device-authenticated tunnel credential rotation succeeded"
+            fi
+        else
+            # Never log the body verbatim: keep the log free of anything
+            # the server might echo back.
+            log "Device-authenticated tunnel rotation not available (HTTP $DEV_ROTATE_CODE) — falling back to admin auth"
+        fi
+    else
+        log "No SoCAPIKey on this device — device-authenticated tunnel rotation skipped"
+    fi
+
+    if [ -n "$TUNNEL_PROVISIONED_VIA_DEVICE_KEY" ]; then
+        : # Healed with the device's own key; no admin session needed.
+    elif [ -z "$OTAPULSE_ADMIN_EMAIL" ] || [ -z "$OTAPULSE_ADMIN_PASSWORD" ]; then
         log "ERROR: OTAPULSE_ADMIN_EMAIL/OTAPULSE_ADMIN_PASSWORD not set — cannot self-heal tunnel credential without admin auth. Supply them via $PROVISION_ENV. Skipping."
     else
         JWT_RESPONSE=$(curl -sf --max-time 30 \
@@ -687,6 +741,8 @@ fi
 # self-heal resolution flow above).
 if [ -n "$TUNNEL_PROVISIONED_VIA_TOKEN" ]; then
     : # Already handled by the provisioning-token fast path (Method 0) above.
+elif [ -n "$TUNNEL_PROVISIONED_VIA_DEVICE_KEY" ]; then
+    : # Already handled by the device-authenticated rotation (BUG-367) above.
 elif [ -z "$JWT_TOKEN" ] || [ -z "$ORG_ID" ] || [ -z "$DEVICE_UUID" ]; then
     log "Tunnel provisioning skipped — missing JWT_TOKEN/ORG_ID/DEVICE_UUID"
 else
