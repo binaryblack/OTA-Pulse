@@ -612,6 +612,47 @@ if is_static_gpt_bsp; then
     handle_static_gpt_bsp
 fi
 
+# =============================================================================
+# BUG-319: mount the data partition at /data and CHECK that it stays mounted.
+# =============================================================================
+# On the first boot that creates the data partition, fstab's data.mount
+# (/dev/disk/by-partlabel/data, nofail) is still waiting for its device.
+# sgdisk names the new partition "data" before mkfs runs, so data.mount can
+# fire on the unformatted partition and fail ("wrong fs type"). partprobe also
+# re-adds the new partitions, so udev may still be handling them when this
+# script mounts, and systemd can drop a mount whose device it has not seen
+# yet. Seen live on qemux86-64 (BUG-319 handoff round 3): data.mount failed,
+# /data stayed unmounted for the whole first boot and /data/ota was seeded on
+# the rootfs instead. So: let udev settle, clear the failed data.mount, mount,
+# re-check after a pause, and retry a few times.
+mount_data_partition() {
+    local dev="$1" attempt
+    mkdir -p /data
+    for attempt in 1 2 3 4 5; do
+        if mountpoint -q /data 2>/dev/null; then
+            return 0
+        fi
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm settle --timeout=10 || true
+        fi
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl reset-failed data.mount 2>/dev/null || true
+        fi
+        if mount "$dev" /data; then
+            sleep 1
+            if mountpoint -q /data 2>/dev/null; then
+                log "Mounted $dev at /data"
+                return 0
+            fi
+            log "WARNING: $dev was mounted at /data but did not stay mounted (attempt $attempt/5)"
+        else
+            log "WARNING: mounting $dev at /data failed (attempt $attempt/5)"
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 # EARLY CHECK: If all required partitions exist with correct labels and are formatted,
 # we don't need to do anything. This handles WIC images that pre-create partitions
 # and also the OTA-to-partition-B case (marker file only on partition A's rootfs).
@@ -669,9 +710,7 @@ if check_all_partitions_ready; then
             mount_dev="/dev/disk/by-partlabel/userdata"
         fi
         if [ -n "$mount_dev" ]; then
-            mkdir -p /data
-            mount "$mount_dev" /data 2>/dev/null || true
-            log "Mounted $mount_dev at /data"
+            mount_data_partition "$mount_dev" || log "WARNING: could not mount $mount_dev at /data"
         fi
     fi
 
@@ -1013,9 +1052,10 @@ sleep 2
 log "Verifying partition labels..."
 ls -la /dev/disk/by-partlabel/ || true
 
-# Create marker file
-mkdir -p "$(dirname $MARKER_FILE)"
-touch "$MARKER_FILE"
+# The marker file is written only at the very end, once /data is mounted
+# and seeded (BUG-319). If anything below fails, the service exits non-zero
+# and Restart=on-failure runs this script again; the retry finds the
+# partitions already created and formatted and takes the early path above.
 
 log "Partition setup complete!"
 log "Final partition layout:"
@@ -1034,14 +1074,7 @@ fi
 lsblk -o NAME,SIZE,LABEL,PARTLABEL,FSTYPE "$BASE_DEV" || true
 
 # Mount data partition
-if [ ! -d "/data" ]; then
-    mkdir -p /data
-fi
-
-if ! mountpoint -q /data; then
-    mount "$DATA_DEV" /data
-    log "Mounted data partition at /data"
-fi
+mount_data_partition "$DATA_DEV" || error "Could not mount $DATA_DEV at /data; setup left unmarked so it runs again"
 
 # Create OTAPulse persistent directories on /data partition
 # These directories persist across A/B OTA updates
@@ -1094,6 +1127,10 @@ initialize_boot_env() {
 }
 
 initialize_boot_env
+
+# Create marker file
+mkdir -p "$(dirname $MARKER_FILE)"
+touch "$MARKER_FILE"
 
 log "OTAPulse partition setup completed successfully!"
 exit 0
