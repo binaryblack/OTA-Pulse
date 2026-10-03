@@ -1,0 +1,31 @@
+[Unit]
+Description=OTAPulse pending-upgrade boot deadline (BUG-356)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+
+[Timer]
+# Deadline N, measured from kernel start (monotonic, unaffected by NTP
+# steps). The service is a no-op unless otapulse-boot-health armed THIS boot
+# for a pending, uncommitted upgrade, so on every other boot this timer
+# fires into nothing.
+#
+# 1200 s, not 600 s: before it commits, a healthy pending boot may spend up
+# to ~120 s on time sync, then the ArtifactReboot_Leave / ArtifactCommit_Enter
+# state scripts (each bounded only by StateScriptTimeoutSeconds=600,
+# otapulse.conf.in) and up to 4 x 30 s of pre-commit status-report retries.
+# Not yet backed by measured boot->commit times (BUG-356 handoff q2).
+#
+# pause_before_committing: an update control map that pauses the agent
+# before commit for longer than this would be turned into a reboot (and so,
+# eventually, a revert). No server emits one today (socMonitoring
+# control_map.py and the TETS dashboard only pause at ArtifactInstall_Enter);
+# raise this, or disable the timer, before introducing one.
+#
+# Worst case to revert a wedged update: ~2 x (boot + N) + boot -- attempts 1
+# and 2 hit the deadline, attempt 3 is reverted by otapulse-boot-health
+# itself (RPi4: one deadline, the tryboot one-shot falls back at once).
+OnBootSec=1200
+AccuracySec=1s
+Unit=otapulse-boot-deadline.service
+
+[Install]
+WantedBy=timers.target

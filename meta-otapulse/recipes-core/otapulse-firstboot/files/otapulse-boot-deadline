@@ -1,0 +1,100 @@
+#!/bin/sh
+# OTAPulse: otapulse-boot-deadline (BUG-356)  BOOT-DEADLINE/1
+#
+# Run once per boot by otapulse-boot-deadline.timer (OnBootSec, see that unit
+# for the deadline value and why). Reboots a board whose pending-upgrade boot
+# attempt never committed and never rebooted on its own -- the "alive but
+# dark forever" wedge of BUG-355's second orange-pi-zero2w incident, where a
+# few userspace services crash-looped, the kernel never panicked, and so
+# neither otapulse-boot-health's counter nor U-Boot's bootcount net ever
+# advanced.
+#
+# It ONLY reboots. It never touches mender_boot_part, cmdline.txt, the
+# *_prev files or any counter: turning the reboot into a revert stays with
+# the mechanisms that already do that on the next boot (otapulse-boot-health
+# at MAX_BOOT_RETRIES, U-Boot's bootcount net, and on RPi4 the firmware's
+# tryboot one-shot, which any reset clears).
+#
+# Acts only when ALL of these hold, otherwise exits 0 without doing anything:
+#   1. otapulse-boot-health armed THIS boot (/run marker, boot_id matches):
+#      it counted a pending-upgrade attempt below MAX_BOOT_RETRIES. An idle
+#      boot never has a marker, so an install started later in such a boot
+#      (upgrade_available=1 is written BEFORE its reboot) is never touched.
+#   2. /data is mounted and upgrade_available still reads 1 (a commit or a
+#      rollback clears it).
+#   3. upgrade_available is still the very file boot-health counted against
+#      (inode:mtime). The agent rewrites it atomically, so a commit followed
+#      by a NEW install in this same boot stands the deadline down too.
+# Any doubt (unreadable marker, /data gone, stat missing) means "do nothing",
+# i.e. the pre-BUG-356 behaviour.
+
+set -u
+
+LOG_TAG="otapulse-boot-deadline"
+UPGRADE_AVAIL_FILE="/data/ota/upgrade_available"
+DEADLINE_MARKER="/run/otapulse/pending-boot"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    logger -t "$LOG_TAG" "$1" 2>/dev/null || true
+}
+
+marker_get() {
+    sed -n "s/^$1=//p" "$DEADLINE_MARKER" 2>/dev/null | head -n 1
+}
+
+# 1. Armed this boot?
+[ -f "$DEADLINE_MARKER" ] || exit 0
+
+M_BOOTID=$(marker_get boot_id)
+M_STAMP=$(marker_get ua_stamp)
+M_ATTEMPT=$(marker_get attempt)
+CUR_BOOTID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+if [ -z "$M_BOOTID" ] || [ -z "$CUR_BOOTID" ] || [ "$M_BOOTID" != "$CUR_BOOTID" ]; then
+    log "marker does not belong to this boot — not acting"
+    exit 0
+fi
+
+# 2. Still pending?
+if ! mountpoint -q /data 2>/dev/null; then
+    log "/data not mounted — cannot confirm the upgrade is still pending, not acting"
+    exit 0
+fi
+UA=$(tr -dc '0-9' < "$UPGRADE_AVAIL_FILE" 2>/dev/null || true)
+if [ "$UA" != "1" ]; then
+    log "upgrade no longer pending (upgrade_available='${UA}') — committed or rolled back, nothing to do"
+    rm -f "$DEADLINE_MARKER" 2>/dev/null || true
+    exit 0
+fi
+
+# 3. Same pending upgrade boot-health counted?
+CUR_STAMP=$(stat -c '%i:%Y' "$UPGRADE_AVAIL_FILE" 2>/dev/null || true)
+if [ -z "$M_STAMP" ] || [ "$CUR_STAMP" != "$M_STAMP" ]; then
+    log "upgrade_available was rewritten since boot attempt ${M_ATTEMPT:-?} was counted (${M_STAMP:-?} -> ${CUR_STAMP:-?}) — a new cycle, not acting"
+    rm -f "$DEADLINE_MARKER" 2>/dev/null || true
+    exit 0
+fi
+
+log "BOOT-DEADLINE expired: pending-upgrade boot attempt ${M_ATTEMPT:-?} never committed — rebooting so the existing boot-attempt counters / bootloader fallback can revert it"
+rm -f "$DEADLINE_MARKER" 2>/dev/null || true
+sync
+
+# Graceful first, then forced, then the kernel directly (the same ladder
+# socmond-watchdog's trigger_reboot ends in). Each step is time-bounded so a
+# hung userspace cannot stall the escalation. A plain reboot: never
+# "0 tryboot" (that would re-try the new slot on RPi4).
+bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 60 "$@"
+    else
+        "$@"
+    fi
+}
+if bounded systemctl reboot 2>/dev/null; then
+    exit 0
+fi
+log "systemctl reboot failed — forcing"
+bounded reboot -f
+sync
+echo b > /proc/sysrq-trigger 2>/dev/null
+exit 1

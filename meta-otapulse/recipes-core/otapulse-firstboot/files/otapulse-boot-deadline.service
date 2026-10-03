@@ -1,0 +1,17 @@
+[Unit]
+Description=OTAPulse pending-upgrade boot deadline check (BUG-356)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Started only by otapulse-boot-deadline.timer. The marker is written by
+# otapulse-boot-health only on a boot that counted a pending, uncommitted
+# upgrade attempt; on every other boot this unit is skipped. The script
+# re-checks everything itself, this condition just keeps steady-state boots
+# quiet.
+ConditionPathExists=/run/otapulse/pending-boot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/otapulse-boot-deadline
+StandardOutput=journal+console
+StandardError=journal+console
+# Two 60 s-bounded reboot attempts plus slack (see the script).
+TimeoutStartSec=180

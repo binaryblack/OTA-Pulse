@@ -53,7 +53,8 @@
 #      marker-scheme boards), clear upgrade_available + boot_count, then
 #      reboot onto the known-good slot.
 #   4. Otherwise exit 0 and let the boot continue (the agent, if it comes up,
-#      will CommitUpdate and clear the flags).
+#      will CommitUpdate and clear the flags). Before exiting, arm the boot
+#      deadline for this attempt (BUG-356, see arm_boot_deadline below).
 #
 # Hardware/architecture independent: the FAT boot partition is located by GPT/FS
 # label (never a hardcoded /dev node), the same way as ArtifactReboot_Enter_01.
@@ -72,6 +73,16 @@ BOOT_COUNT_FILE="$OTA_DIR/boot_count"
 # Shared by both the direct-boot (cmdline.txt) and file-based-boot (boot.scr)
 # branches below.
 MAX_BOOT_RETRIES=3
+
+# BUG-356: per-boot marker read by otapulse-boot-deadline.service. /run is a
+# tmpfs, so the marker can only ever describe the CURRENT boot. Written ONLY
+# when this script just counted (and persisted) a pending-upgrade boot
+# attempt below MAX_BOOT_RETRIES; never on an idle boot, so steady-state
+# boards and a later in-this-boot install (which sets upgrade_available=1
+# BEFORE its reboot) can never be hit by the deadline. The deadline itself
+# (OnBootSec) lives in otapulse-boot-deadline.timer.
+DEADLINE_MARKER_DIR="/run/otapulse"
+DEADLINE_MARKER="$DEADLINE_MARKER_DIR/pending-boot"
 
 MNT=""
 
@@ -122,6 +133,42 @@ write_ota() {
     _value="$2"
     mkdir -p "$OTA_DIR" 2>/dev/null || true
     printf '%s\n' "$_value" > "$_file" 2>/dev/null || return 1
+    return 0
+}
+
+# BUG-356: a pending-upgrade boot that wedges in userspace without panicking
+# never reboots, so neither this script's counter nor U-Boot's ever advances
+# and nothing reverts it. Record this boot attempt for
+# otapulse-boot-deadline, which (if upgrade_available is still the SAME
+# value this script just counted against when the deadline expires) only
+# reboots -- the revert itself stays with the existing mechanisms on the
+# next boot (this script's counter at MAX_BOOT_RETRIES, U-Boot's bootcount
+# net, or on RPi4 the firmware's tryboot one-shot falling back to the old
+# slot).
+#
+# The marker pins the exact upgrade_available file this attempt was counted
+# against (inode + mtime): the agent writes it atomically (temp + rename,
+# file_bootenv.go writeFileAtomic), so a commit (ua=0), or a commit followed
+# by a NEW install later in this same boot (ua=1 again), changes it and the
+# deadline stands down. Best-effort and never fatal: if this boot cannot be
+# identified the deadline is simply not armed (the pre-BUG-356 behaviour).
+arm_boot_deadline() {
+    _attempt="$1"
+    _stamp=$(stat -c '%i:%Y' "$UPGRADE_AVAIL_FILE" 2>/dev/null || true)
+    _bootid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+    if [ -z "$_stamp" ] || [ -z "$_bootid" ]; then
+        log "WARNING: cannot identify this pending boot (ua_stamp='${_stamp}' boot_id='${_bootid}') — boot deadline NOT armed"
+        return 0
+    fi
+    if mkdir -p "$DEADLINE_MARKER_DIR" 2>/dev/null && \
+       printf 'boot_id=%s\nua_stamp=%s\nattempt=%s\n' "$_bootid" "$_stamp" "$_attempt" \
+           > "$DEADLINE_MARKER.tmp" 2>/dev/null && \
+       mv -f "$DEADLINE_MARKER.tmp" "$DEADLINE_MARKER" 2>/dev/null; then
+        log "BOOT-DEADLINE armed for pending boot attempt $_attempt/$MAX_BOOT_RETRIES (otapulse-boot-deadline.timer reboots if it is still uncommitted at the deadline)"
+    else
+        rm -f "$DEADLINE_MARKER.tmp" 2>/dev/null || true
+        log "WARNING: failed to write $DEADLINE_MARKER — boot deadline NOT armed"
+    fi
     return 0
 }
 
@@ -263,7 +310,9 @@ file_based_boot_health() {
     FAT_BC=$(tr -dc '0-9' < "$FAT_BOOT_COUNT_FILE" 2>/dev/null || true)
     FAT_BC=${FAT_BC:-0}
     FAT_BC=$((FAT_BC + 1))
+    FAT_BC_PERSISTED=1
     if ! printf '%s' "$FAT_BC" > "$FAT_BOOT_COUNT_FILE" 2>/dev/null; then
+        FAT_BC_PERSISTED=0
         log "WARNING: failed to persist FAT boot_count=$FAT_BC (continuing on in-memory value)"
     fi
     sync
@@ -329,6 +378,13 @@ file_based_boot_health() {
     fi
 
     # ── Still within the retry budget — let the boot continue ──────────────
+    # BUG-356: only with a persisted count -- a deadline reboot that the
+    # next boot cannot count would just repeat this attempt forever.
+    if [ "$FAT_BC_PERSISTED" = "1" ]; then
+        arm_boot_deadline "$FAT_BC"
+    else
+        log "WARNING: boot attempt not persisted — boot deadline NOT armed"
+    fi
     cleanup
     exit 0
 }
@@ -585,7 +641,11 @@ fi
 # under `set -e` an unguarded failing write here would do exactly that.
 BOOT_COUNT=$(read_ota "$BOOT_COUNT_FILE" "0")
 BOOT_COUNT=$((BOOT_COUNT + 1))
-write_ota "$BOOT_COUNT_FILE" "$BOOT_COUNT" || log "WARNING: failed to persist boot_count=$BOOT_COUNT (continuing on in-memory value)"
+BOOT_COUNT_PERSISTED=1
+write_ota "$BOOT_COUNT_FILE" "$BOOT_COUNT" || {
+    BOOT_COUNT_PERSISTED=0
+    log "WARNING: failed to persist boot_count=$BOOT_COUNT (continuing on in-memory value)"
+}
 sync
 log "Pending upgrade: boot attempt $BOOT_COUNT/$MAX_BOOT_RETRIES"
 
@@ -621,5 +681,13 @@ if [ "$BOOT_COUNT" -ge "$MAX_BOOT_RETRIES" ]; then
 fi
 
 # ── 5. Still within the retry budget — let the boot continue ────────────────
+# BUG-356: arm the boot deadline (see arm_boot_deadline), only with a
+# persisted count. On RPi4 this is a tryboot: the deadline's plain reboot
+# clears the firmware one-shot, so the next boot is already the old slot.
+if [ "$BOOT_COUNT_PERSISTED" = "1" ]; then
+    arm_boot_deadline "$BOOT_COUNT"
+else
+    log "WARNING: boot attempt not persisted — boot deadline NOT armed"
+fi
 cleanup
 exit 0
