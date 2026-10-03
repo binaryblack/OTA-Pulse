@@ -379,8 +379,21 @@ extlinux_boot_health() {
     # slot -- doing the FAT half alone would let the agent's commit guard
     # pass on the old slot (HOLE A). Untouched, U-Boot just keeps booting
     # extlinux-prev.conf, so deferring is always safe.
+    #
+    # Unlike the other branches this one WAITS for /data first: on CM5 this
+    # unit (DefaultDependencies=no, /data is a nofail mount local-fs.target
+    # does not wait for) reliably runs ~40 ms before data.mount completes
+    # (seen live 2026-10-03), so an immediate check would defer on every
+    # boot and the 'V' finalisation would never run. Bounded by the fstab
+    # entry's own x-systemd.device-timeout=60; soc-ota-agent is ordered
+    # after this unit, so nothing races the wait.
+    _waited=0
+    while ! mountpoint -q /data 2>/dev/null && [ "$_waited" -lt "${DATA_MOUNT_WAIT_S:-60}" ]; do
+        sleep 1
+        _waited=$((_waited + 1))
+    done
     if ! mountpoint -q /data 2>/dev/null; then
-        log "/data not mounted yet — deferring to the agent, touching nothing (extlinux)"
+        log "/data still not mounted after ${_waited}s — deferring to the agent, touching nothing (extlinux)"
         cleanup
         exit 0
     fi
