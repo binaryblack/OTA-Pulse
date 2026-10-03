@@ -22,6 +22,9 @@ SRC_URI = " \
     file://otapulse-partition-setup.service \
     file://otapulse-boot-health \
     file://otapulse-boot-health.service \
+    file://otapulse-boot-deadline \
+    file://otapulse-boot-deadline.service \
+    file://otapulse-boot-deadline.timer \
     file://otapulse-auto-provision \
     file://otapulse-auto-provision.service \
     file://otapulse-machine-id \
@@ -45,7 +48,9 @@ RDEPENDS:${PN} = " \
 
 inherit systemd
 
-SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service otapulse-boot-health.service otapulse-auto-provision.service otapulse-machine-id.service"
+# otapulse-boot-deadline.timer (BUG-356) is the enabled unit; its .service is
+# static, started only by the timer.
+SYSTEMD_SERVICE:${PN} = "otapulse-partition-setup.service otapulse-boot-health.service otapulse-boot-deadline.timer otapulse-auto-provision.service otapulse-machine-id.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 do_install() {
@@ -55,6 +60,9 @@ do_install() {
 
     # Install pre-agent boot-health script (direct-boot brick prevention)
     install -m 0755 ${WORKDIR}/otapulse-boot-health ${D}${bindir}/otapulse-boot-health
+
+    # BUG-356: pending-upgrade boot deadline (armed by otapulse-boot-health)
+    install -m 0755 ${WORKDIR}/otapulse-boot-deadline ${D}${bindir}/otapulse-boot-deadline
 
     # Install auto-provisioning script
     install -m 0755 ${WORKDIR}/otapulse-auto-provision ${D}${bindir}/otapulse-auto-provision
@@ -66,6 +74,8 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/otapulse-partition-setup.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/otapulse-boot-health.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${WORKDIR}/otapulse-boot-deadline.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${WORKDIR}/otapulse-boot-deadline.timer ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/otapulse-auto-provision.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/otapulse-machine-id.service ${D}${systemd_system_unitdir}/
 
@@ -83,10 +93,13 @@ do_install() {
 FILES:${PN} = " \
     ${bindir}/otapulse-partition-setup \
     ${bindir}/otapulse-boot-health \
+    ${bindir}/otapulse-boot-deadline \
     ${bindir}/otapulse-auto-provision \
     ${bindir}/otapulse-machine-id \
     ${systemd_system_unitdir}/otapulse-partition-setup.service \
     ${systemd_system_unitdir}/otapulse-boot-health.service \
+    ${systemd_system_unitdir}/otapulse-boot-deadline.service \
+    ${systemd_system_unitdir}/otapulse-boot-deadline.timer \
     ${systemd_system_unitdir}/otapulse-auto-provision.service \
     ${systemd_system_unitdir}/otapulse-machine-id.service \
     ${nonarch_base_libdir}/udev/rules.d/99-otapulse-bsp-aliases.rules \
