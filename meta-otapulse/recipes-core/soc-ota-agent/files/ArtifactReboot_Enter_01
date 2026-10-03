@@ -283,16 +283,43 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
     # u-boot-rockchip/0001-cm5-otapulse-extlinux-net-preboot.patch). U-Boot
     # treats the presence of extlinux-prev.conf as "a slot switch is
     # pending", counts boot attempts in the 1-byte FAT-root file otabcnt,
-    # and on the 5th boot sysboots extlinux-prev.conf -- the OLD, known-good
-    # config preserved here BEFORE root= is rewritten. Counter first (reset
-    # to '0'), then the prev conf, so U-Boot never sees an armed net with a
-    # stale counter from an earlier cycle. extlinux-prev.conf is refreshed
-    # once per install; switch-boot-slot.sh's extlinux.conf.bak is a
-    # separate same-cycle undo copy the bootloader never reads.
-    # ArtifactCommit_Enter_01 disarms this; otapulse-boot-health cleans up
-    # after a revert.
-    printf '0' > "$MNT/otabcnt"
-    cp "$MNT/extlinux/extlinux.conf" "$MNT/extlinux/extlinux-prev.conf"
+    # and on the 5th boot sysboots extlinux-prev.conf, which must therefore
+    # boot the slot we are RUNNING NOW (the known-good one).
+    #
+    # It is built from the running slot, never copied from extlinux.conf:
+    # the agent's own switchBootSlot() (switch-boot-slot.sh try_extlinux)
+    # has normally ALREADY rewritten extlinux.conf to the target before this
+    # state script runs, so a copy would point the fallback at the very slot
+    # it must protect against. Exactly that happened in BOOTCOUNT-002's
+    # first live run (2026-10-03): the net reverted correctly, into the
+    # corrupted slot, and the board needed Maskrom recovery.
+    #
+    # If the running slot cannot be identified, or equals the target, do not
+    # arm at all -- no net is safer than a net aimed at the wrong slot.
+    # Counter first (reset to '0'), then the prev conf, so U-Boot never sees
+    # an armed net with a stale counter. ArtifactCommit_Enter_01 disarms;
+    # otapulse-boot-health finalises a revert.
+    RUN_LABEL=$(grep -oE 'root=PARTLABEL=rootfs_[ab]' /proc/cmdline 2>/dev/null | head -1 | sed 's/root=PARTLABEL=//')
+    if [ -z "$RUN_LABEL" ]; then
+        RUN_LABEL=$(blkid -s PARTLABEL -o value "$(findmnt -n -o SOURCE / 2>/dev/null)" 2>/dev/null || true)
+    fi
+    if { [ "$RUN_LABEL" = rootfs_a ] || [ "$RUN_LABEL" = rootfs_b ]; } && [ "$RUN_LABEL" != "$TARGET_LABEL" ]; then
+        printf '0' > "$MNT/otabcnt"
+        sed "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${RUN_LABEL}/g" \
+            "$MNT/extlinux/extlinux.conf" > "$MNT/extlinux/extlinux-prev.tmp"
+        if grep -q "root=PARTLABEL=${RUN_LABEL}" "$MNT/extlinux/extlinux-prev.tmp"; then
+            mv "$MNT/extlinux/extlinux-prev.tmp" "$MNT/extlinux/extlinux-prev.conf"
+            XNET_STATE="armed, fallback root=PARTLABEL=${RUN_LABEL}"
+        else
+            rm -f "$MNT/extlinux/extlinux-prev.tmp" "$MNT/extlinux/extlinux-prev.conf"
+            printf 'X' > "$MNT/otabcnt"
+            XNET_STATE="NOT armed (could not build extlinux-prev.conf)"
+        fi
+    else
+        rm -f "$MNT/extlinux/extlinux-prev.conf"
+        printf 'X' > "$MNT/otabcnt"
+        XNET_STATE="NOT armed (running slot '${RUN_LABEL}' unknown or equal to target ${TARGET_LABEL})"
+    fi
     sync
     sed -i "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${TARGET_LABEL}/g" \
         "$MNT/extlinux/extlinux.conf"
@@ -313,7 +340,7 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
         sed -i '/^[[:space:]]*append/ s#$# init=/sbin/init#' "$MNT/extlinux/extlinux.conf"
     fi
     sync
-    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL} (extlinux-prev.conf preserved, otabcnt armed, panic=/rootdelay= ensured)" >&2
+    echo "ArtifactReboot_Enter: extlinux.conf -> root=PARTLABEL=${TARGET_LABEL}; extlinux net ${XNET_STATE}; panic=/rootdelay= ensured" >&2
 fi
 
 # ── 4. systemd-boot / EFI ABA (loader/entries) slot switch ───────────────────
