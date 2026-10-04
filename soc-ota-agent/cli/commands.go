@@ -453,9 +453,36 @@ func runDaemon(d *app.MenderDaemon) error {
 	return d.Run()
 }
 
+// daemonUnitNames are the systemd units the agent daemon runs under, in lookup
+// order. Yocto images (meta-otapulse) install soc-ota-agent.service; Buildroot
+// images (buildroot-otapulse/package/otapulse/otapulse.mk) install the same
+// daemon as otapulse.service. Asking systemd only for soc-ota-agent made
+// `check-update` / `send-inventory` fail with "could not find the PID" on
+// every Buildroot image (BUG-478).
+var daemonUnitNames = []string{"soc-ota-agent", "otapulse"}
+
+// daemonPIDCommands returns one `systemctl show -p MainPID <unit>` command per
+// entry of daemonUnitNames.
+func daemonPIDCommands() []*system.Cmd {
+	cmds := make([]*system.Cmd, 0, len(daemonUnitNames))
+	for _, unit := range daemonUnitNames {
+		cmds = append(cmds, system.Command("systemctl", "show", "-p", "MainPID", unit))
+	}
+	return cmds
+}
+
 // sendSignalToProcess sends a SIGUSR{1,2} signal to the running mender daemon.
-func sendSignalToProcess(cmdKill, cmdGetPID *system.Cmd) error {
-	pid, err := getMenderDaemonPID(cmdGetPID)
+// cmdGetPIDs are tried in order; the first one that yields a non-zero MainPID
+// wins. Nothing is signalled when none does.
+func sendSignalToProcess(cmdKill *system.Cmd, cmdGetPIDs ...*system.Cmd) error {
+	var pid string
+	err := errors.New("could not find the PID of the ota-pulse daemon")
+	for _, cmdGetPID := range cmdGetPIDs {
+		pid, err = getMenderDaemonPID(cmdGetPID)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return errors.Wrap(err, "failed to force updateCheck")
 	}
