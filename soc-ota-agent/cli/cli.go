@@ -147,9 +147,7 @@ func SetupCLI(args []string) error {
 			Action: func(_ *cli.Context) error {
 				return sendSignalToProcess(
 					system.Command("kill", "-USR1"),
-					system.Command("systemctl",
-						"show", "-p",
-						"MainPID", "soc-ota-agent"))
+					daemonPIDCommands()...)
 			},
 		},
 		{
@@ -203,9 +201,7 @@ func SetupCLI(args []string) error {
 			Action: func(_ *cli.Context) error {
 				return sendSignalToProcess(
 					system.Command("kill", "-USR2"),
-					system.Command("systemctl",
-						"show", "-p",
-						"MainPID", "soc-ota-agent"))
+					daemonPIDCommands()...)
 			},
 		},
 		{
