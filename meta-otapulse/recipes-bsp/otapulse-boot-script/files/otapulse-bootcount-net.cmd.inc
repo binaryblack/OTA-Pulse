@@ -88,8 +88,14 @@ if load ${bootiface} ${mmcdev}:${mmcpart} ${scriptaddr} mender_boot_part_prev; t
     # holding whatever it held before (the mender_boot_part byte read by the
     # caller, at this SAME address) -- silently aliasing "previous" to
     # "current". Zeroing first makes that case read as 0x00, matching
-    # neither recognised slot value nor the sentinel, so it falls through as
-    # "unrecognised" and this block no-ops safely.
+    # neither recognised slot value nor the sentinel. That is NOT a no-op
+    # (BUG-468): it fails the sentinel test below, so the full counting
+    # ladder runs with " panic=15 init=/sbin/init" appended, and at the
+    # threshold it logs "unrecognised, cannot revert -- leaving bootpart
+    # as-is" and writes the 'X' sentinel WITHOUT reverting. Accepted and
+    # self-healing: the first healthy Linux boot with no pending upgrade has
+    # otapulse-boot-health's hygiene branch remove the stray _prev and reset
+    # uboot_boot_count, so normally only one counting step ever happens.
     setexpr.b prevpart *${scriptaddr}
 
     if test ${prevpart} = 88 -o ${prevpart} = 58; then
