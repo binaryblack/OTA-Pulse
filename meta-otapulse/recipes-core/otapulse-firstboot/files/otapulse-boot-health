@@ -172,6 +172,54 @@ arm_boot_deadline() {
     return 0
 }
 
+# BUG-468: durable record that the U-Boot bootcount-net fragment (not a
+# human, not this script's own MAX_BOOT_RETRIES revert) reverted the board.
+# Written ONLY by the HOLE-A branch below, before it zeroes the FAT counters
+# and removes the 'X' sentinel -- otherwise nothing fragment-specific
+# survives (journald is volatile, and the agent's RollbackReboot ends the
+# revert boot). One line, overwritten per revert:
+#   revert_seq=N boot_id=<revert boot> reverted_to=<digit>
+#   uboot_boot_count=<FAT value> boot_count=<FAT value> recorded_at=<UTC>
+# revert_seq increments across reverts (a reader snapshots it before a
+# deploy); recorded_at is informational only -- the early-boot clock may be
+# unset. Nothing else (agent commit/rollback, ClearDirectBootBackup, the
+# hygiene branch) touches this file. A pure log/marker write: always run in
+# a subshell with `||`, so no failure here (full /data, a corrupt previous
+# record) can abort or change the revert branch around it.
+REVERT_RECORD_FILE="$OTA_DIR/bootcount_net_last_revert"
+
+record_bootcount_net_revert() {
+    _seq=""
+    _line=""
+    if [ -f "$REVERT_RECORD_FILE" ]; then
+        IFS= read -r _line < "$REVERT_RECORD_FILE" 2>/dev/null || true
+    fi
+    case "$_line" in
+        *revert_seq=*)
+            _seq=${_line#*revert_seq=}
+            _seq=$(printf '%s' "${_seq%% *}" | tr -dc '0-9')
+            ;;
+    esac
+    # Leading zeros would read as octal in $(( )); absurd lengths overflow.
+    while [ "${_seq#0}" != "$_seq" ]; do _seq=${_seq#0}; done
+    [ ${#_seq} -le 9 ] || _seq=""
+    _seq=$((${_seq:-0} + 1))
+    _rec="revert_seq=$_seq"
+    _rec="$_rec boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    _rec="$_rec reverted_to=$(tr -dc '0-9' < "$MNT/mender_boot_part" 2>/dev/null || true)"
+    _rec="$_rec uboot_boot_count=$(tr -dc '0-9' < "$FAT_UBOOT_COUNT_FILE" 2>/dev/null || true)"
+    _rec="$_rec boot_count=$(tr -dc '0-9' < "$FAT_BOOT_COUNT_FILE" 2>/dev/null || true)"
+    _rec="$_rec recorded_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+    mkdir -p "$OTA_DIR" 2>/dev/null || true
+    if printf '%s\n' "$_rec" > "$REVERT_RECORD_FILE.tmp" 2>/dev/null && \
+       mv -f "$REVERT_RECORD_FILE.tmp" "$REVERT_RECORD_FILE" 2>/dev/null; then
+        log "BOOTCOUNT-NET revert recorded in $REVERT_RECORD_FILE ($_rec)"
+        return 0
+    fi
+    rm -f "$REVERT_RECORD_FILE.tmp" 2>/dev/null || true
+    return 1
+}
+
 # Class B: file-based-boot board (boot.scr + mender_boot_part on the FAT boot
 # partition, no cmdline.txt, no working U-Boot env — e.g. Orange Pi Zero 2W).
 #
@@ -293,6 +341,10 @@ file_based_boot_health() {
                     || log "WARNING: failed to mirror the reverted mender_boot_part into $OTA_DIR"
             fi
             write_ota "$UPGRADE_AVAIL_FILE" "0" || log "WARNING: failed to clear upgrade_available after a detected bootloader-level revert"
+            # BUG-468: evidence only, isolated in a subshell (see
+            # record_bootcount_net_revert) -- must precede the counter
+            # zeroing and sentinel removal below, which it records.
+            ( record_bootcount_net_revert ) || log "WARNING: failed to write the bootcount-net revert record ($REVERT_RECORD_FILE) — revert handling continues unchanged"
             printf '0' > "$FAT_BOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT boot_count after a detected bootloader-level revert"
             printf '0' > "$FAT_UBOOT_COUNT_FILE" 2>/dev/null || log "WARNING: failed to clear FAT uboot_boot_count after a detected bootloader-level revert"
             rm -f "$FAT_PREV_PART_FILE"
