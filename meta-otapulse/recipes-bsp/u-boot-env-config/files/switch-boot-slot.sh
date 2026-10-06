@@ -257,6 +257,119 @@ try_fw_setenv() {
     return 1
 }
 
+# TODO-112 / TASK-S95-001: arm the CM5 U-Boot extlinux boot-count net EARLY.
+#
+# The net (multiboard_yocto u-boot-rockchip/0001-cm5-otapulse-extlinux-net-
+# preboot.patch, OTAPULSE-EXTLINUX-NET/2) treats extlinux/extlinux-prev.conf
+# as "a slot switch is pending", counts boot attempts in the 1-byte FAT-root
+# file otabcnt, and on the 5th boot sysboots extlinux-prev.conf -- which must
+# therefore boot the slot we are RUNNING NOW (the known-good one).
+#
+# ArtifactReboot_Enter_01 section 3 used to be the ONLY place that armed it.
+# But the agent's InstallUpdate() runs THIS script (and so rewrites
+# extlinux.conf to the target slot) and sets upgrade_available=1 BEFORE that
+# state script runs. A power cut in that window booted the new slot with no
+# net at all. So arm here, immediately BEFORE the extlinux.conf rewrite: at
+# this point extlinux.conf still names the running slot, so the fallback is
+# built from it (root= forced to the running slot's PARTLABEL, derived from
+# /proc/cmdline with a findmnt/blkid fallback -- never from the target).
+# Counter first ('0'), then the prev conf, so U-Boot never sees an armed net
+# with a stale counter. ArtifactCommit_Enter_01 disarms; otapulse-boot-health
+# finalises a revert; ArtifactReboot_Enter_01 section 3 is an idempotent
+# re-arm (leaves an armed net alone, never re-arms over a 'V' revert).
+#
+# Arming is best-effort and must NEVER fail or block the install: every
+# error path logs and returns 0 (this script runs under `set -e`). It is also
+# FORWARD-INSTALL ONLY: Rollback() calls this script too (with
+# upgrade_available already cleared to 0, and the RUNNING slot being the one
+# that failed), and arming then would aim the fallback at the bad slot.
+# Self-gates exactly like Reboot_Enter: unknown running slot, or running ==
+# target => no arm (no net is safer than a net aimed at the wrong slot).
+EXTLINUX_NET_ARMED=0
+arm_extlinux_net() {
+    local conf="$1" new_root="$2"
+    local extdir fatroot prev tmp bcf ua target_label run_label cur_bc
+
+    extdir=$(dirname "$conf")
+    fatroot=$(dirname "$extdir")
+    prev="$extdir/extlinux-prev.conf"
+    tmp="$extdir/extlinux-prev.tmp"
+    bcf="$fatroot/otabcnt"
+
+    ua=""
+    if [ -r "${UPGRADE_AVAILABLE_FILE:-/data/ota/upgrade_available}" ]; then
+        ua=$(tr -dc '0-9' < "${UPGRADE_AVAILABLE_FILE:-/data/ota/upgrade_available}" 2>/dev/null || true)
+    fi
+    if [ "$ua" != "1" ]; then
+        log "extlinux net: not arming (upgrade_available='${ua}' -- not a forward install)"
+        return 0
+    fi
+
+    case "$new_root" in
+        PARTLABEL=rootfs_a|PARTLABEL=rootfs_b)
+            target_label="${new_root#PARTLABEL=}"
+            ;;
+        *)
+            log "extlinux net: not arming (target root '${new_root}' is not a rootfs_a/rootfs_b PARTLABEL)"
+            return 0
+            ;;
+    esac
+
+    run_label=$(grep -oE 'root=PARTLABEL=rootfs_[ab]' /proc/cmdline 2>/dev/null | head -1 | sed 's/root=PARTLABEL=//' || true)
+    if [ -z "$run_label" ]; then
+        run_label=$(blkid -s PARTLABEL -o value "$(findmnt -n -o SOURCE / 2>/dev/null)" 2>/dev/null || true)
+    fi
+    if [ "$run_label" != "rootfs_a" ] && [ "$run_label" != "rootfs_b" ]; then
+        log "extlinux net: not arming (running slot '${run_label}' unknown)"
+        return 0
+    fi
+    if [ "$run_label" = "$target_label" ]; then
+        log "extlinux net: not arming (running slot ${run_label} equals target)"
+        return 0
+    fi
+
+    cur_bc=""
+    if [ -f "$bcf" ]; then
+        cur_bc=$(head -c 1 "$bcf" 2>/dev/null || true)
+    fi
+    if [ "$cur_bc" = "V" ] && [ -f "$prev" ]; then
+        log "extlinux net: not re-arming (otabcnt=V: a U-Boot revert is pending finalisation by otapulse-boot-health)"
+        return 0
+    fi
+
+    if ! printf '0' > "$bcf" 2>/dev/null; then
+        log "WARNING: extlinux net: cannot write $bcf -- not armed (install continues)"
+        return 0
+    fi
+    sed "s|root=[^ ]*|root=PARTLABEL=${run_label}|g" "$conf" > "$tmp" 2>/dev/null || true
+    if grep -q "root=PARTLABEL=${run_label}" "$tmp" 2>/dev/null && mv "$tmp" "$prev" 2>/dev/null; then
+        sync
+        EXTLINUX_NET_ARMED=1
+        log "extlinux net: armed early (running ${run_label}, target ${target_label}, otabcnt=0, fallback root=PARTLABEL=${run_label})"
+    else
+        rm -f "$tmp" "$prev" 2>/dev/null || true
+        printf 'X' > "$bcf" 2>/dev/null || true
+        log "WARNING: extlinux net: could not build extlinux-prev.conf -- not armed (install continues; ArtifactReboot_Enter_01 will retry)"
+    fi
+    return 0
+}
+
+# Undo arm_extlinux_net() when the extlinux.conf rewrite it preceded failed,
+# so a failed install never leaves a net armed toward a slot switch that
+# never happened. Best-effort, never fatal.
+disarm_extlinux_net() {
+    local conf="$1"
+    local extdir fatroot
+    [ "$EXTLINUX_NET_ARMED" = "1" ] || return 0
+    extdir=$(dirname "$conf")
+    fatroot=$(dirname "$extdir")
+    rm -f "$extdir/extlinux-prev.conf" 2>/dev/null || true
+    printf 'X' > "$fatroot/otabcnt" 2>/dev/null || true
+    EXTLINUX_NET_ARMED=0
+    log "extlinux net: disarmed (extlinux.conf rewrite failed)"
+    return 0
+}
+
 # Method 3: Update extlinux.conf
 # extlinux.conf is the FIRST config U-Boot distroboot consults when present,
 # so on extlinux boards (e.g. Radxa CM5) its root= line is the sole
@@ -339,6 +452,10 @@ try_extlinux() {
         return 1
     fi
 
+    # TODO-112: arm the U-Boot extlinux net while extlinux.conf still names
+    # the RUNNING slot. Best-effort: never blocks the install.
+    arm_extlinux_net "$conf" "$new_root" || log "WARNING: extlinux net arming errored (ignored; install continues)"
+
     log "Updating extlinux.conf root=$new_root"
 
     # Backup original
@@ -353,6 +470,7 @@ try_extlinux() {
     if ! grep -q "root=$new_root" "$conf"; then
         log "extlinux.conf rewrite did not take, restoring backup"
         cp "${conf}.bak" "$conf"
+        disarm_extlinux_net "$conf" || true
         if [ -n "$mnt" ]; then
             umount "$mnt" 2>/dev/null
             rmdir "$mnt" 2>/dev/null || true

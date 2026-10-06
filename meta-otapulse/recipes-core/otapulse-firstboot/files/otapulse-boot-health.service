@@ -27,8 +27,12 @@ RemainAfterExit=yes
 ExecStart=/usr/bin/otapulse-boot-health
 StandardOutput=journal+console
 StandardError=journal+console
-# Must be fast and non-blocking — completes in well under a second in the normal
-# case. Do NOT copy partition-setup's 900s timeout; this must never hold up boot.
+# Normally completes in well under a second, EXCEPT on extlinux/sysboot boards
+# (Radxa CM5): its extlinux branch waits for /data to mount (DATA_MOUNT_WAIT_S,
+# default 45s, bounded in the script) because this unit runs before data.mount
+# completes. TimeoutStartSec must stay STRICTLY ABOVE that wait so the script's
+# own "deferring" path always runs first. Do NOT copy partition-setup's 900s
+# timeout; this must never hold up boot indefinitely.
 TimeoutStartSec=60
 
 [Install]
