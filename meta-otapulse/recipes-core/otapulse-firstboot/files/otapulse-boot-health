@@ -492,11 +492,14 @@ extlinux_boot_health() {
     # unit (DefaultDependencies=no, /data is a nofail mount local-fs.target
     # does not wait for) reliably runs ~40 ms before data.mount completes
     # (seen live 2026-10-03), so an immediate check would defer on every
-    # boot and the 'V' finalisation would never run. Bounded by the fstab
-    # entry's own x-systemd.device-timeout=60; soc-ota-agent is ordered
-    # after this unit, so nothing races the wait.
+    # boot and the 'V' finalisation would never run. Bounded at 45s -- BELOW
+    # otapulse-boot-health.service's TimeoutStartSec=60 (a wait equal to the
+    # unit timeout would let systemd SIGTERM this script mid-wait, before it
+    # ever logged its "deferring" line) and below the fstab entry's own
+    # x-systemd.device-timeout=60; soc-ota-agent is ordered after this unit,
+    # so nothing races the wait.
     _waited=0
-    while ! mountpoint -q /data 2>/dev/null && [ "$_waited" -lt "${DATA_MOUNT_WAIT_S:-60}" ]; do
+    while ! mountpoint -q /data 2>/dev/null && [ "$_waited" -lt "${DATA_MOUNT_WAIT_S:-45}" ]; do
         sleep 1
         _waited=$((_waited + 1))
     done

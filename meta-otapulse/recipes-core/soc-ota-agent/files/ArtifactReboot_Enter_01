@@ -299,11 +299,38 @@ if [ -f "$BOOT_PART_FILE" ] && [ -f "$MNT/extlinux/extlinux.conf" ]; then
     # Counter first (reset to '0'), then the prev conf, so U-Boot never sees
     # an armed net with a stale counter. ArtifactCommit_Enter_01 disarms;
     # otapulse-boot-health finalises a revert.
+    #
+    # TODO-112 / TASK-S95-001: the net is now ALSO armed EARLIER, by
+    # switch-boot-slot.sh's try_extlinux (the agent's InstallUpdate), right
+    # before it rewrites extlinux.conf -- so a power cut between InstallUpdate
+    # and this state script can no longer boot the new slot with no net.
+    # This section is therefore an IDEMPOTENT RE-ARM:
+    #   - otabcnt=V with extlinux-prev.conf present: U-Boot already reverted
+    #     and otapulse-boot-health has not finalised it yet. Never re-arm
+    #     (that would reset 'V' and re-attempt the slot that just failed).
+    #   - already armed for THIS running slot (extlinux-prev.conf present, its
+    #     root= is the running slot, otabcnt a digit '0'..'4'): leave the
+    #     counter and prev conf exactly as they are -- do not reset a count
+    #     U-Boot has already advanced.
+    #   - anything else: arm from scratch, as before.
     RUN_LABEL=$(grep -oE 'root=PARTLABEL=rootfs_[ab]' /proc/cmdline 2>/dev/null | head -1 | sed 's/root=PARTLABEL=//')
     if [ -z "$RUN_LABEL" ]; then
         RUN_LABEL=$(blkid -s PARTLABEL -o value "$(findmnt -n -o SOURCE / 2>/dev/null)" 2>/dev/null || true)
     fi
-    if { [ "$RUN_LABEL" = rootfs_a ] || [ "$RUN_LABEL" = rootfs_b ]; } && [ "$RUN_LABEL" != "$TARGET_LABEL" ]; then
+    XBC_CUR=""
+    if [ -f "$MNT/otabcnt" ]; then
+        XBC_CUR=$(head -c 1 "$MNT/otabcnt" 2>/dev/null || true)
+    fi
+    XPREV_LABEL=""
+    if [ -f "$MNT/extlinux/extlinux-prev.conf" ]; then
+        XPREV_LABEL=$(grep -oE 'root=PARTLABEL=rootfs_[ab]' "$MNT/extlinux/extlinux-prev.conf" 2>/dev/null | head -1 | sed 's/root=PARTLABEL=//' || true)
+    fi
+    if [ "$XBC_CUR" = "V" ] && [ -f "$MNT/extlinux/extlinux-prev.conf" ]; then
+        XNET_STATE="NOT re-armed (otabcnt=V: U-Boot revert pending finalisation by otapulse-boot-health)"
+    elif { [ "$RUN_LABEL" = rootfs_a ] || [ "$RUN_LABEL" = rootfs_b ]; } && [ "$RUN_LABEL" != "$TARGET_LABEL" ] \
+         && [ "$XPREV_LABEL" = "$RUN_LABEL" ] && printf '%s' "$XBC_CUR" | grep -qE '^[0-4]$'; then
+        XNET_STATE="already armed (otabcnt=${XBC_CUR}, fallback root=PARTLABEL=${XPREV_LABEL}), left untouched"
+    elif { [ "$RUN_LABEL" = rootfs_a ] || [ "$RUN_LABEL" = rootfs_b ]; } && [ "$RUN_LABEL" != "$TARGET_LABEL" ]; then
         printf '0' > "$MNT/otabcnt"
         sed "s/root=PARTLABEL=rootfs_[ab]/root=PARTLABEL=${RUN_LABEL}/g" \
             "$MNT/extlinux/extlinux.conf" > "$MNT/extlinux/extlinux-prev.tmp"
