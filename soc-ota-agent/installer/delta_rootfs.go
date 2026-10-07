@@ -113,8 +113,10 @@ const (
 
 var (
 	// How long to wait for the patch-feeding goroutine and for xdelta3's
-	// pipes after xdelta3 has exited or been killed. Variables so tests can
-	// shorten them.
+	// stderr pipe to drain after xdelta3 has exited or been killed.
+	// Variables so tests can shorten them. (deltaWaitDelay replaces
+	// os/exec.Cmd.WaitDelay, which needs Go >= 1.20; the Jetson/meta-tegra
+	// kirkstone toolchain is Go 1.17 -- see `make go-compat`.)
 	deltaStdinGrace = 10 * time.Second
 	deltaWaitDelay  = 5 * time.Second
 )
@@ -551,16 +553,30 @@ func (d *deltaRootfsInstaller) StoreUpdate(patch io.Reader, info os.FileInfo) er
 	// agent's environment out of it.
 	cmd := exec.CommandContext(ctx, d.xdelta3Path, xdelta3DecodeArgs(active)...)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
-	cmd.WaitDelay = deltaWaitDelay
+	// Own process group so a deadline/cancel can kill xdelta3 AND anything it
+	// spawned (os/exec.Cmd.WaitDelay is Go 1.20+; not available on Go 1.17).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// stderr goes through an os.Pipe that we drain ourselves: handing exec a
+	// plain io.Writer makes Wait block until EVERY holder of the write end
+	// (including orphaned grandchildren) closes it, unbounded without
+	// WaitDelay. With an *os.File exec starts no copy goroutine, so Wait only
+	// waits for the process, and the drain below is bounded by deltaWaitDelay.
 	stderr := &tailBuffer{limit: deltaStderrTailBytes}
-	cmd.Stderr = stderr
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		return errors.Wrap(err, "delta apply: stderr pipe")
+	}
+	defer stderrR.Close()
+	cmd.Stderr = stderrW
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		stderrW.Close()
 		return errors.Wrap(err, "delta apply: stdin pipe")
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		stdin.Close()
+		stderrW.Close()
 		return errors.Wrap(err, "delta apply: stdout pipe")
 	}
 
@@ -569,10 +585,37 @@ func (d *deltaRootfsInstaller) StoreUpdate(patch io.Reader, info os.FileInfo) er
 		DeltaRootfsPayloadType, active, inactive, d.targetSize, d.targetChecksum,
 		d.factory.timeout)
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	stderrW.Close() // the child holds its own copy now
+	if err != nil {
 		stdin.Close()
 		return errors.Wrap(err, "delta apply: failed to start xdelta3")
 	}
+
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		_, _ = io.Copy(stderr, stderrR)
+	}()
+
+	// Kill the whole process group once ctx is done (timeout/cancel), unless
+	// the child was already reaped (avoids signalling a recycled pid).
+	var reapMu sync.Mutex
+	reaped := false
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	pgid := cmd.Process.Pid
+	go func() {
+		select {
+		case <-ctx.Done():
+			reapMu.Lock()
+			if !reaped {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}
+			reapMu.Unlock()
+		case <-watchDone:
+		}
+	}()
 
 	stdinDone := make(chan struct{})
 	d.mu.Lock()
@@ -601,6 +644,16 @@ func (d *deltaRootfsInstaller) StoreUpdate(patch io.Reader, info os.FileInfo) er
 		cancel()
 	}
 	waitErr := cmd.Wait()
+	reapMu.Lock()
+	reaped = true
+	reapMu.Unlock()
+	// Bounded stderr drain: an orphaned grandchild may still hold the write
+	// end; give up after deltaWaitDelay (deferred stderrR.Close() unblocks the
+	// copier).
+	select {
+	case <-stderrDone:
+	case <-time.After(deltaWaitDelay):
+	}
 	if ctxErr == nil && storeErr == nil {
 		// xdelta3 finished on its own; a deadline hitting during Wait still
 		// means it was killed.

@@ -25,6 +25,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -381,6 +383,72 @@ func TestDeltaRootfs_TimeoutKillsProcess(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("patch feeder goroutine leaked after the upstream stream was closed")
 	}
+}
+
+// orphanWrapper installs an xdelta3 wrapper that first forks a long-lived
+// background child (inheriting stderr, like a leaked grandchild would) and
+// then execs the real xdelta3. It returns the path of the file holding the
+// orphan's pid. This is the scenario os/exec.Cmd.WaitDelay (Go 1.20+, absent
+// from the Jetson Go 1.17 toolchain) used to bound.
+func (f *deltaFixture) orphanWrapper(t *testing.T, d *deltaRootfsInstaller) string {
+	t.Helper()
+	pidFile := filepath.Join(f.dir, "orphan.pid")
+	script := filepath.Join(f.dir, "xdelta3-orphan")
+	body := "#!/bin/sh\nsleep 60 >/dev/null &\necho $! > " + pidFile + "\nexec " + d.xdelta3Path + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(script, []byte(body), 0700))
+	d.xdelta3Path = script
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	return pidFile
+}
+
+func TestDeltaRootfs_OrphanHoldingStderrDoesNotHangWait(t *testing.T) {
+	f := newDeltaFixture(t)
+	oldDelay := deltaWaitDelay
+	deltaWaitDelay = 500 * time.Millisecond
+	t.Cleanup(func() { deltaWaitDelay = oldDelay })
+	d := f.storer(t, f.headers(int64(len(f.target))))
+	f.orphanWrapper(t, d)
+
+	start := time.Now()
+	err := d.StoreUpdate(bytes.NewReader(f.patch), &sizeOnlyFileInfo{int64(len(f.patch))})
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 20*time.Second,
+		"an orphan holding xdelta3's stderr must not block Wait for its lifetime (60s)")
+	assertProcessGone(t, d.lastPid)
+}
+
+func TestDeltaRootfs_TimeoutKillsWholeProcessGroup(t *testing.T) {
+	f := newDeltaFixture(t)
+	f.factory.timeout = 1 * time.Second
+	oldGrace, oldDelay := deltaStdinGrace, deltaWaitDelay
+	deltaStdinGrace, deltaWaitDelay = 500*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { deltaStdinGrace, deltaWaitDelay = oldGrace, oldDelay })
+	d := f.storer(t, f.headers(int64(len(f.target))))
+	pidFile := f.orphanWrapper(t, d)
+
+	pr, pw := io.Pipe()
+	go func() { _, _ = pw.Write(f.patch[:16]) }()
+	err := d.StoreUpdate(pr, &sizeOnlyFileInfo{int64(len(f.patch))})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+	assertProcessGone(t, d.lastPid)
+
+	b, rerr := os.ReadFile(pidFile)
+	require.NoError(t, rerr)
+	orphan, aerr := strconv.Atoi(strings.TrimSpace(string(b)))
+	require.NoError(t, aerr)
+	require.Eventually(t, func() bool {
+		// Killed (and reparented/reaped by init) or at least no longer runnable.
+		st, serr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", orphan))
+		return serr != nil || strings.Contains(string(st), ") Z ")
+	}, 5*time.Second, 50*time.Millisecond, "orphaned child of xdelta3 must die with its process group")
+	pw.CloseWithError(errors.New("download aborted"))
 }
 
 func TestDeltaRootfs_CancelKillsProcess(t *testing.T) {

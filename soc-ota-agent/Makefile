@@ -248,7 +248,7 @@ check: test extracheck
 test:
 	$(GO) test $(BUILDV) $(PKGS)
 
-extracheck: gofmt govet godeadcode govarcheck gocyclo
+extracheck: gofmt go-compat govet godeadcode govarcheck gocyclo
 	echo "All extra-checks passed!"
 
 gofmt:
@@ -258,6 +258,12 @@ gofmt:
 		echo "-- gofmt check failed"; \
 		/bin/false; \
 	fi
+
+# Fail if the agent uses a Go language/stdlib feature newer than the OLDEST
+# toolchain any board image builds it with (Jetson/meta-tegra kirkstone = Go
+# 1.17.13; e.g. os/exec.Cmd.WaitDelay is 1.20+). See scripts/go-compat-check.sh.
+go-compat:
+	./scripts/go-compat-check.sh
 
 govet:
 	echo "-- checking with govet"
@@ -312,6 +318,7 @@ instrument-binary:
 .PHONY: get-tools
 .PHONY: test
 .PHONY: check
+.PHONY: go-compat
 .PHONY: cover
 .PHONY: htmlcover
 .PHONY: coverage
