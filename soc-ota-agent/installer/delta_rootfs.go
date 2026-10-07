@@ -27,7 +27,11 @@ package installer
 //     what this device therefore has persisted in its provides).
 //   - type-info artifact_provides: identical to the full target artifact,
 //     including rootfs-image.checksum = sha256 of the TARGET rootfs image.
-//   - payload meta-data: {"delta_format": "xdelta3", "target_size": <bytes>}.
+//   - payload meta-data: {"delta_format": "xdelta3", "target_size": <bytes>,
+//     "base_checksum": <hex>, "base_size": <bytes>}. base_checksum/base_size
+//     are optional; when base_size is present the first base_size bytes of
+//     the active slot are hashed and compared to the signed base checksum
+//     before anything is decoded or written (cheap source-drift detection).
 //
 // The whole header (depends, provides, meta-data) is covered by the artifact
 // signature that ReadHeaders already verifies, so every value used below is
@@ -63,6 +67,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -89,6 +94,15 @@ const (
 
 	deltaMetaFormatKey     = "delta_format"
 	deltaMetaTargetSizeKey = "target_size"
+	// Optional (backend contract, Fable review F7): size of the BASE image
+	// and its checksum, enabling a cheap source-drift pre-check.
+	deltaMetaBaseSizeKey     = "base_size"
+	deltaMetaBaseChecksumKey = "base_checksum"
+
+	// xdelta3 decode source window (-B). Decoding works with a smaller window
+	// than the encoder's (-B 64M at generation time); 16 MiB keeps xdelta3's
+	// resident memory around ~30 MB on low-RAM boards.
+	deltaDecodeSourceWindow = 16 * 1024 * 1024
 
 	xdelta3BinaryName = "xdelta3"
 	selfMountInfoPath = "/proc/self/mountinfo"
@@ -272,6 +286,8 @@ type deltaRootfsInstaller struct {
 	// Set by Initialize from the signed headers.
 	xdelta3Path    string
 	targetSize     int64
+	baseChecksum   string
+	baseSize       int64 // 0 = unknown, pre-hash skipped
 	targetChecksum string
 	initialized    bool
 	filesStored    int
@@ -313,9 +329,15 @@ func (d *deltaRootfsInstaller) Initialize(artifactHeaders,
 		return errors.Errorf("delta payload: unsupported %s %q (want %q)",
 			deltaMetaFormatKey, format, DeltaFormatXdelta3)
 	}
-	size, err := parseTargetSize(meta[deltaMetaTargetSizeKey])
+	size, err := parsePositiveSize(deltaMetaTargetSizeKey, meta[deltaMetaTargetSizeKey])
 	if err != nil {
 		return errors.Wrap(err, "delta payload")
+	}
+	var baseSize int64
+	if v, present := meta[deltaMetaBaseSizeKey]; present {
+		if baseSize, err = parsePositiveSize(deltaMetaBaseSizeKey, v); err != nil {
+			return errors.Wrap(err, "delta payload")
+		}
 	}
 
 	provides, err := payloadHeaders.GetUpdateProvides()
@@ -340,6 +362,17 @@ func (d *deltaRootfsInstaller) Initialize(artifactHeaders,
 	if err != nil {
 		return errors.Wrapf(err, "delta payload: depends %s", RootfsChecksumKey)
 	}
+	if v, present := meta[deltaMetaBaseChecksumKey]; present {
+		s, _ := v.(string)
+		metaBase, err := normaliseChecksum(s)
+		if err != nil {
+			return errors.Wrapf(err, "delta payload: meta-data %s", deltaMetaBaseChecksumKey)
+		}
+		if metaBase != base {
+			return errors.Errorf("delta payload: meta-data %s %s contradicts depends %s %s",
+				deltaMetaBaseChecksumKey, metaBase, RootfsChecksumKey, base)
+		}
+	}
 	// Defence in depth: app/state.go already rejects an unsatisfied
 	// artifact_depends before StorePayloads, but this storer must never run
 	// against a base it was not built for, whatever the caller did.
@@ -361,12 +394,14 @@ func (d *deltaRootfsInstaller) Initialize(artifactHeaders,
 
 	d.xdelta3Path = path
 	d.targetSize = size
+	d.baseChecksum = base
+	d.baseSize = baseSize
 	d.targetChecksum = target
 	d.initialized = true
 	return nil
 }
 
-func parseTargetSize(v interface{}) (int64, error) {
+func parsePositiveSize(key string, v interface{}) (int64, error) {
 	var f float64
 	switch n := v.(type) {
 	case float64:
@@ -376,11 +411,10 @@ func parseTargetSize(v interface{}) (int64, error) {
 	case int64:
 		f = float64(n)
 	default:
-		return 0, errors.Errorf("meta-data %s missing or not a number (%v)",
-			deltaMetaTargetSizeKey, v)
+		return 0, errors.Errorf("meta-data %s missing or not a number (%v)", key, v)
 	}
 	if f <= 0 || f != math.Trunc(f) || f > float64(math.MaxInt64/2) {
-		return 0, errors.Errorf("meta-data %s invalid (%v)", deltaMetaTargetSizeKey, v)
+		return 0, errors.Errorf("meta-data %s invalid (%v)", key, v)
 	}
 	return int64(f), nil
 }
@@ -504,11 +538,18 @@ func (d *deltaRootfsInstaller) StoreUpdate(patch io.Reader, info os.FileInfo) er
 	ctx, cancel := context.WithTimeout(d.factory.baseCtx, d.factory.timeout)
 	defer cancel()
 
-	// -d decode, -c to stdout, -D/-R never spawn external (de)compressors,
-	// -s the ACTIVE slot as the read-only source. Inputs are fixed argv, no
-	// shell. A minimal environment keeps XDELTA (xdelta3's default-options
-	// variable) and anything else in the agent's environment out of it.
-	cmd := exec.CommandContext(ctx, d.xdelta3Path, "-d", "-c", "-D", "-R", "-s", active)
+	// Cheap source-drift check BEFORE anything is written: the first
+	// base_size bytes of the active slot must be exactly the signed base.
+	if d.baseSize > 0 {
+		if err := verifyDeltaSource(ctx, active, d.baseSize, d.baseChecksum); err != nil {
+			return errors.Wrap(err, "delta apply refused before writing (no slot switch)")
+		}
+	}
+
+	// Fixed argv (xdelta3DecodeArgs), no shell. A minimal environment keeps
+	// XDELTA (xdelta3's default-options variable) and anything else in the
+	// agent's environment out of it.
+	cmd := exec.CommandContext(ctx, d.xdelta3Path, xdelta3DecodeArgs(active)...)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
 	cmd.WaitDelay = deltaWaitDelay
 	stderr := &tailBuffer{limit: deltaStderrTailBytes}
@@ -613,6 +654,53 @@ func (d *deltaRootfsInstaller) StoreUpdate(patch io.Reader, info os.FileInfo) er
 	}
 	log.Infof("Delta rootfs applied to %s: %d bytes, sha256 %s matches the signed target",
 		inactive, d.targetSize, got)
+	return nil
+}
+
+// xdelta3DecodeArgs: -d decode, -c to stdout, -D/-R never spawn external
+// (de)compressors, -B bounded source window, -s the ACTIVE slot as the
+// read-only source. Patch on stdin.
+func xdelta3DecodeArgs(active string) []string {
+	return []string{"-d", "-c", "-D", "-R",
+		"-B", strconv.Itoa(deltaDecodeSourceWindow), "-s", active}
+}
+
+// ctxReader aborts a long read loop once ctx is done.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// verifyDeltaSource hashes the first size bytes of the active slot (opened
+// read-only) and compares them with the signed base checksum.
+func verifyDeltaSource(ctx context.Context, active string, size int64, want string) error {
+	f, err := os.Open(active)
+	if err != nil {
+		return errors.Wrapf(err, "cannot open active slot %q for the base check", active)
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.CopyN(h, &ctxReader{ctx: ctx, r: f}, size)
+	if err != nil {
+		if ctx.Err() != nil {
+			return errors.Wrap(ctx.Err(), "base check of the active slot interrupted")
+		}
+		return errors.Wrapf(err, "active slot %q shorter than the delta base (%d of %d bytes)",
+			active, n, size)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != want {
+		return errors.Errorf("active slot %q has drifted from the delta base: first %d bytes sha256 %s, signed base %s %s",
+			active, size, got, RootfsChecksumKey, want)
+	}
+	log.Infof("Delta base check passed: first %d bytes of %s match %s", size, active, want)
 	return nil
 }
 

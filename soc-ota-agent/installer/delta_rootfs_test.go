@@ -665,3 +665,147 @@ func TestCreateInstallersFromList_DeltaResumesOnDualRootfs(t *testing.T) {
 	_, isStub := list[0].(*StubInstaller)
 	assert.True(t, isStub)
 }
+
+// ---- Fable review F7: bounded decode window + base pre-hash ------------------
+
+func TestXdelta3DecodeArgs_BoundedSourceWindow(t *testing.T) {
+	args := xdelta3DecodeArgs("/dev/mmcblk0p2")
+	assert.Equal(t, []string{"-d", "-c", "-D", "-R", "-B", "16777216", "-s", "/dev/mmcblk0p2"}, args)
+	assert.Equal(t, 16*1024*1024, deltaDecodeSourceWindow)
+}
+
+// A patch encoded with the generator's 64 MiB window, whose copies reach
+// across more than 16 MiB of source, must still decode with -B 16 MiB.
+func TestDeltaRootfs_SmallDecodeWindowDecodesLargeWindowPatch(t *testing.T) {
+	f := newDeltaFixture(t)
+	xd := requireXdelta3(t)
+
+	const mib = 1024 * 1024
+	base := randomBytes(21, 40*mib)
+	// Rotate: the target starts with the source's LAST 10 MiB, then the first
+	// 30 MiB, with a few edits — copies span the whole 40 MiB source.
+	target := append(append([]byte(nil), base[30*mib:]...), base[:30*mib]...)
+	copy(target[5*mib:], randomBytes(22, 4096))
+	copy(target[33*mib:], randomBytes(23, 4096))
+	target = append(target, randomBytes(24, 777)...)
+
+	pbase := filepath.Join(f.dir, "enc64-base")
+	ptarget := filepath.Join(f.dir, "enc64-target")
+	ppatch := filepath.Join(f.dir, "enc64-patch")
+	require.NoError(t, os.WriteFile(pbase, base, 0600))
+	require.NoError(t, os.WriteFile(ptarget, target, 0600))
+	out, err := exec.Command(xd, "-e", "-f", "-9", "-S", "none", "-B", "67108864",
+		"-s", pbase, ptarget, ppatch).CombinedOutput()
+	require.NoError(t, err, "xdelta3 encode: %s", out)
+	patch, err := os.ReadFile(ppatch)
+	require.NoError(t, err)
+	t.Logf("64M-window patch: %d bytes for a %d byte target", len(patch), len(target))
+	require.Less(t, len(patch), len(target)/10)
+
+	require.NoError(t, os.WriteFile(f.activePath, base, 0600))
+	require.NoError(t, os.WriteFile(f.inactivePath, bytes.Repeat([]byte{0xAA}, 48*mib), 0600))
+	f.factory.provides = &fakeProvides{p: map[string]string{RootfsChecksumKey: sha256Hex(base)}}
+
+	h := &fakeDeltaHeaders{
+		meta: map[string]interface{}{
+			"delta_format":  "xdelta3",
+			"target_size":   float64(len(target)),
+			"base_size":     float64(len(base)),
+			"base_checksum": sha256Hex(base),
+		},
+		provides: artifact.TypeInfoProvides{RootfsChecksumKey: sha256Hex(target)},
+		depends:  artifact.TypeInfoDepends{RootfsChecksumKey: sha256Hex(base)},
+	}
+	d := f.storer(t, h)
+	require.NoError(t, d.StoreUpdate(bytes.NewReader(patch), &sizeOnlyFileInfo{int64(len(patch))}))
+	written, err := os.ReadFile(f.inactivePath)
+	require.NoError(t, err)
+	assert.Equal(t, sha256Hex(target), sha256Hex(written[:len(target)]))
+	assert.Equal(t, sha256Hex(base), fileSha256(t, f.activePath), "active untouched")
+	assert.Nil(t, f.env.writeVars)
+}
+
+func (f *deltaFixture) headersWithBase(targetSize int64) *fakeDeltaHeaders {
+	h := f.headers(targetSize)
+	h.meta["base_size"] = float64(len(f.base))
+	h.meta["base_checksum"] = sha256Hex(f.base)
+	return h
+}
+
+func TestDeltaRootfs_BasePreHashPassesOnLargerPartition(t *testing.T) {
+	f := newDeltaFixture(t)
+	// Real partitions are larger than the image: trailing bytes must not
+	// affect the base check.
+	require.NoError(t, os.WriteFile(f.activePath,
+		append(append([]byte(nil), f.base...), randomBytes(31, 123457)...), 0600))
+	d := f.storer(t, f.headersWithBase(int64(len(f.target))))
+
+	require.NoError(t, d.StoreUpdate(bytes.NewReader(f.patch), &sizeOnlyFileInfo{int64(len(f.patch))}))
+	written, err := os.ReadFile(f.inactivePath)
+	require.NoError(t, err)
+	assert.Equal(t, sha256Hex(f.target), sha256Hex(written[:len(f.target)]))
+	assert.Nil(t, f.env.writeVars)
+}
+
+func TestDeltaRootfs_BasePreHashDriftDetectedBeforeAnyWrite(t *testing.T) {
+	f := newDeltaFixture(t)
+	drifted := append([]byte(nil), f.base...)
+	drifted[len(drifted)-1] ^= 0xFF // a single flipped byte at the very end
+	require.NoError(t, os.WriteFile(f.activePath, drifted, 0600))
+	d := f.storer(t, f.headersWithBase(int64(len(f.target))))
+
+	err := d.StoreUpdate(bytes.NewReader(f.patch), &sizeOnlyFileInfo{int64(len(f.patch))})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "drifted from the delta base")
+	assert.Zero(t, d.lastPid, "xdelta3 must never be started on a drifted base")
+	written, rerr := os.ReadFile(f.inactivePath)
+	require.NoError(t, rerr)
+	assert.Equal(t, bytes.Repeat([]byte{0xAA}, int(f.partSize)), written,
+		"drift must be detected before a single byte is written")
+	assert.Nil(t, f.env.writeVars, "no upgrade_available / slot switch")
+	assert.Equal(t, sha256Hex(drifted), fileSha256(t, f.activePath))
+}
+
+func TestDeltaRootfs_BasePreHashActiveShorterThanBase(t *testing.T) {
+	f := newDeltaFixture(t)
+	require.NoError(t, os.WriteFile(f.activePath, f.base[:len(f.base)/2], 0600))
+	d := f.storer(t, f.headersWithBase(int64(len(f.target))))
+
+	err := d.StoreUpdate(bytes.NewReader(f.patch), &sizeOnlyFileInfo{int64(len(f.patch))})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shorter than the delta base")
+	assert.Zero(t, d.lastPid)
+	assert.Nil(t, f.env.writeVars)
+}
+
+func TestDeltaRootfs_InitializeRejectsBadBaseMeta(t *testing.T) {
+	f := newDeltaFixture(t)
+	ut := DeltaRootfsPayloadType
+	for name, c := range map[string]struct {
+		mutate func(h *fakeDeltaHeaders)
+		want   string
+	}{
+		"base_checksum contradicts depends": {func(h *fakeDeltaHeaders) {
+			h.meta["base_checksum"] = sha256Hex([]byte("x"))
+		}, "contradicts depends"},
+		"base_checksum malformed": {func(h *fakeDeltaHeaders) {
+			h.meta["base_checksum"] = "nope"
+		}, "base_checksum"},
+		"base_size zero": {func(h *fakeDeltaHeaders) {
+			h.meta["base_size"] = float64(0)
+		}, "base_size invalid"},
+		"base_size not a number": {func(h *fakeDeltaHeaders) {
+			h.meta["base_size"] = "big"
+		}, "base_size missing or not a number"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := f.headersWithBase(int64(len(f.target)))
+			c.mutate(h)
+			us, err := f.factory.NewUpdateStorer(&ut, 0)
+			require.NoError(t, err)
+			err = us.Initialize(nil, nil, h)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.want)
+		})
+	}
+}
