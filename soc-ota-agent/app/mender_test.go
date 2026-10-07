@@ -617,10 +617,27 @@ func TestMenderInventoryRefresh(t *testing.T) {
 		{Name: "device_type", Value: "foo-bar"},
 		{Name: "artifact_name", Value: "fake-id"},
 		{Name: "mender_client_version", Value: "unknown"},
+		{Name: "otapulse_agent_version", Value: "unknown"},
 	}
 	for _, a := range exp {
 		assert.Contains(t, srv.Inventory.Attrs, a)
 	}
+
+	// 1b. TASK-S102-001: a stamped build version is reported under both the
+	// legacy and the OTA-Pulse attribute name.
+	oldVersion := conf.Version
+	conf.Version = "v1.2.3-4-gabcdef0"
+	srv.Reset()
+	srv.Auth.Authorize = true
+	srv.Auth.Verify = true
+	srv.Auth.Token = []byte("tokendata")
+	err = mender.InventoryRefresh()
+	conf.Version = oldVersion
+	assert.Nil(t, err)
+	assert.Contains(t, srv.Inventory.Attrs,
+		client.InventoryAttribute{Name: "mender_client_version", Value: "v1.2.3-4-gabcdef0"})
+	assert.Contains(t, srv.Inventory.Attrs,
+		client.InventoryAttribute{Name: "otapulse_agent_version", Value: "v1.2.3-4-gabcdef0"})
 
 	// 2. fake inventory script
 	err = ioutil.WriteFile(path.Join(invpath, "mender-inventory-foo"),
@@ -638,6 +655,7 @@ echo foo=bar`),
 		{Name: "device_type", Value: "foo-bar"},
 		{Name: "artifact_name", Value: "fake-id"},
 		{Name: "mender_client_version", Value: "unknown"},
+		{Name: "otapulse_agent_version", Value: "unknown"},
 		{Name: "foo", Value: "bar"},
 	}
 	for _, a := range exp {

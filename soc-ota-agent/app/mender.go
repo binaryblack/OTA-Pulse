@@ -698,7 +698,11 @@ func (m *Mender) InventoryRefresh() error {
 	reqAttr := []client.InventoryAttribute{
 		{Name: "device_type", Value: deviceType},
 		{Name: "artifact_name", Value: artifactName},
+		// Kept for existing consumers; otapulse_agent_version is the
+		// OTA-Pulse name for the same value (TODO-011, TASK-S102-001) and
+		// what the fleet gate script reads.
 		{Name: "mender_client_version", Value: conf.VersionString()},
+		{Name: "otapulse_agent_version", Value: conf.VersionString()},
 	}
 
 	if idata == nil {
