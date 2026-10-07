@@ -704,6 +704,9 @@ func TestCommandsWithBootstrapArtifact(t *testing.T) {
 		initStoreFunc        func(s store.Store)
 		command              string
 		generateBootstrapArt bool
+		// bootstrapFileName overrides the generated bootstrap file name
+		// (default: the legacy bootstrap.mender).
+		bootstrapFileName    string
 		writeArtFunc         func(t *testing.T, path string)
 		expectedError        bool
 		expectedArtifactName string
@@ -713,6 +716,16 @@ func TestCommandsWithBootstrapArtifact(t *testing.T) {
 			initStoreFunc:        func(s store.Store) {},
 			command:              "bootstrap",
 			generateBootstrapArt: true,
+			writeArtFunc:         func(t *testing.T, path string) {},
+			expectedError:        false,
+			expectedArtifactName: "bootstrap-stuff\n",
+			expectedProvides:     "artifact_name=bootstrap-stuff\nsomething=cool\n",
+		},
+		"bootstrap command with bootstrap.otapulse Artifact": {
+			initStoreFunc:        func(s store.Store) {},
+			command:              "bootstrap",
+			generateBootstrapArt: true,
+			bootstrapFileName:    "bootstrap.otapulse",
 			writeArtFunc:         func(t *testing.T, path string) {},
 			expectedError:        false,
 			expectedArtifactName: "bootstrap-stuff\n",
@@ -866,7 +879,11 @@ func TestCommandsWithBootstrapArtifact(t *testing.T) {
 			// generate bootstrap Artifact
 			var bootstrapArt string
 			if test.generateBootstrapArt {
-				bootstrapArt = path.Join(tdir, "bootstrap.mender")
+				bootstrapName := test.bootstrapFileName
+				if bootstrapName == "" {
+					bootstrapName = "bootstrap.mender"
+				}
+				bootstrapArt = path.Join(tdir, bootstrapName)
 				tests.CreateTestBootstrapArtifactDefault(t, bootstrapArt)
 			}
 

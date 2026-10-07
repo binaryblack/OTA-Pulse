@@ -92,11 +92,34 @@ var (
 	DefaultModulesPath       = path.Join(GetDataDirPath(), "modules", "v3")
 	DefaultModulesWorkPath   = path.Join(GetStateDirPath(), "modules", "v3")
 
-	DefaultBootstrapArtifactFile = path.Join(GetStateDirPath(), "bootstrap.mender")
+	DefaultBootstrapArtifactFile = BootstrapArtifactPath(GetStateDirPath())
 
 	// deprecated files
 	DeprecatedArtifactInfoFile = path.Join(GetConfDirPath(), "artifact_info")
 )
+
+// Bootstrap artifact file names (TODO-011 / TASK-S102-008): the OTA-Pulse name
+// is preferred, the legacy Mender name is still honoured.
+const (
+	BootstrapArtifactName       = "bootstrap.otapulse"
+	LegacyBootstrapArtifactName = "bootstrap.mender"
+)
+
+// BootstrapArtifactPath returns the bootstrap artifact path inside dir:
+// dir/bootstrap.otapulse if it exists, else dir/bootstrap.mender if that
+// exists, else dir/bootstrap.otapulse (neither present: nothing is read, and
+// the preferred name is the one reported in logs).
+func BootstrapArtifactPath(dir string) string {
+	preferred := path.Join(dir, BootstrapArtifactName)
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred
+	}
+	legacy := path.Join(dir, LegacyBootstrapArtifactName)
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return preferred
+}
 
 func GetDataDirPath() string {
 	// Check if OTAPulse path exists and is populated
