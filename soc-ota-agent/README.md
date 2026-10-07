@@ -195,6 +195,52 @@ print(f"Server: {server_url}")
 `version` member carries the format identifier `otapulse` or `mender` are both accepted
 (the container layout is identical; see `testdata/golden/README.md`).
 
+## Compatibility
+
+The agent descends from the Mender client.
+It keeps some Mender-era names so that fielded devices, servers, and artifacts keep working.
+
+### Server wire
+
+The agent calls the native device API under `/api/devices/v1/otapulse/*` first.
+It falls back to the legacy Mender-compatible paths only on HTTP 404.
+A 404 counts as "no native route" only when it lacks the `X-OTAPulse-Wire` response header.
+A current server sets that header on every native response, including its own legitimate 404s.
+A native 404 that carries the header is final, and the agent does not fall back.
+Any other status is final too, so a fallback never replays a request the server already handled.
+Fallback use is logged at WARN.
+The chosen wire is remembered per server URL.
+A "legacy only" verdict is re-probed hourly, so a server upgrade is noticed without a restart.
+The legacy paths are deprecated and will be removed after the fleet cutover.
+The download URL is supplied by the server and is not affected.
+
+### Kept shims
+
+These Mender-era names are kept on purpose:
+
+- `/usr/bin/mender` is a symlink to `soc-ota-agent`.
+- `mender-device-identity` is a symlink to `otapulse-device-identity`.
+- `/etc/mender`, `/usr/share/mender`, and `/var/lib/mender` are read as fallbacks when the `otapulse` paths are absent.
+- `/etc/mender/mender.conf` is read as a fallback config file.
+- `bootstrap.mender` is read when no `bootstrap.otapulse` exists.
+- The boot environment files keep their `mender_boot_*` names (for example `mender_boot_part`).
+
+### Artifact format ids
+
+The agent accepts artifacts whose `version` member carries the format id `otapulse` or `mender`.
+New artifacts are written as `{"format":"otapulse","version":3}`.
+The container layout is the same for both ids.
+
+### Inventory
+
+The agent reports `otapulse_agent_version` as an inventory attribute.
+It also still reports `mender_client_version` for existing consumers.
+
+### D-Bus
+
+The agent registers `io.otapulse.*` names only.
+It does not register `io.mender.*` names.
+
 ## Systemd Service
 
 ```bash
