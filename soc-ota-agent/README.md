@@ -228,7 +228,9 @@ These Mender-era names are kept on purpose:
 ### Artifact format ids
 
 The agent accepts artifacts whose `version` member carries the format id `otapulse` or `mender`.
-New artifacts are written as `{"format":"otapulse","version":3}`.
+Artifacts written by `otapulse-artifact` 3.11.2-op2 and later carry `{"format":"otapulse","version":3}`.
+Earlier tool builds write `mender`.
+`--format mender` exists only on op2 and later.
 The container layout is the same for both ids.
 
 ### Inventory
