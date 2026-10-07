@@ -9,7 +9,7 @@
 #   OTAPULSE_SANITY_LEVEL  - "error" (default, blocks build), "warn" (continue), or "off" (skip)
 #   OTAPULSE_SANITY_SKIP   - space-separated check names to skip
 #
-# Check names: server  provisioning  mender-artifact  partitions  signing
+# Check names: server  provisioning  otapulse-artifact  partitions  signing
 #              device-type  packages  systemd  config-content  networking
 #
 # Note: set -e is intentionally omitted — checks accumulate failures rather
@@ -238,32 +238,37 @@ fi
 echo ""
 
 # ==============================================================================
-# [3/10] Mender Artifact Tooling
+# [3/10] OTA Artifact Tooling
 # ==============================================================================
 
-echo "[3/10] Mender Artifact Tooling"
+echo "[3/10] OTA Artifact Tooling"
 
-if check_skipped "mender-artifact"; then
-    skip "mender-artifact check skipped"
+# 'mender-artifact' is the legacy check name, still accepted in the skip list.
+if check_skipped "otapulse-artifact" || check_skipped "mender-artifact"; then
+    skip "otapulse-artifact check skipped"
 else
-    MENDER_ARTIFACT=""
-    if [ -x "${HOST_DIR:-}/bin/mender-artifact" ]; then
-        MENDER_ARTIFACT="${HOST_DIR}/bin/mender-artifact"
-    elif command -v mender-artifact >/dev/null 2>&1; then
-        MENDER_ARTIFACT="$(command -v mender-artifact)"
-    fi
+    OTAPULSE_ARTIFACT=""
+    for cand in "${HOST_DIR:-/nonexistent}/bin/otapulse-artifact" \
+                "$(command -v otapulse-artifact 2>/dev/null || true)" \
+                "${HOST_DIR:-/nonexistent}/bin/mender-artifact" \
+                "$(command -v mender-artifact 2>/dev/null || true)"; do
+        if [ -n "${cand}" ] && [ -x "${cand}" ]; then
+            OTAPULSE_ARTIFACT="${cand}"
+            break
+        fi
+    done
 
-    if [ -z "${MENDER_ARTIFACT}" ]; then
-        fail "mender-artifact" "mender-artifact tool not found."
-        info "Enable BR2_PACKAGE_HOST_MENDER_ARTIFACT=y in your defconfig."
+    if [ -z "${OTAPULSE_ARTIFACT}" ]; then
+        fail "otapulse-artifact" "otapulse-artifact (or legacy mender-artifact) tool not found."
+        info "Install otapulse-artifact (scripts/install-otapulse-artifact.sh) or enable BR2_PACKAGE_HOST_MENDER_ARTIFACT=y in your defconfig."
     else
-        pass "mender-artifact found: ${MENDER_ARTIFACT}"
+        pass "otapulse-artifact found: ${OTAPULSE_ARTIFACT}"
     fi
 
     if br2_is_set BR2_TARGET_ROOTFS_EXT2; then
         pass "BR2_TARGET_ROOTFS_EXT2 is set."
     else
-        fail "mender-artifact" "BR2_TARGET_ROOTFS_EXT2 is not set — ext4 rootfs image required for Mender artifacts."
+        fail "otapulse-artifact" "BR2_TARGET_ROOTFS_EXT2 is not set — ext4 rootfs image required for OTA artifacts."
         info "Add BR2_TARGET_ROOTFS_EXT2=y and BR2_TARGET_ROOTFS_EXT2_4=y to your defconfig."
     fi
 fi

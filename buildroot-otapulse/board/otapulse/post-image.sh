@@ -150,17 +150,33 @@ fi
 
 echo "--- Pre-Artifact Validation ---"
 
-# Generate signed Mender OTA artifact (mandatory - hard-fail on any missing dependency)
-MENDER_ARTIFACT="${HOST_DIR}/bin/mender-artifact"
+# Generate signed OTA artifact (mandatory - hard-fail on any missing dependency).
+# Tool preference: otapulse-artifact (host dir, then PATH), then the legacy
+# mender-artifact that Buildroot's host-mender-artifact package installs.
+OTAPULSE_ARTIFACT=""
+for cand in "${HOST_DIR}/bin/otapulse-artifact" "$(command -v otapulse-artifact 2>/dev/null || true)" \
+            "${HOST_DIR}/bin/mender-artifact"; do
+    if [ -n "${cand}" ] && [ -x "${cand}" ]; then
+        OTAPULSE_ARTIFACT="${cand}"
+        break
+    fi
+done
 DEVICE_TYPE="$(br2_config_get BR2_PACKAGE_OTAPULSE_DEVICE_TYPE)"
 ARTIFACT_NAME="${DEVICE_TYPE:-generic}-$(date +%Y%m%d%H%M%S)"
 ROOTFS_IMAGE="${BINARIES_DIR}/rootfs.ext4"
 SIGNING_KEY="$(br2_config_get BR2_PACKAGE_OTAPULSE_SIGNING_KEY)"
 
-if [ ! -x "${MENDER_ARTIFACT}" ]; then
-    echo "ERROR: mender-artifact not found at ${MENDER_ARTIFACT}"
-    echo "  Enable BR2_PACKAGE_HOST_MENDER_ARTIFACT=y in your defconfig."
+if [ -z "${OTAPULSE_ARTIFACT}" ]; then
+    echo "ERROR: otapulse-artifact (or legacy mender-artifact) not found in ${HOST_DIR}/bin or PATH"
+    echo "  Install otapulse-artifact (scripts/install-otapulse-artifact.sh) or"
+    echo "  enable BR2_PACKAGE_HOST_MENDER_ARTIFACT=y in your defconfig."
     exit 1
+fi
+
+# Pass the otapulse format id only if this tool supports it (probe, never assume).
+FORMAT_ARGS=()
+if "${OTAPULSE_ARTIFACT}" write rootfs-image --help 2>&1 | grep -q -- '--format'; then
+    FORMAT_ARGS=(--format otapulse)
 fi
 
 if [ ! -f "${ROOTFS_IMAGE}" ]; then
@@ -187,16 +203,17 @@ if [ -n "${SIGNING_KEY}" ] && [ -f "${SIGNING_KEY}" ]; then
     fi
 fi
 
-echo "Generating signed Mender OTA artifact..."
-"${MENDER_ARTIFACT}" write rootfs-image \
+echo "Generating signed OTA artifact (${OTAPULSE_ARTIFACT}${FORMAT_ARGS[*]:+ ${FORMAT_ARGS[*]}})..."
+"${OTAPULSE_ARTIFACT}" write rootfs-image \
     --device-type "${DEVICE_TYPE:-generic}" \
     --artifact-name "${ARTIFACT_NAME}" \
     --file "${ROOTFS_IMAGE}" \
     --key "${SIGNING_KEY}" \
     --compression gzip \
-    --output-path "${BINARIES_DIR}/${ARTIFACT_NAME}.mender"
+    "${FORMAT_ARGS[@]}" \
+    --output-path "${BINARIES_DIR}/${ARTIFACT_NAME}.otapulse"
 
-echo "Mender artifact created: ${ARTIFACT_NAME}.mender"
+echo "OTA artifact created: ${ARTIFACT_NAME}.otapulse"
 
 echo ""
 echo "--- Artifact Verification ---"
@@ -207,7 +224,7 @@ if [ -z "${VERIFY_KEY}" ] || [ ! -f "${VERIFY_KEY}" ]; then
     echo "  WARNING: No verification key configured (BR2_PACKAGE_OTAPULSE_VERIFY_KEY)"
     echo "           Skipping artifact signature verification."
 else
-    if "${MENDER_ARTIFACT}" validate "${BINARIES_DIR}/${ARTIFACT_NAME}.mender" -k "${VERIFY_KEY}" 2>/dev/null; then
+    if "${OTAPULSE_ARTIFACT}" validate "${BINARIES_DIR}/${ARTIFACT_NAME}.otapulse" -k "${VERIFY_KEY}" 2>/dev/null; then
         echo "  OK: Artifact validated and signature verified with public key"
     else
         echo "  ERROR: Artifact validation or signature verification FAILED!"
@@ -220,4 +237,4 @@ fi
 echo "=== OTA-Pulse Post-Image Complete ==="
 echo ""
 echo "Output files in ${BINARIES_DIR}:"
-ls -la "${BINARIES_DIR}"/*.img "${BINARIES_DIR}"/*.mender 2>/dev/null || true
+ls -la "${BINARIES_DIR}"/*.img "${BINARIES_DIR}"/*.otapulse 2>/dev/null || true
