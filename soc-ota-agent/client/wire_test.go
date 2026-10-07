@@ -495,3 +495,51 @@ func TestWireLegacyFirstStickyHandles410ByTryingNative(t *testing.T) {
 	}, ws.hitList())
 	assert.True(t, preferNativeWire(ws.URL))
 }
+
+// errOn401Requester mimics SoCMonitoringClient.Do: a 401/403 is surfaced as
+// an error TOGETHER with the response.
+type errOn401Requester struct{ inner ApiRequester }
+
+func (e errOn401Requester) Do(req *http.Request) (*http.Response, error) {
+	r, err := e.inner.Do(req)
+	if err == nil && (r.StatusCode == http.StatusUnauthorized || r.StatusCode == http.StatusForbidden) {
+		return r, fmt.Errorf("Authentication failed: invalid API key or device ID")
+	}
+	return r, err
+}
+
+// S103-001: a device whose credentials the backend rejects (legacy 401 after
+// the native 404) must still pin the legacy wire, or every inventory cycle
+// re-probes the native route and WARNs again.
+func TestWireLegacy401ErrorStillPinsLegacyWire(t *testing.T) {
+	ac := newWireAPI(t)
+	api := errOn401Requester{inner: ac}
+	ws := newWireServer(t, false, true)
+	ws.legacyStatus = http.StatusUnauthorized
+
+	_, err := NewAuth().Request(api, ws.URL, fixedAuth{})
+	require.Error(t, err)
+	assert.Equal(t, []string{
+		"POST /api/devices/v1/otapulse/auth/requests",
+		"POST /api/devices/v1/authentication/auth_requests",
+	}, ws.hitList())
+
+	ws.reset()
+	_, err = NewAuth().Request(api, ws.URL, fixedAuth{})
+	require.Error(t, err)
+	assert.Equal(t, []string{"POST /api/devices/v1/authentication/auth_requests"}, ws.hitList(),
+		"the legacy 401 is a verdict for the legacy wire: no native re-probe")
+}
+
+// The same error-with-response on the native route pins the native wire.
+func TestWireNative401ErrorStillPinsNativeWire(t *testing.T) {
+	ac := newWireAPI(t)
+	api := errOn401Requester{inner: ac}
+	ws := newWireServer(t, true, true)
+	ws.nativeStatus = http.StatusUnauthorized
+
+	_, err := NewAuth().Request(api, ws.URL, fixedAuth{})
+	require.Error(t, err)
+	assert.Equal(t, 1, len(ws.hitList()), "never retried on the legacy route")
+	assert.False(t, !preferNativeWire(ws.URL), "native stays preferred")
+}
