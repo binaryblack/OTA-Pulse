@@ -72,7 +72,7 @@ func TestStatusClient(t *testing.T) {
 	assert.JSONEq(t, `{"status": "failure"}`, string(responder.recdata))
 	assert.Equal(
 		t,
-		apiPrefix+"v1/deployments/device/deployments/deployment1/status",
+		apiPrefix+"v1/otapulse/deployments/deployment1/status",
 		responder.path,
 	)
 

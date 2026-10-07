@@ -97,6 +97,25 @@ type ClientTestServer struct {
 	ResponseHeader responseHeader
 }
 
+// WireRoutes selects which device-API route sets the default test server
+// registers (TASK-S102-007). The default, WireBoth, registers the legacy
+// Mender-compatible set AND the OTA-Pulse-native /api/devices/v1/otapulse/*
+// set; the others emulate an old (legacy-only) or a fully migrated
+// (native-only) server. A route set that is not registered answers 404, as a
+// real server that lacks it would.
+type WireRoutes int
+
+const (
+	WireBoth WireRoutes = iota
+	WireLegacyOnly
+	WireNativeOnly
+)
+
+const (
+	legacyDeploymentsPrefix = "/api/devices/v1/deployments/device/deployments/"
+	nativeDeploymentsPrefix = "/api/devices/v1/otapulse/deployments/"
+)
+
 // Can be several different types, see switch statement inside
 // NewClientTestServer().
 type Options interface{}
@@ -104,6 +123,7 @@ type Options interface{}
 func NewClientTestServer(options ...Options) *ClientTestServer {
 	var tlsConfig *tls.Config
 	var mux *http.ServeMux
+	routes := WireBoth
 	for _, opt := range options {
 		// Accept several types of arguments that can customize the test server.
 		switch o := opt.(type) {
@@ -111,6 +131,8 @@ func NewClientTestServer(options ...Options) *ClientTestServer {
 			tlsConfig = o
 		case *http.ServeMux:
 			mux = o
+		case WireRoutes:
+			routes = o
 		default:
 			panic(fmt.Sprintf(
 				"Unsupported argument type to NewClientTestServer(): %T", opt))
@@ -121,23 +143,49 @@ func NewClientTestServer(options ...Options) *ClientTestServer {
 
 	if mux == nil {
 		mux = http.NewServeMux()
-		mux.HandleFunc("/api/devices/v1/authentication/auth_requests", cts.headersHook(cts.authReq))
-		mux.HandleFunc(
-			"/api/devices/v1/inventory/device/attributes",
-			cts.headersHook(cts.inventoryReq),
-		)
-		mux.HandleFunc(
-			"/api/devices/v1/deployments/device/deployments/next",
-			cts.headersHook(cts.updateReqv1),
-		)
-		mux.HandleFunc(
-			"/api/devices/v2/deployments/device/deployments/next",
-			cts.headersHook(cts.updateReqv2),
-		)
-		mux.HandleFunc(
-			"/api/devices/v1/deployments/device/deployments/",
-			cts.headersHook(cts.deploymentsReq),
-		)
+		if routes != WireNativeOnly {
+			mux.HandleFunc("/api/devices/v1/authentication/auth_requests",
+				cts.headersHook(cts.authReq))
+			mux.HandleFunc(
+				"/api/devices/v1/inventory/device/attributes",
+				cts.headersHook(cts.inventoryReq),
+			)
+			mux.HandleFunc(
+				"/api/devices/v1/deployments/device/deployments/next",
+				cts.headersHook(cts.updateReqv1),
+			)
+			mux.HandleFunc(
+				"/api/devices/v2/deployments/device/deployments/next",
+				cts.headersHook(cts.updateReqv2),
+			)
+			mux.HandleFunc(
+				legacyDeploymentsPrefix,
+				cts.headersHook(cts.deploymentsReq),
+			)
+		}
+		if routes != WireLegacyOnly {
+			// OTA-Pulse-native route set: byte-identical aliases of the above.
+			mux.HandleFunc("/api/devices/v1/otapulse/auth/requests",
+				cts.headersHook(cts.authReq))
+			mux.HandleFunc(
+				"/api/devices/v1/otapulse/inventory/attributes",
+				cts.headersHook(cts.inventoryReq),
+			)
+			mux.HandleFunc(
+				"/api/devices/v1/otapulse/deployments/next",
+				cts.headersHook(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodPost {
+						cts.updateReqv2(w, r)
+						return
+					}
+					cts.updateReqv1(w, r)
+				}),
+			)
+			mux.HandleFunc(
+				nativeDeploymentsPrefix,
+				cts.headersHook(cts.deploymentsReq),
+			)
+		}
 		mux.HandleFunc("/api/devices/v1/download", cts.headersHook(cts.updateDownloadReq))
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			log.Infof("fallback request handler, request %v", r)
@@ -307,7 +355,10 @@ func (cts *ClientTestServer) inventoryReq(w http.ResponseWriter, r *http.Request
 func (cts *ClientTestServer) deploymentsReq(w http.ResponseWriter, r *http.Request) {
 	log.Infof("got deployments log/status request %v", r)
 	p := r.URL.Path
-	s := strings.TrimPrefix(p, "/api/devices/v1/deployments/device/deployments/")
+	s := strings.TrimPrefix(p, legacyDeploymentsPrefix)
+	if s == p {
+		s = strings.TrimPrefix(p, nativeDeploymentsPrefix)
+	}
 	if s == p {
 		// unchanged, was no prefix?
 		w.WriteHeader(http.StatusBadRequest)
@@ -316,6 +367,10 @@ func (cts *ClientTestServer) deploymentsReq(w http.ResponseWriter, r *http.Reque
 	log.Infof("request for %v", s)
 
 	idwhat := strings.SplitN(s, "/", 2)
+	if len(idwhat) != 2 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	id := idwhat[0]
 	what := idwhat[1]
 

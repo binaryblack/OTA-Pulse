@@ -460,7 +460,7 @@ func (runOptions *runOptionsType) commonCLIHandler(
 	// --data flag
 	config.ArtifactScriptsPath = path.Join(runOptions.dataStore, "scripts")
 	config.ModulesWorkPath = path.Join(runOptions.dataStore, "modules", "v3")
-	config.BootstrapArtifactFile = path.Join(runOptions.dataStore, "bootstrap.mender")
+	config.BootstrapArtifactFile = conf.BootstrapArtifactPath(runOptions.dataStore)
 
 	// Checks if the DeviceTypeFile is defined in config file.
 	if config.MenderConfigFromFile.DeviceTypeFile != "" {

@@ -90,6 +90,12 @@ Configuration file: `/etc/otapulse/otapulse.conf`
 make build
 ```
 
+The agent version is stamped at link time from `git describe --tags --always --dirty --match 'v[0-9]*'`
+(for example `v0.1.7`, or `v0.1.7-42-g9696f62` between tags) and reported to the server as
+the inventory attributes `otapulse_agent_version` and `mender_client_version`. Pass
+`VERSION=...` to `make` to override it. Do not pass a fixed package version for every build:
+the fleet version gate relies on the real value.
+
 ### Cross-Compile for ARM64
 
 ```bash
@@ -182,6 +188,13 @@ token, server_url = interface.GetJwtToken()
 print(f"Server: {server_url}")
 ```
 
+## Bootstrap Artifact and Artifact Names
+
+`bootstrap.otapulse` in the state directory is the preferred bootstrap artifact name;
+`bootstrap.mender` is still read when no `bootstrap.otapulse` exists. Artifacts whose
+`version` member carries the format identifier `otapulse` or `mender` are both accepted
+(the container layout is identical; see `testdata/golden/README.md`).
+
 ## Systemd Service
 
 ```bash
@@ -211,9 +224,16 @@ journalctl -u soc-ota-agent --no-pager
 ### Connection Issues
 
 ```bash
-# Test connectivity
-curl -v https://your-server.com/api/devices/v1/authentication/auth_requests
+# Test connectivity (native route; older servers only serve the legacy
+# /api/devices/v1/authentication/auth_requests path)
+curl -v https://your-server.com/api/devices/v1/otapulse/auth/requests
 ```
+
+The agent talks to the OTA-Pulse-native device routes under `/api/devices/v1/otapulse/`
+first. It falls back to the legacy Mender-compatible paths only when the server answers
+HTTP 404 for a native path (a server that predates them), logs a warning once, and then
+keeps using the legacy paths for that server (the native routes are re-probed hourly).
+Errors other than 404 (401, 403, 5xx) never trigger a fallback.
 
 ### Update Failures
 

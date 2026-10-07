@@ -617,10 +617,27 @@ func TestMenderInventoryRefresh(t *testing.T) {
 		{Name: "device_type", Value: "foo-bar"},
 		{Name: "artifact_name", Value: "fake-id"},
 		{Name: "mender_client_version", Value: "unknown"},
+		{Name: "otapulse_agent_version", Value: "unknown"},
 	}
 	for _, a := range exp {
 		assert.Contains(t, srv.Inventory.Attrs, a)
 	}
+
+	// 1b. TASK-S102-001: a stamped build version is reported under both the
+	// legacy and the OTA-Pulse attribute name.
+	oldVersion := conf.Version
+	conf.Version = "v1.2.3-4-gabcdef0"
+	srv.Reset()
+	srv.Auth.Authorize = true
+	srv.Auth.Verify = true
+	srv.Auth.Token = []byte("tokendata")
+	err = mender.InventoryRefresh()
+	conf.Version = oldVersion
+	assert.Nil(t, err)
+	assert.Contains(t, srv.Inventory.Attrs,
+		client.InventoryAttribute{Name: "mender_client_version", Value: "v1.2.3-4-gabcdef0"})
+	assert.Contains(t, srv.Inventory.Attrs,
+		client.InventoryAttribute{Name: "otapulse_agent_version", Value: "v1.2.3-4-gabcdef0"})
 
 	// 2. fake inventory script
 	err = ioutil.WriteFile(path.Join(invpath, "mender-inventory-foo"),
@@ -638,6 +655,7 @@ echo foo=bar`),
 		{Name: "device_type", Value: "foo-bar"},
 		{Name: "artifact_name", Value: "fake-id"},
 		{Name: "mender_client_version", Value: "unknown"},
+		{Name: "otapulse_agent_version", Value: "unknown"},
 		{Name: "foo", Value: "bar"},
 	}
 	for _, a := range exp {
@@ -1483,6 +1501,75 @@ func TestMenderHandleBootstrapArtifact(t *testing.T) {
 			expectedProvides: map[string]string{
 				"artifact_name": "bootstrap-stuff",
 				"something":     "cool",
+			},
+		},
+		"Valid bootstrap Artifact with otapulse format id (TODO-011)": {
+			initStoreFunc: func(s store.Store) {},
+			writeArtFunc: func(_ *testing.T, path string) {
+				f, err := os.Create(path)
+				require.NoError(t, err)
+				aw := awriter.NewWriter(f, artifact.NewCompressorNone())
+
+				err = aw.WriteArtifact(&awriter.WriteArtifactArgs{
+					Format:  "otapulse",
+					Version: 3,
+					Devices: []string{"foo-bar"},
+					Name:    "bootstrap-stuff",
+					Updates: &awriter.Updates{
+						Updates: []handlers.Composer{handlers.NewBootstrapArtifact()},
+					},
+					Scripts: nil,
+					Provides: &artifact.ArtifactProvides{
+						ArtifactName: "bootstrap-stuff",
+					},
+					Depends: &artifact.ArtifactDepends{
+						CompatibleDevices: []string{"foo-bar"},
+					},
+					TypeInfoV3: &artifact.TypeInfoV3{
+						ArtifactProvides: artifact.TypeInfoProvides{"something": "cool"},
+					},
+				})
+				require.NoError(t, err)
+			},
+			expectedError:        false,
+			expectedArtifactName: "bootstrap-stuff",
+			expectedProvides: map[string]string{
+				"artifact_name": "bootstrap-stuff",
+				"something":     "cool",
+			},
+		},
+		"Invalid bootstrap Artifact with unknown format id": {
+			initStoreFunc: func(s store.Store) {},
+			writeArtFunc: func(_ *testing.T, path string) {
+				f, err := os.Create(path)
+				require.NoError(t, err)
+				aw := awriter.NewWriter(f, artifact.NewCompressorNone())
+
+				err = aw.WriteArtifact(&awriter.WriteArtifactArgs{
+					Format:  "bogus",
+					Version: 3,
+					Devices: []string{"foo-bar"},
+					Name:    "bootstrap-stuff",
+					Updates: &awriter.Updates{
+						Updates: []handlers.Composer{handlers.NewBootstrapArtifact()},
+					},
+					Scripts: nil,
+					Provides: &artifact.ArtifactProvides{
+						ArtifactName: "bootstrap-stuff",
+					},
+					Depends: &artifact.ArtifactDepends{
+						CompatibleDevices: []string{"foo-bar"},
+					},
+					TypeInfoV3: &artifact.TypeInfoV3{
+						ArtifactProvides: artifact.TypeInfoProvides{"something": "cool"},
+					},
+				})
+				require.NoError(t, err)
+			},
+			expectedError:        true,
+			expectedArtifactName: "unknown",
+			expectedProvides: map[string]string{
+				"artifact_name": "unknown",
 			},
 		},
 		"Non-existent bootstrap Artifact": {

@@ -145,8 +145,29 @@ func (u *UpdateClient) getUpdateInfo(api ApiRequester, process RequestProcessing
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to create update check request")
 	}
+	nativeReqs, err := makeNativeUpdateCheckRequests(server, current)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create update check request")
+	}
 
-	r, err := findFirstWorkingEndpoint(api, reqs)
+	// Native (OTA-Pulse) routes first, legacy chain second (reversed while
+	// the server is known to serve only the legacy routes). Fallback between
+	// the two sets happens on HTTP 404 only.
+	chain := make([]wireRequest, 0, len(nativeReqs)+len(reqs))
+	for _, req := range nativeReqs {
+		chain = append(chain, wireRequest{req: req, native: true})
+	}
+	legacy := make([]wireRequest, 0, len(reqs))
+	for _, req := range reqs {
+		legacy = append(legacy, wireRequest{req: req})
+	}
+	if preferNativeWire(server) {
+		chain = append(chain, legacy...)
+	} else {
+		chain = append(legacy, chain...)
+	}
+
+	r, err := findFirstWorkingWireEndpoint(api, server, chain)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +185,104 @@ func (u *UpdateClient) getUpdateInfo(api ApiRequester, process RequestProcessing
 		return data, NewAPIError(err, r)
 	}
 	return data, err
+}
+
+// wireRequest is one candidate in the update-check chain, tagged with the
+// route set it belongs to.
+type wireRequest struct {
+	req    *http.Request
+	native bool
+}
+
+// findFirstWorkingWireEndpoint walks the update-check chain like
+// findFirstWorkingEndpoint (falling through on HTTP 404 only) and
+// additionally:
+//   - treats a native 404 as "no native route" (and falls back) only when it
+//     lacks the X-OTAPulse-Wire header; with the header it is final,
+//   - treats a legacy 404 or 410 as "not served" (never a "legacy only"
+//     verdict), and
+//   - lets a native request that answers 405 fall through to the NEXT native
+//     request (the native route exists but not for that method), and
+//   - remembers which route set answered so later polls start there.
+func findFirstWorkingWireEndpoint(
+	api ApiRequester,
+	server string,
+	chain []wireRequest,
+) (*http.Response, error) {
+	var r *http.Response
+	for i := 0; i < len(chain); i++ {
+		wr := chain[i]
+		req := wr.req
+		var err error
+		r, err = api.Do(req)
+		if err != nil {
+			log.Debugf("Failed sending update check request to the backend: (%s %s): Error: %s",
+				req.Method, req.URL.String(), err.Error())
+			return nil, errors.Wrapf(err, "update check request failed")
+		}
+
+		last := i == len(chain)-1
+		switch {
+		case wr.native && nativeNotServed(r):
+			// Old backend (404 without the wire header): no native routes at
+			// all. Warn once and skip the remaining native variants (the GET
+			// would 404 as well), so there is one WARN per endpoint.
+			r.Body.Close()
+			log.Warnf("%s %s returned HTTP 404: server has no OTA-Pulse-native "+
+				"device route, falling back to the legacy path",
+				req.Method, req.URL.Path)
+			for i+1 < len(chain) && chain[i+1].native {
+				i++
+			}
+			continue
+		case wr.native && r.StatusCode == http.StatusNotFound:
+			// Native 404 carrying the wire header: the server speaks the
+			// native wire and this is its real answer. Never fall back.
+			return finishFindFirstWorking(r, req)
+		case !wr.native && legacyNotServed(r) && !last:
+			r.Body.Close()
+			log.Infof("request %s to %s returned HTTP %d",
+				req.Method, req.URL.String(), r.StatusCode)
+			continue
+		case r.StatusCode == http.StatusMethodNotAllowed && wr.native &&
+			!last && chain[i+1].native:
+			r.Body.Close()
+			log.Debugf("native update check %s %s not allowed (405), trying next native variant",
+				req.Method, req.URL.Path)
+			continue
+		}
+
+		switch r.StatusCode {
+		case http.StatusOK, http.StatusNoContent, http.StatusUnauthorized:
+			if wr.native {
+				rememberWire(server, wireNative)
+			} else {
+				rememberWire(server, wireLegacy)
+			}
+			log.Debugf("Successful request: (%s %s): Response code: %d",
+				req.Method, req.URL.String(), r.StatusCode)
+			return r, nil
+		}
+		// Anything else: identical handling to the legacy chain.
+		return finishFindFirstWorking(r, req)
+	}
+	return nil, fmt.Errorf("failed to check update info on the server. Response: %v", r)
+}
+
+// finishFindFirstWorking renders the terminal error for a non-fallthrough,
+// non-success status (see findFirstWorkingEndpoint).
+func finishFindFirstWorking(r *http.Response, req *http.Request) (*http.Response, error) {
+	r.Body.Close()
+	if r.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("failed to check update info on the server. Response: %v", r)
+	}
+	if r.StatusCode >= 400 && r.StatusCode < 600 {
+		log.Debugf("request not accepted by the server: (%s %s): Response code: %d",
+			req.Method, req.URL.String(), r.StatusCode)
+		return nil, fmt.Errorf("failed to check update info on the server. Response: %v", r)
+	}
+	return nil, fmt.Errorf("received unexpected HTTP status code: %d. Response: %v",
+		r.StatusCode, r)
 }
 
 func findFirstWorkingEndpoint(api ApiRequester, reqs []*http.Request) (*http.Response, error) {
@@ -436,6 +555,47 @@ func makeUpdateCheckRequest(server string, current *CurrentUpdate) ([]*http.Requ
 	return reqs, nil
 }
 
+// makeNativeUpdateCheckRequests builds the update-check requests for the
+// OTA-Pulse-native route set: a POST carrying the full device_provides body
+// (needed for delta negotiation and the control-map flag), then a GET with
+// artifact_name/device_type as query parameters.
+func makeNativeUpdateCheckRequests(
+	server string,
+	current *CurrentUpdate,
+) ([]*http.Request, error) {
+	vals := url.Values{}
+	if current.DeviceType != "" {
+		vals.Add("device_type", current.DeviceType)
+	}
+	if current.Artifact != "" {
+		vals.Add("artifact_name", current.Artifact)
+	}
+
+	body, err := json.Marshal(&UpdateV2Body{
+		DeviceProvides:   current,
+		UpdateControlMap: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	post, err := http.NewRequest(http.MethodPost, buildApiURL(server, wireNextPath),
+		bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	post.Header.Add("Content-Type", "application/json")
+
+	ep := wireNextPath
+	if len(vals) != 0 {
+		ep = ep + "?" + vals.Encode()
+	}
+	get, err := http.NewRequest(http.MethodGet, buildApiURL(server, ep), nil)
+	if err != nil {
+		return nil, err
+	}
+	return []*http.Request{post, get}, nil
+}
+
 func makeUpdateFetchRequest(url string) (*http.Request, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -450,17 +610,15 @@ func GetUpdateControlMap(
 	serverURL,
 	deploymentID string,
 ) (cm *updatecontrolmap.UpdateControlMap, err error) {
-	ep := fmt.Sprintf("/v2/deployments/device/deployments/%s/update_control_map", deploymentID)
-	requestURL := buildApiURL(serverURL, ep)
-	request, err := http.NewRequest(
-		http.MethodGet,
-		requestURL,
-		nil,
+	response, err := wireDo(
+		api,
+		serverURL,
+		fmt.Sprintf(wireControlMapPathFmt, deploymentID),
+		fmt.Sprintf("/v2/deployments/device/deployments/%s/update_control_map", deploymentID),
+		func(path string) (*http.Request, error) {
+			return http.NewRequest(http.MethodGet, buildApiURL(serverURL, path), nil)
+		},
 	)
-	if err != nil {
-		return nil, err
-	}
-	response, err := api.Do(request)
 	if err != nil {
 		return nil, err
 	}
