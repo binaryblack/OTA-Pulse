@@ -601,7 +601,10 @@ func TestGetUpdateInfo(t *testing.T) {
 	}{
 		"Enterprise v2 - Success - Update available": {
 			httpHandlerFunc: func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != "POST" || !strings.Contains(r.URL.String(), "v2") {
+				if strings.Contains(r.URL.Path, "/otapulse/") {
+					// Legacy-only server: no native routes.
+					w.WriteHeader(404)
+				} else if r.Method != "POST" || !strings.Contains(r.URL.String(), "v2") {
 					// Not really a valid server response,
 					// but we are just using it to validate
 					// the test case.
@@ -621,7 +624,10 @@ func TestGetUpdateInfo(t *testing.T) {
 		},
 		"Enterprise v2 - Success 204 - No Content": {
 			httpHandlerFunc: func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != "POST" || !strings.Contains(r.URL.String(), "v2") {
+				if strings.Contains(r.URL.Path, "/otapulse/") {
+					// Legacy-only server: no native routes.
+					w.WriteHeader(404)
+				} else if r.Method != "POST" || !strings.Contains(r.URL.String(), "v2") {
 					// Not really a valid server response,
 					// but we are just using it to validate
 					// the test case.
@@ -641,7 +647,10 @@ func TestGetUpdateInfo(t *testing.T) {
 		},
 		"Enterprise v1 - Success - Update available": {
 			httpHandlerFunc: func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == "POST" && strings.Contains(r.URL.String(), "v2") {
+				if strings.Contains(r.URL.Path, "/otapulse/") {
+					// Legacy-only server: no native routes.
+					w.WriteHeader(404)
+				} else if r.Method == "POST" && strings.Contains(r.URL.String(), "v2") {
 					w.WriteHeader(404)
 				} else if r.Method == "POST" {
 					w.WriteHeader(200)
@@ -661,7 +670,10 @@ func TestGetUpdateInfo(t *testing.T) {
 		},
 		"Enterprise v1 - Success 204 - No Content": {
 			httpHandlerFunc: func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == "POST" && strings.Contains(r.URL.String(), "v2") {
+				if strings.Contains(r.URL.Path, "/otapulse/") {
+					// Legacy-only server: no native routes.
+					w.WriteHeader(404)
+				} else if r.Method == "POST" && strings.Contains(r.URL.String(), "v2") {
 					w.WriteHeader(404)
 				} else if r.Method == "POST" {
 					w.WriteHeader(204)

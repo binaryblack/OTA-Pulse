@@ -48,13 +48,18 @@ func (u *AuthClient) Request(
 	dataSrc AuthDataMessenger,
 ) ([]byte, error) {
 
-	req, err := makeAuthRequest(server, dataSrc)
+	// Build the (signed) authorization message exactly once; only the URL
+	// differs between the native and the legacy attempt.
+	msg, err := dataSrc.MakeAuthRequest()
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to build authorization request")
 	}
 
-	log.Debugf("Making an authorization request (%s) to server %s", req.RequestURI, server)
-	rsp, err := api.Do(req)
+	log.Debugf("Making an authorization request to server %s", server)
+	rsp, err := wireDo(api, server, wireAuthPath, legacyAuthPath,
+		func(path string) (*http.Request, error) {
+			return newAuthHTTPRequest(buildApiURL(server, path), msg)
+		})
 	if err != nil {
 		// checking the detailed reason of the failure
 		if urlErr, ok := err.(*url.Error); ok {
@@ -124,14 +129,18 @@ func (u *AuthClient) Request(
 	}
 }
 
-func makeAuthRequest(server string, dataSrc AuthDataMessenger) (*http.Request, error) {
-	url := buildApiURL(server, "/v1/authentication/auth_requests")
+const legacyAuthPath = "/v1/authentication/auth_requests"
 
+// makeAuthRequest builds the legacy-path authorization request.
+func makeAuthRequest(server string, dataSrc AuthDataMessenger) (*http.Request, error) {
 	req, err := dataSrc.MakeAuthRequest()
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to obtain authorization message data")
 	}
+	return newAuthHTTPRequest(buildApiURL(server, legacyAuthPath), req)
+}
 
+func newAuthHTTPRequest(url string, req *AuthRequest) (*http.Request, error) {
 	dataio := bytes.NewBuffer(req.Data)
 	hreq, err := http.NewRequest(http.MethodPost, url, dataio)
 	if err != nil {

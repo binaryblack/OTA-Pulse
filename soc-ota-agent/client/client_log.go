@@ -40,12 +40,12 @@ func NewLog() LogUploader {
 
 // Report status information to the backend
 func (u *LogUploadClient) Upload(api ApiRequester, url string, logs LogData) error {
-	req, err := makeLogUploadRequest(url, &logs)
-	if err != nil {
-		return errors.Wrapf(err, "failed to prepare log upload request")
-	}
-
-	r, err := api.Do(req)
+	r, err := wireDo(api, url,
+		fmt.Sprintf(wireLogPathFmt, logs.DeploymentID),
+		fmt.Sprintf(legacyLogPathFmt, logs.DeploymentID),
+		func(path string) (*http.Request, error) {
+			return newLogUploadRequest(url, path, &logs)
+		})
 	if err != nil {
 		log.Error("failed to upload logs: ", err)
 		return errors.Wrapf(err, "uploading logs failed")
@@ -63,9 +63,15 @@ func (u *LogUploadClient) Upload(api ApiRequester, url string, logs LogData) err
 	return nil
 }
 
+const legacyLogPathFmt = "/v1/deployments/device/deployments/%s/log"
+
+// makeLogUploadRequest builds the legacy-path log upload request.
 func makeLogUploadRequest(server string, logs *LogData) (*http.Request, error) {
-	path := fmt.Sprintf("/v1/deployments/device/deployments/%s/log",
-		logs.DeploymentID)
+	return newLogUploadRequest(server,
+		fmt.Sprintf(legacyLogPathFmt, logs.DeploymentID), logs)
+}
+
+func newLogUploadRequest(server, path string, logs *LogData) (*http.Request, error) {
 	url := buildApiURL(server, path)
 
 	// BUG-446: this was http.MethodPost from day one (never exercised by any

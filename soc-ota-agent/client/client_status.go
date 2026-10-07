@@ -63,12 +63,17 @@ func NewStatus() StatusReporter {
 
 // Report status information to the backend
 func (u *StatusClient) Report(api ApiRequester, url string, report StatusReport) error {
-	req, err := makeStatusReportRequest(url, report)
-	if err != nil {
+	// Validate the payload up front so an encoding error is reported as such.
+	if _, err := makeStatusReportRequest(url, report); err != nil {
 		return errors.Wrapf(err, "failed to prepare status report request")
 	}
 
-	r, err := api.Do(req)
+	r, err := wireDo(api, url,
+		fmt.Sprintf(wireStatusPathFmt, report.DeploymentID),
+		fmt.Sprintf(legacyStatusPathFmt, report.DeploymentID),
+		func(path string) (*http.Request, error) {
+			return newStatusReportRequest(url, path, report)
+		})
 	if err != nil {
 		log.Error("Failed to report status: ", err)
 		return errors.Wrapf(err, "reporting status failed")
@@ -104,9 +109,15 @@ func (u *StatusClient) Report(api ApiRequester, url string, report StatusReport)
 	return nil
 }
 
+const legacyStatusPathFmt = "/v1/deployments/device/deployments/%s/status"
+
+// makeStatusReportRequest builds the legacy-path status report request.
 func makeStatusReportRequest(server string, report StatusReport) (*http.Request, error) {
-	path := fmt.Sprintf("/v1/deployments/device/deployments/%s/status",
-		report.DeploymentID)
+	return newStatusReportRequest(server,
+		fmt.Sprintf(legacyStatusPathFmt, report.DeploymentID), report)
+}
+
+func newStatusReportRequest(server, path string, report StatusReport) (*http.Request, error) {
 	url := buildApiURL(server, path)
 
 	out := &bytes.Buffer{}

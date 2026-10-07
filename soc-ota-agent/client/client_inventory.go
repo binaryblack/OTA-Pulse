@@ -61,12 +61,14 @@ func doSubmitInventory(
 	method, url string,
 	data interface{},
 ) (*http.Response, error) {
-	req, err := makeInventorySubmitRequest(method, url, data)
-	if err != nil {
+	if _, err := makeInventorySubmitRequest(method, url, data); err != nil {
 		return nil, errors.Wrapf(err, "failed to prepare inventory submit request")
 	}
 
-	r, err := api.Do(req)
+	r, err := wireDo(api, url, wireInventoryPath, legacyInventoryPath,
+		func(path string) (*http.Request, error) {
+			return newInventorySubmitRequest(method, url, path, data)
+		})
 	if err != nil {
 		log.Error("Failed to submit inventory data: ", err)
 		return r, errors.Wrapf(err, "inventory submit failed")
@@ -86,8 +88,18 @@ func doSubmitInventory(
 	return r, nil
 }
 
+const legacyInventoryPath = "/v1/inventory/device/attributes"
+
+// makeInventorySubmitRequest builds the legacy-path inventory request.
 func makeInventorySubmitRequest(method, server string, data interface{}) (*http.Request, error) {
-	url := buildApiURL(server, "/v1/inventory/device/attributes")
+	return newInventorySubmitRequest(method, server, legacyInventoryPath, data)
+}
+
+func newInventorySubmitRequest(
+	method, server, path string,
+	data interface{},
+) (*http.Request, error) {
+	url := buildApiURL(server, path)
 
 	out := &bytes.Buffer{}
 	enc := json.NewEncoder(out)
