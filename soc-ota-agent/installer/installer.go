@@ -58,6 +58,9 @@ type AllModules struct {
 	// methods such as HandleBootCountFallback. nil when no dual-rootfs device
 	// is configured.
 	DualRootfs DualRootfsDevice
+	// Built-in rootfs-image-delta handler (TODO-054, delta_rootfs.go). nil
+	// when no dual-rootfs device is configured.
+	DeltaRootfs *DeltaRootfsFactory
 	// External modules.
 	Modules *ModuleInstallerFactory
 }
@@ -295,6 +298,19 @@ func registerHandlers(ar *areader.Reader, inst *AllModules) error {
 		}
 	}
 
+	// Built-in delta rootfs handler. Always registered alongside the dual
+	// rootfs so a delta is recognised; whether it may actually be applied
+	// (xdelta3 present, read-only root, base checksum matches) is decided in
+	// its Initialize, from the signed headers, before any byte is written.
+	deltaBuiltin := inst.DualRootfs != nil && inst.DeltaRootfs != nil
+	if deltaBuiltin {
+		delta := handlers.NewModuleImage(DeltaRootfsPayloadType)
+		delta.SetUpdateStorerProducer(inst.DeltaRootfs)
+		if err := ar.RegisterHandler(delta); err != nil {
+			return errors.Wrap(err, "failed to register rootfs-image-delta install handler")
+		}
+	}
+
 	if inst.Modules == nil {
 		return nil
 	}
@@ -305,6 +321,11 @@ func registerHandlers(ar *areader.Reader, inst *AllModules) error {
 		if updateType == "rootfs-image" {
 			log.Errorf("Found update module called %s, which "+
 				"cannot be overridden. Ignoring.", updateType)
+			continue
+		}
+		if updateType == DeltaRootfsPayloadType && deltaBuiltin {
+			log.Errorf("Found update module called %s, which "+
+				"cannot override the built-in handler. Ignoring.", updateType)
 			continue
 		}
 		moduleImage := handlers.NewModuleImage(updateType)
@@ -352,6 +373,17 @@ func CreateInstallersFromList(inst *AllModules,
 					"Recovery may fail.")
 				payloadStorers[n] = NewStubInstaller(desired)
 			}
+			continue
+		}
+		if desired == DeltaRootfsPayloadType && inst.DualRootfs != nil {
+			// Resuming after the store (e.g. post-reboot): every remaining
+			// step is the dual-rootfs device's own logic. A resumed
+			// installer is uninitialized and can never store data.
+			factory := inst.DeltaRootfs
+			if factory == nil {
+				factory = NewDeltaRootfsFactory(inst.DualRootfs, nil, 0)
+			}
+			payloadStorers[n] = factory.newInstaller()
 			continue
 		}
 

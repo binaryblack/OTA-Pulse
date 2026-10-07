@@ -376,6 +376,12 @@ func (m *Mender) CheckUpdate() (*datastore.UpdateInfo, menderError) {
 			err,
 		)
 	}
+	// TODO-054: provides already carry the running rootfs's
+	// rootfs-image.checksum (persisted from the committed artifact's signed
+	// provides). Add rootfs-image.delta.formats=xdelta3 only when this device
+	// can actually apply a delta (xdelta3 present AND / mounted read-only);
+	// nil-safe when no dual rootfs is configured.
+	provides = m.DeviceManager.InstallerFactories.DeltaRootfs.AddDeltaCapabilityProvides(provides)
 	haveUpdate, err := m.updater.GetScheduledUpdate(
 		m.api,
 		m.Config.Servers[0].ServerURL,

@@ -55,6 +55,10 @@ func NewDeviceManager(
 	}
 	d.InstallerFactories = installer.AllModules{
 		DualRootfs: dualRootfsDevice,
+		// nil when dualRootfsDevice is nil. Dormant until the image mounts
+		// / read-only and ships xdelta3 (TODO-054/TODO-115).
+		DeltaRootfs: installer.NewDeltaRootfsFactory(dualRootfsDevice, d,
+			config.ModuleTimeoutSeconds),
 		Modules: installer.NewModuleInstallerFactory(config.ModulesPath,
 			config.ModulesWorkPath, d, d, config.ModuleTimeoutSeconds),
 	}
