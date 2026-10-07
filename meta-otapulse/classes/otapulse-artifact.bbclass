@@ -69,8 +69,12 @@ def otapulse_artifact_format_args(tool, env):
                            capture_output=True, text=True, timeout=30, env=env)
         if '--format' in (r.stdout or '') + (r.stderr or ''):
             return ['--format', 'otapulse']
+        bb.warn("%s does not support 'write --format': the artifacts produced by this "
+                "build carry the legacy 'mender' format id, not 'otapulse'. Install "
+                "otapulse-artifact 3.11.2-op2 or later to get the otapulse format id." % tool)
     except Exception as e:
-        bb.note("Could not probe %s for --format support: %s" % (tool, e))
+        bb.warn("Could not probe %s for --format support (%s): the artifacts produced "
+                "by this build carry the legacy 'mender' format id." % (tool, e))
     return []
 
 python do_generate_otapulse_artifact() {
