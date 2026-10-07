@@ -38,7 +38,7 @@ TOOLS = \
 # gives vX.Y.Z on a tagged commit, vX.Y.Z-N-gSHA between tags, and a bare SHA when
 # there are no tags. Recipes should NOT pass VERSION=$(PV) (a fixed 1.0.0 on every
 # board); either omit it or pass this same git describe expression.
-VERSION = $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
+VERSION = $(shell git describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null || echo unknown)
 
 # Allow external GO_LDFLAGS from environment (e.g., from Yocto recipe)
 # Default adds version info; external flags are appended

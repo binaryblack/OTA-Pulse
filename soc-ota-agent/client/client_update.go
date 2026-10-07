@@ -197,6 +197,10 @@ type wireRequest struct {
 // findFirstWorkingWireEndpoint walks the update-check chain like
 // findFirstWorkingEndpoint (falling through on HTTP 404 only) and
 // additionally:
+//   - treats a native 404 as "no native route" (and falls back) only when it
+//     lacks the X-OTAPulse-Wire header; with the header it is final,
+//   - treats a legacy 404 or 410 as "not served" (never a "legacy only"
+//     verdict), and
 //   - lets a native request that answers 405 fall through to the NEXT native
 //     request (the native route exists but not for that method), and
 //   - remembers which route set answered so later polls start there.
@@ -206,7 +210,8 @@ func findFirstWorkingWireEndpoint(
 	chain []wireRequest,
 ) (*http.Response, error) {
 	var r *http.Response
-	for i, wr := range chain {
+	for i := 0; i < len(chain); i++ {
+		wr := chain[i]
 		req := wr.req
 		var err error
 		r, err = api.Do(req)
@@ -218,15 +223,26 @@ func findFirstWorkingWireEndpoint(
 
 		last := i == len(chain)-1
 		switch {
-		case r.StatusCode == http.StatusNotFound && !last:
+		case wr.native && nativeNotServed(r):
+			// Old backend (404 without the wire header): no native routes at
+			// all. Warn once and skip the remaining native variants (the GET
+			// would 404 as well), so there is one WARN per endpoint.
 			r.Body.Close()
-			if wr.native {
-				log.Warnf("%s %s returned HTTP 404: server has no OTA-Pulse-native "+
-					"device route, falling back to the legacy path",
-					req.Method, req.URL.Path)
-			} else {
-				log.Infof("request %s to %s returned HTTP 404", req.Method, req.URL.String())
+			log.Warnf("%s %s returned HTTP 404: server has no OTA-Pulse-native "+
+				"device route, falling back to the legacy path",
+				req.Method, req.URL.Path)
+			for i+1 < len(chain) && chain[i+1].native {
+				i++
 			}
+			continue
+		case wr.native && r.StatusCode == http.StatusNotFound:
+			// Native 404 carrying the wire header: the server speaks the
+			// native wire and this is its real answer. Never fall back.
+			return finishFindFirstWorking(r, req)
+		case !wr.native && legacyNotServed(r) && !last:
+			r.Body.Close()
+			log.Infof("request %s to %s returned HTTP %d",
+				req.Method, req.URL.String(), r.StatusCode)
 			continue
 		case r.StatusCode == http.StatusMethodNotAllowed && wr.native &&
 			!last && chain[i+1].native:

@@ -31,6 +31,12 @@ type wireServer struct {
 	// nativePostStatus, when non-zero, is the status native POST routes
 	// answer (e.g. 405 for a GET-only native next route).
 	nativePostStatus int
+	// native404 makes the (served) native routes answer their own legitimate
+	// 404 ("Device not found"), carrying the X-OTAPulse-Wire header.
+	native404 bool
+	// legacyStatus, when non-zero, is the status every legacy route answers
+	// (410 = LEGACY_DEVICE_WIRE_ENABLED=false).
+	legacyStatus int
 	// consumed counts how many update checks a route actually served: the
 	// stand-in for "a deployment was handed out/burned".
 	consumed int
@@ -64,6 +70,17 @@ func (ws *wireServer) handle(w http.ResponseWriter, r *http.Request) {
 	isNative := strings.Contains(r.URL.Path, "/v1/otapulse/")
 	if isNative && !ws.native || !isNative && !ws.legacy {
 		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if isNative {
+		// A current backend marks every native response.
+		w.Header().Set(wireHeader, "1")
+		if ws.native404 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+	} else if ws.legacyStatus != 0 {
+		w.WriteHeader(ws.legacyStatus)
 		return
 	}
 	if isNative && ws.nativeStatus != 0 {
@@ -255,9 +272,10 @@ func TestWireUpdateCheckLegacyServerBurnsNothing(t *testing.T) {
 	// native variants answered 404 without side effects, then the legacy
 	// POST v2 served it and the chain stopped.
 	assert.Equal(t, 1, ws.consumed)
+	// One native probe only (the native GET is skipped after the POST's
+	// 404, so one WARN per endpoint), then the legacy POST v2 serves it.
 	assert.Equal(t, []string{
 		"POST /api/devices/v1/otapulse/deployments/next",
-		"GET /api/devices/v1/otapulse/deployments/next",
 		"POST /api/devices/v2/deployments/device/deployments/next",
 	}, ws.hitList())
 
@@ -391,4 +409,89 @@ func causeOf(err error) error {
 		err = c.Cause()
 	}
 	return err
+}
+
+func TestWireNative404WithHeaderNeverFallsBack(t *testing.T) {
+	ac := newWireAPI(t)
+	ws := newWireServer(t, true, true)
+	ws.native404 = true
+
+	// Status: the server's own "deployment not found" is a real answer
+	// (an abort), not a missing route.
+	err := NewStatus().Report(ac, ws.URL,
+		StatusReport{DeploymentID: "d1", Status: StatusSuccess})
+	require.Error(t, err)
+	assert.Equal(t, ErrDeploymentAborted, causeOf(err))
+	assert.Equal(t, []string{"PUT /api/devices/v1/otapulse/deployments/d1/status"}, ws.hitList())
+	assert.True(t, preferNativeWire(ws.URL))
+
+	// Update check: "Device not found" is an error, no legacy request.
+	ws.reset()
+	_, err = NewUpdate().GetScheduledUpdate(ac, ws.URL, &CurrentUpdate{Artifact: "a"})
+	require.Error(t, err)
+	assert.Equal(t, []string{"POST /api/devices/v1/otapulse/deployments/next"}, ws.hitList())
+	assert.Equal(t, 0, ws.consumed)
+
+	// Control map: server's "Deployment not found" -> no deployment, no retry.
+	ws.reset()
+	_, err = GetUpdateControlMap(ac, ws.URL, "11111111-1111-1111-1111-111111111111")
+	assert.Equal(t, ErrNoDeploymentAvailable, err)
+	assert.Equal(t, 1, len(ws.hitList()))
+}
+
+func TestWireLegacy410IsNotServedAndNeverSticky(t *testing.T) {
+	// Backend with LEGACY_DEVICE_WIRE_ENABLED=false but a native route that
+	// answered a header-less 404 (e.g. a proxy in front): the legacy retry
+	// returns 410, which must be handed back as the NATIVE 404 and must never
+	// be recorded as "legacy only".
+	ac := newWireAPI(t)
+	ws := newWireServer(t, false, true)
+	ws.legacyStatus = http.StatusGone
+
+	err := NewStatus().Report(ac, ws.URL,
+		StatusReport{DeploymentID: "d1", Status: StatusSuccess})
+	require.Error(t, err)
+	// Native 404 handed back => the (pre-existing) BUG-283 abort mapping, not
+	// the legacy 410 path; crucially nothing is recorded as legacy-only.
+	assert.Equal(t, []string{
+		"PUT /api/devices/v1/otapulse/deployments/d1/status",
+		"PUT /api/devices/v1/deployments/device/deployments/d1/status",
+	}, ws.hitList())
+	assert.True(t, preferNativeWire(ws.URL), "a 410 must never make the choice legacy-only")
+
+	// Update check against the same server: error, still not sticky-legacy.
+	_, err = NewUpdate().GetScheduledUpdate(ac, ws.URL, &CurrentUpdate{Artifact: "a"})
+	require.Error(t, err)
+	assert.True(t, preferNativeWire(ws.URL))
+	assert.Equal(t, 0, ws.consumed)
+}
+
+func TestWireOldBackendWithoutHeaderStillFallsBack(t *testing.T) {
+	ac := newWireAPI(t)
+	ws := newWireServer(t, false, true) // native 404 carries no header
+	err := NewStatus().Report(ac, ws.URL,
+		StatusReport{DeploymentID: "d1", Status: StatusSuccess})
+	require.NoError(t, err)
+	assert.False(t, preferNativeWire(ws.URL))
+}
+
+func TestWireLegacyFirstStickyHandles410ByTryingNative(t *testing.T) {
+	// Sticky-legacy agent, then the server flips legacy off (410) and native
+	// on: the agent must recover through the native route.
+	ac := newWireAPI(t)
+	ws := newWireServer(t, false, true)
+	require.NoError(t, NewStatus().Report(ac, ws.URL,
+		StatusReport{DeploymentID: "d1", Status: StatusInstalling}))
+	require.False(t, preferNativeWire(ws.URL))
+
+	ws.native = true
+	ws.legacyStatus = http.StatusGone
+	ws.reset()
+	require.NoError(t, NewStatus().Report(ac, ws.URL,
+		StatusReport{DeploymentID: "d1", Status: StatusSuccess}))
+	assert.Equal(t, []string{
+		"PUT /api/devices/v1/deployments/device/deployments/d1/status",
+		"PUT /api/devices/v1/otapulse/deployments/d1/status",
+	}, ws.hitList())
+	assert.True(t, preferNativeWire(ws.URL))
 }

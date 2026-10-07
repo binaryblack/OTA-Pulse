@@ -9,8 +9,10 @@ package client
 //   - the legacy (Mender-compatible)  /api/devices/v{1,2}/...
 //
 // The agent speaks the native set first and falls back to the legacy set
-// ONLY when the server answers HTTP 404 for the native path (a server that
-// predates the native routes). Any other status — 401, 403, 5xx, and also
+// ONLY when the server answers HTTP 404 for the native path WITHOUT the
+// X-OTAPulse-Wire response header (a server that predates the native routes;
+// a current backend sets that header on every native response, including its
+// own legitimate 404s). Any other status — 401, 403, 5xx, and also
 // every 2xx/4xx that the native route legitimately produced — is final and
 // never triggers a fallback, so a fallback can never replay a request that
 // the server already acted on.
@@ -110,10 +112,33 @@ func resetWireChoice() {
 	wireChoice.Unlock()
 }
 
+// wireHeader is set by every OTA-Pulse-native route of the backend on every
+// response (including its own legitimate 404s such as "Device not found").
+// A native 404 that carries it comes from a server that speaks the native
+// wire, so it is final and never triggers a legacy fallback.
+const wireHeader = "X-OTAPulse-Wire"
+
+// nativeNotServed reports whether a response to a NATIVE request means "this
+// server has no native route": a 404 without the wire header (an old backend).
+func nativeNotServed(r *http.Response) bool {
+	return r.StatusCode == http.StatusNotFound && r.Header.Get(wireHeader) == ""
+}
+
+// legacyNotServed reports whether a response to a LEGACY request means "the
+// legacy route is gone or disabled": 404, or 410 (LEGACY_DEVICE_WIRE_ENABLED
+// =false answers 410 Gone). Neither ever records a "legacy only" verdict.
+func legacyNotServed(r *http.Response) bool {
+	return r.StatusCode == http.StatusNotFound || r.StatusCode == http.StatusGone
+}
+
 // wireDo sends the request produced by build(path) on the preferred route
-// set and, only on HTTP 404, on the other one. build is called once per
+// set and falls back to the other one only when the preferred one is "not
+// served" (see nativeNotServed / legacyNotServed). build is called once per
 // attempt so request bodies are never replayed from a consumed reader.
 // nativePath and legacyPath are relative to apiPrefix (see buildApiURL).
+//
+// When the legacy retry of a native 404 fails too (404/410), the NATIVE 404
+// is returned, so the caller sees the server's real answer.
 //
 // The returned response is the last one received; the caller owns its Body.
 func wireDo(
@@ -125,31 +150,58 @@ func wireDo(
 	if !preferNativeWire(server) {
 		order = []string{legacyPath, nativePath}
 	}
-	var r *http.Response
+	var held *http.Response // first attempt's response, kept for hand-back
 	for i, path := range order {
+		isNative := path == nativePath
 		req, err := build(path)
 		if err != nil {
+			closeBody(held)
 			return nil, err
 		}
-		r, err = api.Do(req)
+		r, err := api.Do(req)
 		if err != nil {
+			closeBody(held)
 			return r, err
 		}
-		if r.StatusCode == http.StatusNotFound && i < len(order)-1 {
-			r.Body.Close()
-			logWireFallback(req, path == nativePath, order[i+1])
+		last := i == len(order)-1
+		notServed := (isNative && nativeNotServed(r)) || (!isNative && legacyNotServed(r))
+		if notServed && !last {
+			held = r
+			logWireFallback(req, isNative, order[i+1])
 			continue
 		}
-		if r.StatusCode != http.StatusNotFound {
-			if path == nativePath {
+		if isNative {
+			// A native answer is a verdict for the native wire unless it is
+			// the "no such route" 404 of an old backend.
+			if !nativeNotServed(r) {
 				rememberWire(server, wireNative)
-			} else {
-				rememberWire(server, wireLegacy)
 			}
+			if held != nil {
+				held.Body.Close()
+			}
+			return r, nil
 		}
+		// Legacy answer.
+		if legacyNotServed(r) {
+			// Legacy 404/410 after a native not-served 404: hand back the
+			// native response, record nothing.
+			if held != nil {
+				r.Body.Close()
+				return held, nil
+			}
+			return r, nil
+		}
+		rememberWire(server, wireLegacy)
+		closeBody(held)
 		return r, nil
 	}
-	return r, nil
+	return held, nil
+}
+
+func closeBody(r *http.Response) {
+	if r != nil && r.Body != nil {
+		r.Body.Close()
+	}
 }
 
 func logWireFallback(req *http.Request, fromNative bool, to string) {

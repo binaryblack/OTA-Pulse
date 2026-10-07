@@ -11,9 +11,9 @@ TOOL="${ARTIFACT_TOOL:-$(command -v otapulse-artifact || command -v mender-artif
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-if [[ ! -f test-private.pem ]]; then
-  openssl genrsa -out test-private.pem 2048 2>/dev/null
-  openssl rsa -in test-private.pem -pubout -out test-public.pem 2>/dev/null
+if [[ ! -f test-only-signing-key.pem ]]; then
+  openssl genrsa -out test-only-signing-key.pem 2048 2>/dev/null
+  openssl rsa -in test-only-signing-key.pem -pubout -out test-public.pem 2>/dev/null
   openssl genrsa -out wrong-private.pem 2048 2>/dev/null
   openssl rsa -in wrong-private.pem -pubout -out wrong-public.pem 2>/dev/null
   rm -f wrong-private.pem   # only the wrong PUBLIC key is needed (negative test)
@@ -71,7 +71,7 @@ with tarfile.open(fileobj=out, mode="w", format=tarfile.USTAR_FORMAT) as tout:
 open(dst, "wb").write(out.getvalue())
 PY
   for id in mender otapulse; do
-    "$TOOL" sign -k test-private.pem \
+    "$TOOL" sign -k test-only-signing-key.pem \
       -o "$kind-$id-signed.otapulse" "$kind-$id-unsigned.otapulse" >/dev/null
   done
 done

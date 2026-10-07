@@ -15,7 +15,10 @@ compatible device type `golden-device`, signature algorithm RSA-2048 (key below)
 
 Keys (**TEST ONLY - committed on purpose, protect nothing, never trust them anywhere**):
 
-* `test-private.pem` / `test-public.pem` - sign / verify the `*-signed.otapulse` files.
+* `test-only-signing-key.pem` / `test-public.pem` - sign / verify the `*-signed.otapulse` files.
+The private key is committed so that re-running `gen.sh` reuses it and the committed
+`test-public.pem` stays valid.
+
 * `wrong-public.pem` - an unrelated public key for negative tests (verification must fail).
 
 ## How they were built
@@ -29,7 +32,7 @@ Keys (**TEST ONLY - committed on purpose, protect nothing, never trust them anyw
    `{"format":"otapulse","version":3}` and fixing the `version` line of `manifest`
    (the manifest covers `version`, so the signature must be made *after* this step).
    Member names and order are untouched - the container is still the Mender v3 layout.
-3. `sign -k test-private.pem` produces every `*-signed` file from its `*-unsigned` sibling.
+3. `sign -k test-only-signing-key.pem` produces every `*-signed` file from its `*-unsigned` sibling.
 
 Re-running `gen.sh` regenerates equivalent but not byte-identical files (tar mtimes, signature
 randomness). Do not regenerate casually: other test suites read these exact files.

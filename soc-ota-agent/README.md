@@ -90,7 +90,7 @@ Configuration file: `/etc/otapulse/otapulse.conf`
 make build
 ```
 
-The agent version is stamped at link time from `git describe --tags --always --dirty`
+The agent version is stamped at link time from `git describe --tags --always --dirty --match 'v[0-9]*'`
 (for example `v0.1.7`, or `v0.1.7-42-g9696f62` between tags) and reported to the server as
 the inventory attributes `otapulse_agent_version` and `mender_client_version`. Pass
 `VERSION=...` to `make` to override it. Do not pass a fixed package version for every build:
