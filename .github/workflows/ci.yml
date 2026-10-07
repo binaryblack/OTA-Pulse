@@ -44,6 +44,34 @@ jobs:
       - name: go test
         run: go test -v ./...
 
+  go-compat:
+    # Jetson (meta-tegra / poky-kirkstone) builds the agent with Go 1.17.13.
+    # go.mod says `go 1.21` but Go 1.17 does not enforce it, so a newer stdlib
+    # API (e.g. os/exec.Cmd.WaitDelay, 1.20) only breaks the Jetson image
+    # build. Build + vet (incl. tests) with the REAL oldest Go. See
+    # soc-ota-agent/scripts/go-compat-check.sh.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: soc-ota-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.17.13'
+          cache: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config liblzma-dev libssl-dev libglib2.0-dev
+
+      - name: go-compat (oldest supported Go)
+        env:
+          GO_COMPAT_REQUIRE_OLD: '1'
+        run: GO_COMPAT_GO="$(command -v go)" make go-compat
+
   vulncheck:
     runs-on: ubuntu-22.04
     defaults:
