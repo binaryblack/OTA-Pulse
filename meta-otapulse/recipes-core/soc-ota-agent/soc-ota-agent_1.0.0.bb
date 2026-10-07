@@ -153,7 +153,12 @@ do_compile() {
     export EXTRA_GO_LDFLAGS="-s -w -linkmode=external -extldflags '${LDFLAGS}'"
 
     # Build using the Makefile
-    oe_runmake build VERSION="${PV}"
+    # TODO-011/S102-001: report the real agent version (git describe), not the
+    # recipe PV, so the fleet gate can see which agents have rolled. Only v*
+    # tags count (release tags such as otapulse-artifact-v* must not leak in).
+    AGENT_VERSION="$(git -C ${S} describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null || echo ${PV})"
+    bbnote "soc-ota-agent version: ${AGENT_VERSION}"
+    oe_runmake build VERSION="${AGENT_VERSION}"
 }
 
 do_install() {
