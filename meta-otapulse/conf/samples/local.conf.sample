@@ -29,7 +29,7 @@ MACHINE = "CHANGE_ME"
 # Public key deployed to devices for verifying update signatures
 # SOC_OTA_VERIFICATION_KEYS = "/path/to/your/public.pem"
 
-# Private key used at build time to sign .mender artifacts
+# Private key used at build time to sign .otapulse artifacts
 # SOC_OTA_SIGNING_KEY = "/path/to/your/private.pem"
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -43,7 +43,7 @@ MACHINE = "CHANGE_ME"
 # OTAPULSE_SANITY_LEVEL = "error"
 
 # Skip individual sanity checks — space-separated names:
-#   server  provisioning  mender-artifact  partitions  signing  device-type
+#   server  provisioning  otapulse-artifact  partitions  signing  device-type
 #   packages  systemd  image-size  networking
 # OTAPULSE_SANITY_SKIP = ""
 
@@ -89,8 +89,8 @@ EXTRA_IMAGE_FEATURES += "debug-tweaks ssh-server-openssh"
 # Options: "1" (enabled) or "0" (disabled)
 SOC_OTA_SIGNATURE_VERIFICATION = "1"
 
-# Private key for signing Mender artifacts during build
-# This key will be used to sign the .mender artifact automatically
+# Private key for signing OTA artifacts during build
+# This key will be used to sign the .otapulse artifact automatically
 # Supports RSA (recommended: RSA-4096) and ECDSA (ECDSA-P384) keys
 # Leave empty to disable automatic signing
 SOC_OTA_SIGNING_KEY = "/home/krishna/radxa-cm5/testkeys/Test_private.pem"

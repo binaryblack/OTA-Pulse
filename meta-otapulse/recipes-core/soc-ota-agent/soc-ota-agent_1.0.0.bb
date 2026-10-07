@@ -256,9 +256,9 @@ do_install() {
     # Create scripts directory
     install -d ${D}${sysconfdir}/otapulse/scripts
 
-    # Stage Mender state scripts for embedding into the .mender artifact.
-    # mender-artifact.bbclass scans ${datadir}/otapulse/state-scripts and passes
-    # each via `mender-artifact write --script`. This is REQUIRED for Artifact*
+    # Stage OTA state scripts for embedding into the .otapulse artifact.
+    # otapulse-artifact.bbclass scans ${datadir}/otapulse/state-scripts and passes
+    # each via `otapulse-artifact write --script`. This is REQUIRED for Artifact*
     # transition scripts (ArtifactReboot_Enter/_Leave, ArtifactCommit_*) to run on
     # device during an OTA — Mender takes those scripts from the ARTIFACT, not the
     # rootfs, so a rootfs-only install would never execute them.

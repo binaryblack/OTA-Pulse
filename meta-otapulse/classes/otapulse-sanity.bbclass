@@ -17,7 +17,7 @@
 #   OTAPULSE_SANITY_SKIP (default: '')
 #     Space-separated list of individual check names to bypass.
 #     Available names:
-#       server  provisioning  mender-artifact  partitions  signing
+#       server  provisioning  otapulse-artifact  partitions  signing
 #       device-type  packages  systemd  image-size  networking
 #
 #     Example — skip signing and networking checks:
@@ -254,35 +254,37 @@ python otapulse_sanity_check() {
             failed += 1
 
     # ==================================================================
-    # CHECK 'mender-artifact' — class must be inherited and ext4 present
+    # CHECK 'otapulse-artifact' — class must be inherited and ext4 present
+    # ('mender-artifact' is the legacy name: still accepted in the skip list
+    # and as an inherited class, since it is a shim for otapulse-artifact.)
     # ==================================================================
-    if 'mender-artifact' in skip_list:
-        bb.note("OTAPulse Sanity [mender-artifact]: skipped")
+    if 'otapulse-artifact' in skip_list or 'mender-artifact' in skip_list:
+        bb.note("OTAPulse Sanity [otapulse-artifact]: skipped")
         skipped += 1
     else:
         inherited = (d.getVar('INHERITED',     True) or '').split()
         fstypes   = (d.getVar('IMAGE_FSTYPES', True) or '').split()
 
-        if 'mender-artifact' not in inherited:
-            otapulse_sanity_msg(d, 'mender-artifact',
-                "The 'mender-artifact' class is not inherited — .mender files will not be generated.",
+        if 'otapulse-artifact' not in inherited and 'mender-artifact' not in inherited:
+            otapulse_sanity_msg(d, 'otapulse-artifact',
+                "The 'otapulse-artifact' class is not inherited — .otapulse files will not be generated.",
                 "Add to your image recipe or local.conf:\n"
-                "  inherit mender-artifact\n"
+                "  inherit otapulse-artifact\n"
                 "  # or globally:\n"
-                "  INHERIT += \"mender-artifact\"\n"
+                "  INHERIT += \"otapulse-artifact\"\n"
                 "\n"
                 "Inheriting 'otapulse' already includes this automatically.")
             failed += 1
         elif 'ext4' not in fstypes:
-            otapulse_sanity_msg(d, 'mender-artifact',
-                "'ext4' is not in IMAGE_FSTYPES — mender-artifact requires an ext4 rootfs.",
+            otapulse_sanity_msg(d, 'otapulse-artifact',
+                "'ext4' is not in IMAGE_FSTYPES — otapulse-artifact requires an ext4 rootfs.",
                 "Append ext4 to IMAGE_FSTYPES:\n"
                 "  IMAGE_FSTYPES:append = \" ext4\"\n"
                 "\n"
                 "Inheriting 'otapulse' already does this automatically.")
             failed += 1
         else:
-            bb.note("OTAPulse Sanity [mender-artifact]: OK "
+            bb.note("OTAPulse Sanity [otapulse-artifact]: OK "
                     "(class inherited, ext4 in IMAGE_FSTYPES)")
             passed += 1
 
@@ -386,20 +388,20 @@ python otapulse_sanity_check() {
             failed += 1
 
     # ==================================================================
-    # CHECK 'device-type' — Mender artifact must identify its target hardware
+    # CHECK 'device-type' — the OTA artifact must identify its target hardware
     # ==================================================================
     if 'device-type' in skip_list:
         bb.note("OTAPulse Sanity [device-type]: skipped")
         skipped += 1
     else:
-        device_type = (d.getVar('MENDER_DEVICE_TYPE', True) or '').strip()
+        device_type = (d.getVar('OTAPULSE_DEVICE_TYPE', True) or '').strip()
         machine     = (d.getVar('MACHINE',            True) or '').strip()
 
         if not device_type and not machine:
             otapulse_sanity_msg(d, 'device-type',
-                "Neither MENDER_DEVICE_TYPE nor MACHINE is set.",
+                "Neither OTAPULSE_DEVICE_TYPE (or legacy MENDER_DEVICE_TYPE) nor MACHINE is set.",
                 "Set a device type identifier so artifacts target the correct hardware:\n"
-                "  MENDER_DEVICE_TYPE = \"my-board-v2\"  # preferred — explicit\n"
+                "  OTAPULSE_DEVICE_TYPE = \"my-board-v2\"  # preferred — explicit\n"
                 "  # or rely on MACHINE (usually set automatically by your BSP):\n"
                 "  MACHINE = \"my-board\"")
             failed += 1

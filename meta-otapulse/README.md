@@ -71,8 +71,8 @@ bitbake your-image
 ## What `inherit otapulse` Does Automatically
 
 - Adds `soc-ota-agent` to the image
-- Enables mender artifact generation (`.otapulse` files; the underlying format is unchanged Mender binary tar, `mender-artifact` remains the tool used to read/write/sign it)
-- Adds ext4 to IMAGE_FSTYPES (required for mender)
+- Enables OTA artifact generation via the `otapulse-artifact` class (`.otapulse` files; `do_generate_otapulse_artifact`; the `otapulse-artifact` tool writes them with format id `otapulse` when it supports `--format`; the old `mender-artifact` class name is a one-release shim)
+- Adds ext4 to IMAGE_FSTYPES (required for the artifact)
 - Includes partition tools (gptfdisk)
 - Disables SPDX (externalsrc compatibility)
 

@@ -8,7 +8,7 @@ crash capture, telemetry collection, and OTA update support. \
 Platform-agnostic design works on any SoC with Yocto/OE support."
 LICENSE = "MIT"
 
-inherit core-image buildversion mender-artifact
+inherit core-image buildversion otapulse-artifact
 
 # Set unique image basename to avoid conflicts with other images
 IMAGE_BASENAME = "soc-monitoring-image"

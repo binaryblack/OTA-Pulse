@@ -9,13 +9,14 @@
 #
 # This class automatically:
 #   - Adds soc-ota-agent to the image
-#   - Enables mender artifact generation
-#   - Ensures ext4 rootfs is built (required for mender)
+#   - Enables OTA artifact generation (.otapulse)
+#   - Ensures ext4 rootfs is built (required for the artifact)
 #   - Sets up proper dependencies
 #
 # Configuration (set in local.conf):
 #   OTA_SERVER_URL              - Your OTA server URL (required)
-#   MENDER_DEVICE_TYPE          - Device type identifier (default: ${MACHINE})
+#   OTAPULSE_DEVICE_TYPE        - Device type identifier (default: ${MENDER_DEVICE_TYPE},
+#                                 legacy name, itself defaulting to ${MACHINE})
 #   SOC_OTA_SIGNATURE_VERIFICATION - Enable signature verification (default: 0)
 #   SOC_OTA_SIGNING_KEY         - Private key path for signing artifacts
 #
@@ -53,10 +54,10 @@ OTAPULSE_PROVISIONING_MODE ?= "token"
 # Run configuration sanity checks before do_rootfs
 inherit otapulse-sanity
 
-# Inherit mender-artifact to generate .mender files
-inherit mender-artifact
+# Inherit otapulse-artifact to generate .otapulse files
+inherit otapulse-artifact
 
-# Ensure ext4 is generated (required for mender artifact)
+# Ensure ext4 is generated (required for the OTA artifact)
 IMAGE_FSTYPES:append = " ext4"
 
 # Add OTA agent to the image
