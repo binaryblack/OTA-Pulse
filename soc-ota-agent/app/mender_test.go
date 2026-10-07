@@ -1485,6 +1485,75 @@ func TestMenderHandleBootstrapArtifact(t *testing.T) {
 				"something":     "cool",
 			},
 		},
+		"Valid bootstrap Artifact with otapulse format id (TODO-011)": {
+			initStoreFunc: func(s store.Store) {},
+			writeArtFunc: func(_ *testing.T, path string) {
+				f, err := os.Create(path)
+				require.NoError(t, err)
+				aw := awriter.NewWriter(f, artifact.NewCompressorNone())
+
+				err = aw.WriteArtifact(&awriter.WriteArtifactArgs{
+					Format:  "otapulse",
+					Version: 3,
+					Devices: []string{"foo-bar"},
+					Name:    "bootstrap-stuff",
+					Updates: &awriter.Updates{
+						Updates: []handlers.Composer{handlers.NewBootstrapArtifact()},
+					},
+					Scripts: nil,
+					Provides: &artifact.ArtifactProvides{
+						ArtifactName: "bootstrap-stuff",
+					},
+					Depends: &artifact.ArtifactDepends{
+						CompatibleDevices: []string{"foo-bar"},
+					},
+					TypeInfoV3: &artifact.TypeInfoV3{
+						ArtifactProvides: artifact.TypeInfoProvides{"something": "cool"},
+					},
+				})
+				require.NoError(t, err)
+			},
+			expectedError:        false,
+			expectedArtifactName: "bootstrap-stuff",
+			expectedProvides: map[string]string{
+				"artifact_name": "bootstrap-stuff",
+				"something":     "cool",
+			},
+		},
+		"Invalid bootstrap Artifact with unknown format id": {
+			initStoreFunc: func(s store.Store) {},
+			writeArtFunc: func(_ *testing.T, path string) {
+				f, err := os.Create(path)
+				require.NoError(t, err)
+				aw := awriter.NewWriter(f, artifact.NewCompressorNone())
+
+				err = aw.WriteArtifact(&awriter.WriteArtifactArgs{
+					Format:  "bogus",
+					Version: 3,
+					Devices: []string{"foo-bar"},
+					Name:    "bootstrap-stuff",
+					Updates: &awriter.Updates{
+						Updates: []handlers.Composer{handlers.NewBootstrapArtifact()},
+					},
+					Scripts: nil,
+					Provides: &artifact.ArtifactProvides{
+						ArtifactName: "bootstrap-stuff",
+					},
+					Depends: &artifact.ArtifactDepends{
+						CompatibleDevices: []string{"foo-bar"},
+					},
+					TypeInfoV3: &artifact.TypeInfoV3{
+						ArtifactProvides: artifact.TypeInfoProvides{"something": "cool"},
+					},
+				})
+				require.NoError(t, err)
+			},
+			expectedError:        true,
+			expectedArtifactName: "unknown",
+			expectedProvides: map[string]string{
+				"artifact_name": "unknown",
+			},
+		},
 		"Non-existent bootstrap Artifact": {
 			initStoreFunc:        func(s store.Store) {},
 			writeArtFunc:         func(_ *testing.T, path string) {},

@@ -908,7 +908,9 @@ func validateAndParseBootstrapArtifact(
 	}
 
 	info := ar.GetInfo()
-	if info.Format != "mender" {
+	// "mender" is the stock format identifier; "otapulse" is the OTA-Pulse
+	// identifier (TODO-011). The container layout is identical.
+	if info.Format != "mender" && info.Format != "otapulse" {
 		return "", "", nil, errors.New("wrong Artifact format")
 	}
 	if info.Version < 3 {
