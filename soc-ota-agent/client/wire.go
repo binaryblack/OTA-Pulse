@@ -159,10 +159,18 @@ func wireDo(
 			return nil, err
 		}
 		r, err := api.Do(req)
-		if err != nil {
+		if err != nil && r == nil {
+			// Transport failure: no answer at all, so no verdict either.
 			closeBody(held)
 			return r, err
 		}
+		// err != nil with a response is the SoCMonitoringClient surfacing a
+		// 401/403 as an error. That is still the server ANSWERING this route
+		// set (never "not served"), so it must reach the verdict logic below
+		// like any other answer; dropping it here left the wire choice
+		// unrecorded and re-probed (and WARNed on) the native route every
+		// cycle on a device whose credentials the backend rejects (S103-001,
+		// seen on a QEMU image provisioned without an API key).
 		last := i == len(order)-1
 		notServed := (isNative && nativeNotServed(r)) || (!isNative && legacyNotServed(r))
 		if notServed && !last {
@@ -179,7 +187,7 @@ func wireDo(
 			if held != nil {
 				held.Body.Close()
 			}
-			return r, nil
+			return r, err
 		}
 		// Legacy answer.
 		if legacyNotServed(r) {
@@ -189,11 +197,11 @@ func wireDo(
 				r.Body.Close()
 				return held, nil
 			}
-			return r, nil
+			return r, err
 		}
 		rememberWire(server, wireLegacy)
 		closeBody(held)
-		return r, nil
+		return r, err
 	}
 	return held, nil
 }
