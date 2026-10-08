@@ -301,6 +301,18 @@ do_install() {
     install -m 0755 ${S}/support/otapulse-inventory-rootfs-type ${D}${datadir}/otapulse/inventory/
     install -m 0755 ${S}/support/otapulse-inventory-update-modules ${D}${datadir}/otapulse/inventory/
 
+    # TODO-058: Apache-2.0 attribution. Ship the NOTICE file and the go-licenses
+    # third-party bundle (soc-ota-agent/scripts/generate-third-party-licenses.sh)
+    # on-device under ${datadir}/licenses/soc-ota-agent/ so shipped images carry
+    # the upstream (Northern.tech/Mender) and vendored-module license texts.
+    # NOTICE lives at the ota-pulse repo root, one level above the agent source.
+    install -d ${D}${datadir}/licenses/soc-ota-agent
+    install -m 0644 ${THISDIR}/../../../NOTICE ${D}${datadir}/licenses/soc-ota-agent/NOTICE
+    install -m 0644 ${S}/third_party_licenses.csv ${D}${datadir}/licenses/soc-ota-agent/third_party_licenses.csv
+    cp -R --no-preserve=ownership ${S}/third_party_licenses ${D}${datadir}/licenses/soc-ota-agent/
+    find ${D}${datadir}/licenses/soc-ota-agent -type d -exec chmod 0755 {} +
+    find ${D}${datadir}/licenses/soc-ota-agent -type f -exec chmod 0644 {} +
+
     # Log signature verification status
     if [ "${SIG_VERIFY}" = "1" ]; then
         bbwarn "OTA signature verification is ENABLED"
@@ -323,6 +335,7 @@ FILES:${PN} = " \
     ${localstatedir}/lib/otapulse \
     ${systemd_system_unitdir}/soc-ota-agent.service \
     ${datadir}/otapulse \
+    ${datadir}/licenses/soc-ota-agent \
 "
 
 CONFFILES:${PN} = " \
