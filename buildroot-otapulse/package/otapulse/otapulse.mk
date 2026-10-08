@@ -645,4 +645,22 @@ endef
 OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_FIRSTBOOT
 endif
 
+# ==============================================================================
+# Third-party license bundle + NOTICE (TODO-058, Apache-2.0 attribution)
+# ==============================================================================
+# Mirrors meta-otapulse's soc-ota-agent recipe. NOTICE lives at the ota-pulse
+# repo root, one level above OTAPULSE_SITE (soc-ota-agent/), so it is read from
+# BR2_EXTERNAL rather than $(@D) (the rsynced copy of soc-ota-agent only).
+
+define OTAPULSE_INSTALL_LICENSE_BUNDLE
+	$(INSTALL) -D -m 0644 $(BR2_EXTERNAL_OTAPULSE_PATH)/../NOTICE \
+		$(TARGET_DIR)/usr/share/licenses/otapulse/NOTICE
+	$(INSTALL) -D -m 0644 $(@D)/third_party_licenses.csv \
+		$(TARGET_DIR)/usr/share/licenses/otapulse/third_party_licenses.csv
+	cp -a $(@D)/third_party_licenses $(TARGET_DIR)/usr/share/licenses/otapulse/
+	find $(TARGET_DIR)/usr/share/licenses/otapulse -type d -exec chmod 0755 {} +
+	find $(TARGET_DIR)/usr/share/licenses/otapulse -type f -exec chmod 0644 {} +
+endef
+OTAPULSE_POST_INSTALL_TARGET_HOOKS += OTAPULSE_INSTALL_LICENSE_BUNDLE
+
 $(eval $(generic-package))
