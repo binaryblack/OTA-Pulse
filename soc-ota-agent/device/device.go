@@ -164,11 +164,30 @@ func (d *DeviceManager) ReadArtifactHeaders(from io.ReadCloser) (*installer.Inst
 
 	deviceType, err := d.GetDeviceType()
 	if err != nil {
+		// GC-AG-01 / BUG-504: fail closed, like the standalone install path
+		// (app/standalone.go). Without a readable device_type the
+		// compatibility gate cannot run, so the artifact is refused.
 		log.Errorf(
-			"Unable to verify the existing hardware. Update will continue anyway: %v : %v",
-			d.Config.DeviceTypeFile,
+			"Unable to verify the existing hardware, refusing to install: %v : %v",
+			d.DeviceTypeFile,
 			err,
 		)
+		return nil, errors.Wrapf(err,
+			"unable to read device_type from %s; refusing to install an Artifact "+
+				"whose compatibility with this device cannot be verified",
+			d.DeviceTypeFile)
+	}
+	if deviceType == "" {
+		// A readable device_type file with no device_type entry is the same
+		// failure as an unreadable one: "empty" must not mean "compatible
+		// with everything". Applied here (daemon path) and not in
+		// installer.ReadHeaders, whose empty-device_type pass-through is
+		// pinned by the standalone-install tests (zeroLengthDeviceTypeFile).
+		log.Errorf("Device type is empty in %s, refusing to install", d.DeviceTypeFile)
+		return nil, errors.Errorf(
+			"device_type in %s is empty or missing; refusing to install an Artifact "+
+				"whose compatibility with this device cannot be verified",
+			d.DeviceTypeFile)
 	}
 
 	verifyKeys, err := d.Config.GetVerificationKeys()
