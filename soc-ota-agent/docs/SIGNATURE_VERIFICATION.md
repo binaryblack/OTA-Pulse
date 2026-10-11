@@ -48,6 +48,23 @@ start regardless, and restart-persistence would need a real on-disk store
 and a threat model for who can trigger agent restarts, which wasn't asked
 for here.
 
+## Install policy when no key is configured (GC-AG-07)
+
+`conf.MenderConfig.GetVerificationKeys` is the single decision point. "keys"
+means at least one `ArtifactVerifyKey(s)` entry is configured.
+
+| keys | `RequireArtifactVerification` | `AllowUnsignedArtifacts` | result |
+|------|-------------------------------|--------------------------|--------|
+| yes  | any                           | any                      | verify every artifact with the keys (unreadable key = fatal; Allow never downgrades) |
+| no   | true                          | any                      | refuse (Require wins over Allow) |
+| no   | false                         | false (default)          | refuse (fail closed) |
+| no   | false                         | true                     | install without verification (WARN log) - dev/QEMU only |
+
+The Yocto recipe emits `AllowUnsignedArtifacts: true` only when built with
+`SOC_OTA_SIGNATURE_VERIFICATION=0`; with verification on it emits keys plus
+`RequireArtifactVerification: true` and no Allow flag. Buildroot always ships a
+key and now also sets `RequireArtifactVerification`.
+
 ## Operating it
 
 - Check whether lockdown is active: `installer.SignatureLockdownActive()` /

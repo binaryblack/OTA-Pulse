@@ -18,6 +18,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -309,11 +310,126 @@ func TestDBusUpdateControlMapExpirationTimeSecondsConfig(t *testing.T) {
 	assert.Equal(t, 15, config.GetUpdateControlMapBootExpirationTimeSeconds())
 }
 
-func TestGetVerificationKeys_noKeysConfigured_notRequired_returnsNilNoError(t *testing.T) {
+// GC-AG-07: with no key, Require off and AllowUnsignedArtifacts unset, the
+// agent now REFUSES (it used to return nil, nil and silently install
+// unauthenticated). The explicit opt-in keeps the old nil, nil behaviour.
+func TestGetVerificationKeys_noKeysConfigured_notRequired_notAllowed_refuses(t *testing.T) {
 	c := &MenderConfig{}
+	keys, err := c.GetVerificationKeys()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AllowUnsignedArtifacts")
+	assert.Nil(t, keys)
+}
+
+func TestGetVerificationKeys_noKeysConfigured_notRequired_allowed_returnsNilNoError(t *testing.T) {
+	c := &MenderConfig{}
+	c.AllowUnsignedArtifacts = true
 	keys, err := c.GetVerificationKeys()
 	assert.NoError(t, err)
 	assert.Nil(t, keys)
+}
+
+// GC-AG-07 decision table: every (keys, Require, Allow) combination.
+func TestGetVerificationKeys_decisionTable(t *testing.T) {
+	keyFile, err := ioutil.TempFile("", "verify-key")
+	require.NoError(t, err)
+	defer os.Remove(keyFile.Name())
+	_, err = keyFile.WriteString("-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----\n")
+	require.NoError(t, err)
+	require.NoError(t, keyFile.Close())
+
+	type outcome int
+	const (
+		verify  outcome = iota // keys returned, installs are verified
+		refuse                 // error, nothing installs
+		allowed                // nil, nil: explicit unauthenticated opt-in
+	)
+	cases := []struct {
+		name           string
+		haveKeys       bool
+		require, allow bool
+		want           outcome
+	}{
+		{"keys/req0/allow0", true, false, false, verify},
+		{"keys/req1/allow0", true, true, false, verify},
+		{"keys/req0/allow1", true, false, true, verify}, // Allow never downgrades a configured key
+		{"keys/req1/allow1", true, true, true, verify},
+		{"nokeys/req0/allow0", false, false, false, refuse}, // NEW default
+		{"nokeys/req1/allow0", false, true, false, refuse},
+		{"nokeys/req1/allow1", false, true, true, refuse}, // Require wins over Allow
+		{"nokeys/req0/allow1", false, false, true, allowed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &MenderConfig{}
+			c.RequireArtifactVerification = tc.require
+			c.AllowUnsignedArtifacts = tc.allow
+			if tc.haveKeys {
+				c.ArtifactVerifyKeys = []string{keyFile.Name()}
+			}
+			keys, err := c.GetVerificationKeys()
+			switch tc.want {
+			case verify:
+				require.NoError(t, err)
+				require.Len(t, keys, 1)
+			case refuse:
+				require.Error(t, err)
+				assert.Nil(t, keys)
+			case allowed:
+				require.NoError(t, err)
+				assert.Nil(t, keys)
+			}
+		})
+	}
+}
+
+// A configured-but-unreadable key stays fatal even with AllowUnsignedArtifacts:
+// the flag only covers "no key configured", never "key configured but broken".
+func TestGetVerificationKeys_unreadableKey_isFatalEvenWhenAllowed(t *testing.T) {
+	c := &MenderConfig{}
+	c.AllowUnsignedArtifacts = true
+	c.ArtifactVerifyKeys = []string{"/nonexistent/path/to/key.pem"}
+	keys, err := c.GetVerificationKeys()
+	assert.Error(t, err)
+	assert.Nil(t, keys)
+}
+
+// The flag is read from the JSON config (and a later file can both set and
+// clear it), and the legacy single ArtifactVerifyKey counts as a key.
+func TestLoadConfig_AllowUnsignedArtifactsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		require.NoError(t, ioutil.WriteFile(p, []byte(body), 0600))
+		return p
+	}
+	missing := filepath.Join(dir, "absent.conf")
+
+	cfg, err := LoadConfig(write("a.conf", `{"AllowUnsignedArtifacts": true}`), missing)
+	require.NoError(t, err)
+	assert.True(t, cfg.AllowUnsignedArtifacts)
+	_, err = cfg.GetVerificationKeys()
+	assert.NoError(t, err)
+
+	cfg, err = LoadConfig(write("b.conf", `{"ServerURL": "http://x"}`), missing)
+	require.NoError(t, err)
+	assert.False(t, cfg.AllowUnsignedArtifacts, "default must be false")
+	_, err = cfg.GetVerificationKeys()
+	assert.Error(t, err)
+
+	// Merged files: the main (writable) conf is loaded last and wins, so it
+	// can clear a flag the fallback conf set.
+	cfg, err = LoadConfig(write("c1.conf", `{"AllowUnsignedArtifacts": false}`),
+		write("c2.conf", `{"AllowUnsignedArtifacts": true}`))
+	require.NoError(t, err)
+	assert.False(t, cfg.AllowUnsignedArtifacts)
+
+	keyFile := write("k.pem", "key")
+	cfg, err = LoadConfig(write("d.conf", `{"ArtifactVerifyKey": "`+keyFile+`"}`), missing)
+	require.NoError(t, err)
+	keys, err := cfg.GetVerificationKeys()
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
 }
 
 func TestGetVerificationKeys_noKeysConfigured_required_returnsError(t *testing.T) {

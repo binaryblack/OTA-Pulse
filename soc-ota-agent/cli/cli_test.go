@@ -688,6 +688,10 @@ func TestCommandsWithBootstrapArtifact(t *testing.T) {
 	config := conf.MenderConfig{
 		MenderConfigFromFile: conf.MenderConfigFromFile{
 			Servers: []client.MenderServer{{ServerURL: ts.URL}},
+			// GC-AG-07: the install-command cases below install an
+			// unsigned artifact with no verify key; that now requires
+			// the explicit opt-in.
+			AllowUnsignedArtifacts: true,
 			DBus: conf.DBusConfig{
 				Enabled: true,
 			},

@@ -5171,6 +5171,8 @@ func subProcessSetup(t *testing.T,
 			ModuleTimeoutSeconds:      5,
 			UpdatePollIntervalSeconds: 5,
 			RetryPollIntervalSeconds:  5,
+			// GC-AG-07: unsigned test artifacts, no verify key => explicit opt-in.
+			AllowUnsignedArtifacts: true,
 		},
 		ModulesPath:         path.Join(tmpdir, "modules"),
 		ModulesWorkPath:     path.Join(tmpdir, "work"),

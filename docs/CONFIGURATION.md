@@ -28,6 +28,8 @@ Configuration file: `/etc/otapulse/otapulse.conf`
 |--------|------|---------|-------------|
 | `ArtifactVerifyKey` | string | - | Path to artifact verification key (single) |
 | `ArtifactVerifyKeys` | []string | - | List of verification key paths (for key rotation) |
+| `RequireArtifactVerification` | bool | false | Hard-fail every install if no usable verification key resolves (set by the Yocto/Buildroot recipes whenever verification is on) |
+| `AllowUnsignedArtifacts` | bool | false | Dev/QEMU only: explicit opt-in to install artifacts without authenticating them. Only consulted when no verification key is configured; never weakens verification when a key is configured. With no key and this unset, installs are refused |
 | `DaemonLogLevel` | string | - | Log level (debug, info, warning, error) |
 | `SkipVerify` | bool | false | Skip TLS certificate validation |
 | `RetryPollCount` | int | 0 | Max retry count |

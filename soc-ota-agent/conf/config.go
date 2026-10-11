@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -45,6 +46,14 @@ type MenderConfigFromFile struct {
 	// to load). Prevents a device from silently falling back to unsigned
 	// artifact installation (GAP-OTA-003).
 	RequireArtifactVerification bool `json:",omitempty"`
+	// AllowUnsignedArtifacts is the explicit, dev/QEMU-only opt-in to install
+	// artifacts WITHOUT authenticating them. It only matters when NO
+	// verification key is configured; it never weakens verification when a key
+	// is configured. Default false: with no key configured and this unset, the
+	// agent refuses every install (GC-AG-07 / NEW-AG-010) so a mis-templated
+	// config cannot silently turn artifact authentication off. See the
+	// decision table on GetVerificationKeys.
+	AllowUnsignedArtifacts bool `json:",omitempty"`
 
 	// HTTPS client parameters
 	HttpsClient client.HttpsClient `json:",omitempty"`
@@ -198,9 +207,27 @@ func LoadConfig(mainConfigFile string, fallbackConfigFile string) (*MenderConfig
 		return config, nil
 	}
 
-	log.Debugf("Loaded configuration = %#v", config)
+	log.Debugf("Loaded configuration = %#v", redactedForLog(config))
 
 	return config, nil
+}
+
+// redactedConfigValue replaces non-empty secrets in log output.
+const redactedConfigValue = "[REDACTED]"
+
+// redactedForLog returns a shallow copy of c with the secret fields (device API
+// key, tenant token) masked, for use in log lines only (GC-AG-06): debug dumps
+// end up in the journal and in uploaded deployment logs. The original c is
+// never modified. Empty secrets stay empty so "not configured" remains visible.
+func redactedForLog(c *MenderConfig) MenderConfig {
+	cp := *c
+	if cp.SoCAPIKey != "" {
+		cp.SoCAPIKey = redactedConfigValue
+	}
+	if cp.TenantToken != "" {
+		cp.TenantToken = redactedConfigValue
+	}
+	return cp
 }
 
 // Validate verifies the Servers fields in the configuration
@@ -235,7 +262,7 @@ func (c *MenderConfig) Validate() error {
 			" the former for the signing of auth requests.")
 	}
 
-	log.Debugf("Verified configuration = %#v", c)
+	log.Debugf("Verified configuration = %#v", redactedForLog(c))
 
 	return nil
 }
@@ -320,23 +347,76 @@ func readConfigFile(config interface{}, fileName string) error {
 	return nil
 }
 
+// SaveConfigFile writes config to filename atomically: the JSON is written to
+// a temporary file in the same directory, fsynced, and renamed over the target,
+// so a power cut can never leave a truncated or empty configuration (GC-AG-14).
+// An existing file keeps its permission bits; a new file is created 0600 (see
+// MEN-3762). A symlink at filename is followed so the link itself survives.
 func SaveConfigFile(config *MenderConfigFromFile, filename string) error {
 	configJson, err := json.MarshalIndent(config, "", "    ")
 	if err != nil {
 		return errors.Wrap(err, "Error encoding configuration to JSON")
 	}
+
+	// Open (creating if absent, never truncating) the target first: this keeps
+	// the historical behaviour that an unwritable target or missing parent
+	// directory is reported as an open error, and gives us the mode to carry
+	// over to the replacement.
 	f, err := os.OpenFile(
 		filename,
-		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		os.O_WRONLY|os.O_CREATE,
 		0600,
 	) // for mode see MEN-3762
 	if err != nil {
 		return errors.Wrap(err, "Error opening configuration file")
 	}
-	defer f.Close()
+	fi, statErr := f.Stat()
+	f.Close()
 
-	if _, err = f.Write(configJson); err != nil {
+	target := filename
+	if resolved, rerr := filepath.EvalSymlinks(filename); rerr == nil {
+		target = resolved
+	}
+
+	tmp, err := ioutil.TempFile(filepath.Dir(target), "."+filepath.Base(target)+".tmp-")
+	if err != nil {
+		return errors.Wrap(err, "Error creating temporary configuration file")
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}
+
+	if _, err = tmp.Write(configJson); err != nil {
+		cleanup()
 		return errors.Wrap(err, "Error writing to configuration file")
+	}
+	perm := os.FileMode(0600)
+	if statErr == nil {
+		perm = fi.Mode().Perm()
+	}
+	if err = tmp.Chmod(perm); err != nil {
+		cleanup()
+		return errors.Wrap(err, "Error setting configuration file mode")
+	}
+	if err = tmp.Sync(); err != nil {
+		cleanup()
+		return errors.Wrap(err, "Error syncing configuration file")
+	}
+	if err = tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return errors.Wrap(err, "Error closing configuration file")
+	}
+	if err = os.Rename(tmpName, target); err != nil {
+		os.Remove(tmpName)
+		return errors.Wrap(err, "Error replacing configuration file")
+	}
+	// Persist the directory entry too; best effort (not all filesystems allow
+	// fsync on a directory).
+	if d, derr := os.Open(filepath.Dir(target)); derr == nil {
+		d.Sync()
+		d.Close()
 	}
 	return nil
 }
@@ -388,6 +468,22 @@ type VerificationKey struct {
 // unsigned artifacts (GAP-OTA-003). When RequireArtifactVerification is set,
 // resolving zero keys (none configured, or all configured keys unreadable)
 // is also a hard error.
+//
+// Decision table (GC-AG-07). "keys" = at least one ArtifactVerifyKey(s)
+// entry is configured (ArtifactVerifyKey is folded into the list on load):
+//
+//	keys  RequireArtifactVerification  AllowUnsignedArtifacts  result
+//	yes   any                          any                     VERIFY every artifact with the keys
+//	                                                           (an unreadable key is fatal; Allow
+//	                                                           never downgrades a configured key)
+//	no    true                         any                     REFUSE (Require wins over Allow)
+//	no    false                        false                   REFUSE (new default, fail closed)
+//	no    false                        true                    INSTALL WITHOUT VERIFICATION (WARN);
+//	                                                           dev/QEMU images only
+//
+// A nil, nil return therefore always means "operator explicitly allowed
+// unauthenticated installs"; the installer's no-key path is only reachable
+// through that opt-in.
 func (c *MenderConfig) GetVerificationKeys() ([]*VerificationKey, error) {
 	if len(c.ArtifactVerifyKeys) == 0 {
 		if c.RequireArtifactVerification {
@@ -395,6 +491,17 @@ func (c *MenderConfig) GetVerificationKeys() ([]*VerificationKey, error) {
 				"config: RequireArtifactVerification is set but no " +
 					"ArtifactVerifyKey(s) are configured")
 		}
+		if !c.AllowUnsignedArtifacts {
+			return nil, errors.New(
+				"config: no ArtifactVerifyKey(s) are configured and " +
+					"AllowUnsignedArtifacts is not set; refusing to install an " +
+					"artifact that cannot be authenticated (configure " +
+					"ArtifactVerifyKeys, or set AllowUnsignedArtifacts=true on " +
+					"dev/test devices only)")
+		}
+		log.Warn("config: AllowUnsignedArtifacts is set and no ArtifactVerifyKey(s) " +
+			"are configured: artifacts will be installed WITHOUT authentication " +
+			"(dev/test only)")
 		return nil, nil
 	}
 

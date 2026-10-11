@@ -27,10 +27,16 @@ ROCKCHIP_GPTIMG_LINK_NAME = "${IMAGE_BASENAME}-${MACHINE}"
 REQUIRED_DISTRO_FEATURES = "systemd usrmerge"
 
 # Base image features
+#
+# BUG-507 / GC-IMG-01: this is the customer reference recipe, so it must NOT
+# enable Yocto's development-convenience image feature (empty root password,
+# PermitRootLogin yes, PermitEmptyPasswords yes). A throw-away development
+# image opts in explicitly from conf/local.conf, never from this recipe; see
+# "Hardening before production" in the Yocto integration guide
+# (apps/docs/.../device-integration/linux-yocto.mdx).
 IMAGE_FEATURES += " \
     ssh-server-openssh \
     package-management \
-    debug-tweaks \
     "
 
 # Core system packages
@@ -184,6 +190,6 @@ IMAGE_INSTALL:append = " \
 # reused rather than duplicated. The gateway (socMonitoring/server/gateway)
 # is NOT yet cut over to these accounts (docker-compose.yml still pins
 # ELEVATED_SSH_USER=root/BREAKGLASS_SSH_USER=root) — see BUG-263's tracker
-# entry for the required sequencing (debug-tweaks fleet-wide removal must
-# happen only after this real mechanism is live-verified on every Yocto
-# target).
+# entry for the required sequencing (the fleet-wide removal of the
+# blank-root-password dev feature must happen only after this real mechanism
+# is live-verified on every Yocto target).

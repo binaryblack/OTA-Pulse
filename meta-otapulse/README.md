@@ -66,6 +66,30 @@ bitbake your-image
 # Output: tmp/deploy/images/<MACHINE>/your-image-<MACHINE>.otapulse
 ```
 
+`OTA_SERVER_URL` is baked into `/etc/otapulse/otapulse.conf` of the image and of
+every root filesystem artifact built from it. The layer's built-in default is a
+plain-`http://` LAN bench address. Always set your own `https://` URL.
+
+### Bench image: `custom-base-image`
+
+`custom-base-image` is the image recipe our own bench fleet is built from. It
+lives in the separate `multiboard_yocto` repository
+(`sources/meta-custom/recipes-core/images/custom-base-image.bb`), not in this
+layer. It is a bench image. It is not a customer reference, so do not copy it
+into a product image. It contains settings that only make sense on our bench
+network:
+
+- Static `192.168.0.x` addresses for specific bench boards.
+- A German console keymap.
+- A baked-in public SSH key for the OTA-Pulse gateway (`gateway@ota-pulse`) in
+  `/root/.ssh/authorized_keys`. Every image carries the same key. Whoever holds
+  the matching private key can log in as root on every board running one of
+  these images.
+
+For a product image, inherit `otapulse` in your own image recipe (see above),
+set your own `https://` `OTA_SERVER_URL`, and supply your own root SSH key and
+signing keys.
+
 ---
 
 ## What `inherit otapulse` Does Automatically

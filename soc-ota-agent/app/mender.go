@@ -664,6 +664,16 @@ func transitionState(to State, ctx *StateContext, c Controller) (State, bool) {
 	return to.Handle(ctx, c)
 }
 
+// signatureLockdownInventoryValue is the value of the "signature_lockdown"
+// inventory attribute: "active" while installs are being refused after
+// repeated signature-verification failures, "inactive" otherwise.
+func signatureLockdownInventoryValue() string {
+	if installer.SignatureLockdownActive() {
+		return "active"
+	}
+	return "inactive"
+}
+
 func (m *Mender) InventoryRefresh() error {
 	ic := client.NewInventory()
 	idg := inv.NewInventoryDataRunner(path.Join(conf.GetDataDirPath(), "inventory"))
@@ -703,6 +713,10 @@ func (m *Mender) InventoryRefresh() error {
 		// what the fleet gate script reads.
 		{Name: "mender_client_version", Value: conf.VersionString()},
 		{Name: "otapulse_agent_version", Value: conf.VersionString()},
+		// GC-AG-10: let operators see an artifact-signature lockdown
+		// (installer/signature_lockdown.go) from the console instead of
+		// finding out by every install silently being refused.
+		{Name: "signature_lockdown", Value: signatureLockdownInventoryValue()},
 	}
 
 	if idata == nil {

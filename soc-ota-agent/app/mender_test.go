@@ -639,6 +639,11 @@ func TestMenderInventoryRefresh(t *testing.T) {
 	assert.Contains(t, srv.Inventory.Attrs,
 		client.InventoryAttribute{Name: "otapulse_agent_version", Value: "v1.2.3-4-gabcdef0"})
 
+	// 1c. GC-AG-10: the signature-lockdown state is reported as an
+	// inventory attribute ("inactive" by default).
+	assert.Contains(t, srv.Inventory.Attrs,
+		client.InventoryAttribute{Name: "signature_lockdown", Value: "inactive"})
+
 	// 2. fake inventory script
 	err = ioutil.WriteFile(path.Join(invpath, "mender-inventory-foo"),
 		[]byte(`#!/bin/sh
@@ -789,7 +794,10 @@ func TestMenderStoreUpdate(t *testing.T) {
 	// prepare fake artifactInfo file, with bogus
 	deviceType := path.Join(td, "device_type")
 
-	mender := newTestMender(conf.MenderConfig{},
+	mender := newTestMender(conf.MenderConfig{
+		// GC-AG-07: unsigned test artifact, no verify key => explicit opt-in.
+		MenderConfigFromFile: conf.MenderConfigFromFile{AllowUnsignedArtifacts: true},
+	},
 		testMenderPieces{
 			MenderPieces: MenderPieces{
 				DualRootfsDevice: &FakeDevice{ConsumeUpdate: true},
@@ -836,7 +844,10 @@ func TestMenderStoreUpdate(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, upd)
 
-	mender = newTestMender(conf.MenderConfig{},
+	mender = newTestMender(conf.MenderConfig{
+		// GC-AG-07: unsigned test artifact, no verify key => explicit opt-in.
+		MenderConfigFromFile: conf.MenderConfigFromFile{AllowUnsignedArtifacts: true},
+	},
 		testMenderPieces{
 			MenderPieces: MenderPieces{
 				DualRootfsDevice: &FakeDevice{RetStoreUpdate: errors.New("failed")},

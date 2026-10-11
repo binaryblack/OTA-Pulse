@@ -161,3 +161,72 @@ func TestNewTestRetryAfterErrorUnwrapsToAPIError(t *testing.T) {
 	require.True(t, errors.As(error(retryErr), &apiErr))
 	require.Same(t, retryErr.APIError, apiErr)
 }
+
+// GC-AG-11: honoured Retry-After waits do not consume the retry budget, so
+// they are bounded separately (count and elapsed time) per update. Past the
+// bound the update must fail instead of waiting forever.
+
+func TestFetchStoreRetryStateRetryAfterBoundedByAttempts(t *testing.T) {
+	update := &datastore.UpdateInfo{ID: "foobar"}
+	ctx := StateContext{Store: store.NewMemStore()}
+	stc := &stateTestController{updatePollIntvl: 5 * time.Minute}
+	retryErr := newTestRetryAfterError(t, http.StatusServiceUnavailable, 2*time.Second)
+
+	for i := 1; i <= maxRetryAfterAttempts; i++ {
+		s := NewFetchStoreRetryState(NewUpdateFetchState(update), update, retryErr)
+		ws := &waitStateTest{}
+		s.(*fetchStoreRetryState).WaitState = ws
+		next, cancelled := s.Handle(&ctx, stc)
+		require.False(t, cancelled)
+		require.IsType(t, &updateFetchState{}, next, "attempt %d must still be honoured", i)
+	}
+	assert.Equal(t, 0, ctx.fetchInstallAttempts,
+		"honoured Retry-After waits must still not consume the retry budget")
+
+	// The next one exceeds the bound: fail the update, reset the tracking.
+	s := NewFetchStoreRetryState(NewUpdateFetchState(update), update, retryErr)
+	next, cancelled := s.Handle(&ctx, stc)
+	assert.False(t, cancelled)
+	assert.IsType(t, &updateErrorState{}, next,
+		"must give up and report failure once the Retry-After bound is exceeded")
+	assert.Equal(t, 0, ctx.retryAfterAttempts, "tracking must reset after giving up")
+}
+
+func TestFetchStoreRetryStateRetryAfterBoundedByElapsedTime(t *testing.T) {
+	update := &datastore.UpdateInfo{ID: "foobar"}
+	ctx := StateContext{Store: store.NewMemStore()}
+	stc := &stateTestController{updatePollIntvl: 5 * time.Minute}
+	retryErr := newTestRetryAfterError(t, http.StatusTooManyRequests, 2*time.Second)
+
+	// First hint starts the clock and is honoured.
+	s := NewFetchStoreRetryState(NewUpdateFetchState(update), update, retryErr)
+	s.(*fetchStoreRetryState).WaitState = &waitStateTest{}
+	next, _ := s.Handle(&ctx, stc)
+	require.IsType(t, &updateFetchState{}, next)
+
+	// Pretend the first hint was received more than the bound ago.
+	ctx.retryAfterSince = time.Now().Add(-maxRetryAfterDuration - time.Minute)
+	s = NewFetchStoreRetryState(NewUpdateFetchState(update), update, retryErr)
+	next, cancelled := s.Handle(&ctx, stc)
+	assert.False(t, cancelled)
+	assert.IsType(t, &updateErrorState{}, next)
+}
+
+func TestFetchStoreRetryStateRetryAfterBoundResetsPerUpdate(t *testing.T) {
+	ctx := StateContext{Store: store.NewMemStore()}
+	stc := &stateTestController{updatePollIntvl: 5 * time.Minute}
+	retryErr := newTestRetryAfterError(t, http.StatusServiceUnavailable, 2*time.Second)
+
+	// An exhausted tracker for update "old" must not poison update "new".
+	ctx.retryAfterUpdateID = "old"
+	ctx.retryAfterAttempts = maxRetryAfterAttempts
+	ctx.retryAfterSince = time.Now().Add(-maxRetryAfterDuration - time.Hour)
+
+	update := &datastore.UpdateInfo{ID: "new"}
+	s := NewFetchStoreRetryState(NewUpdateFetchState(update), update, retryErr)
+	s.(*fetchStoreRetryState).WaitState = &waitStateTest{}
+	next, _ := s.Handle(&ctx, stc)
+	assert.IsType(t, &updateFetchState{}, next)
+	assert.Equal(t, 1, ctx.retryAfterAttempts)
+	assert.Equal(t, "new", ctx.retryAfterUpdateID)
+}

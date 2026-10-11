@@ -172,7 +172,7 @@ func (u *UpdateClient) getUpdateInfo(api ApiRequester, process RequestProcessing
 		return nil, err
 	}
 
-	respdata, err := ioutil.ReadAll(r.Body)
+	respdata, err := readServerBody(r.Body)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to read the request body")
 	}
@@ -448,7 +448,7 @@ func (u *UpdateResponse) Validate() (err error) {
 func processUpdateResponse(response *http.Response) (interface{}, error) {
 	log.Debug("Received response:", response.Status)
 
-	respBody, err := ioutil.ReadAll(response.Body)
+	respBody, err := readServerBody(response.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +625,7 @@ func GetUpdateControlMap(
 	defer response.Body.Close()
 	switch response.StatusCode {
 	case http.StatusOK:
-		responseBody, err := ioutil.ReadAll(response.Body)
+		responseBody, err := readServerBody(response.Body)
 		if err != nil {
 			return nil, err
 		}

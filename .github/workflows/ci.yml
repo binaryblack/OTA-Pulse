@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, master, develop]
 
+# GC-CI-11: least-privilege default for GITHUB_TOKEN; this workflow only reads the repo.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-22.04
@@ -24,10 +28,12 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: soc-ota-agent/go.sum
 
+      # xdelta3: installer/delta_rootfs_test.go execs the REAL xdelta3 binary and
+      # t.Skip()s every delta-apply test without it (GC-CI-03).
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config liblzma-dev libssl-dev libglib2.0-dev
+          sudo apt-get install -y pkg-config liblzma-dev libssl-dev libglib2.0-dev xdelta3
 
       - name: go vet
         run: go vet -composites=false -unsafeptr=false ./...
@@ -43,6 +49,37 @@ jobs:
 
       - name: go test
         run: go test -v ./...
+
+      # GC-CI-03: a missing xdelta3 makes the rootfs-image-delta apply tests
+      # skip (they pass vacuously otherwise). Fail loudly if any skip.
+      - name: delta_rootfs tests must run (no skips)
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run 'TestDeltaRootfs_' ./installer/ | tee "$RUNNER_TEMP/delta-tests.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/delta-tests.log"; then
+            echo "::error::delta_rootfs tests were skipped (xdelta3 missing?)"
+            exit 1
+          fi
+          grep -q -- '--- PASS: TestDeltaRootfs_' "$RUNNER_TEMP/delta-tests.log"
+
+      # GC-AG-08: informational data-race detection (does not gate the build).
+      # Plain `go test -race` cannot even start in any package that imports
+      # dbus: upstream's dbus/dbus_libgio.go (NewDBusAPI, run from dbus.init)
+      # fakes C pointers with unsafe arithmetic, which -race's default
+      # checkptr instrumentation aborts on ("fatal error: checkptr: pointer
+      # arithmetic computed bad pointer value"). `-gcflags=all=-d=checkptr=0`
+      # turns only that check off. Packages listed are the ones verified to
+      # run clean this way. Still excluded (they report further races, mostly
+      # in shared test harnesses such as client/test/server*.go, plus
+      # app/auth.go and app/state.go): ./app/ and ./app/proxy/. Add them back
+      # once those are fixed.
+      - name: go test -race (informational)
+        continue-on-error: true
+        run: |
+          go test -race -gcflags=all=-d=checkptr=0 -count=1 \
+            ./app/updatecontrolmap/ ./cli/ ./client/ ./conf/ \
+            ./datastore/ ./dbus/ ./device/ ./installer/ ./inventory/ \
+            ./statescript/ ./store/ ./system/ ./tunnel/ ./utils/
 
   go-compat:
     # Jetson (meta-tegra / poky-kirkstone) builds the agent with Go 1.17.13.
@@ -95,6 +132,98 @@ jobs:
       - name: govulncheck
         run: govulncheck ./...
 
+  vulncheck-shipped-go:
+    # GC-CI-03: report-only. Device images ship soc-ota-agent built with Go
+    # 1.22.12 (Yocto go-binary-native; Jetson uses 1.17.13), so the stdlib
+    # advisories that the Go 1.25 `vulncheck` job above never sees are the ones
+    # that reach the fleet. This job only makes that exposure visible: it can
+    # never fail the workflow. Fixing it needs a toolchain bump + fleet rebuild
+    # (human item H-08), not a CI change.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: soc-ota-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.12'
+          cache-dependency-path: soc-ota-agent/go.sum
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config liblzma-dev libssl-dev libglib2.0-dev
+
+      # govulncheck@latest needs a newer Go than 1.22.12 to BUILD; the default
+      # GOTOOLCHAIN=auto fetches one just for this install, and the install step
+      # leaves `go` itself on 1.22.12.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck (Go 1.22.12, report-only)
+        continue-on-error: true
+        env:
+          # Pin the analysed toolchain: never let go.mod/GOTOOLCHAIN=auto swap
+          # in a newer Go, which would hide the shipped stdlib exposure.
+          GOTOOLCHAIN: local
+        run: |
+          go version
+          rc=0
+          govulncheck ./... > "$RUNNER_TEMP/govulncheck-1.22.12.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/govulncheck-1.22.12.txt"
+          {
+            echo '### govulncheck on Go 1.22.12 (shipped toolchain, report-only)'
+            echo '```'
+            tail -n 25 "$RUNNER_TEMP/govulncheck-1.22.12.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+  python-tests:
+    # GC-CI-03: boot-path structural tests (S55 bootcount-net splice, boot
+    # deadline, firstboot scripts), the modules-artifact-gen tests, and the
+    # u-boot-env host test. None of these ran in CI before.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.10 = the version modules-artifact-gen/tests/requirements.txt was
+          # compiled with, and the last stock Python whose stdlib still ships
+          # distutils (its conftest.py imports distutils.spawn).
+          python-version: '3.10'
+
+      - name: Install pytest
+        run: python -m pip install -r soc-ota-agent/support/modules-artifact-gen/tests/requirements.txt
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      # modules-artifact-gen's conftest aborts without otapulse-artifact or
+      # mender-artifact on PATH; the tests read generated artifacts back with
+      # it. Built from source (same upstream release the repo pins, 3.11.2)
+      # against the runner's OpenSSL 3: the prebuilt downloads.mender.io 3.11.2
+      # binary links libssl.so.1.1, which ubuntu-22.04 does not ship. Mirrors
+      # scripts/install-mender-artifact.sh's preferred Tier 2 in the parent repo.
+      - name: Install mender-artifact
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+          GOBIN="$RUNNER_TEMP/bin" CGO_ENABLED=1 go install github.com/mendersoftware/mender-artifact@3.11.2
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/mender-artifact" --version
+
+      - name: pytest (meta-otapulse + modules-artifact-gen)
+        run: python -m pytest -q meta-otapulse soc-ota-agent/support/modules-artifact-gen/tests
+
+      - name: u-boot-env setup script host test
+        run: sh meta-otapulse/recipes-bsp/u-boot-env-config/tests/test-setup-uboot-env.sh
+
   target-shebang-lint:
     runs-on: ubuntu-22.04
     steps:
@@ -116,3 +245,45 @@ jobs:
             for f in $bad; do echo "  $f"; done
             exit 1
           fi
+
+  shellcheck:
+    # GC-CI-06: socmond (1038 lines of POSIX sh), core-handler.sh, soc-ctl,
+    # the firstboot/bootenv scripts, the Update-Module and state scripts
+    # (ArtifactReboot_Enter_01, ArtifactCommit_Enter_*, ...) and the
+    # Buildroot target scripts shipped to devices had no static analysis at
+    # all. NON-BLOCKING for now (continue-on-error): this is the first run of
+    # the gate and shellcheck's version on the runner differs from the one
+    # measured locally (0.11.0, 0 findings at `-S error` over every script
+    # below). Flip it to blocking by deleting `continue-on-error` once it has
+    # been green on develop. Scripts are analysed as they are; this job must
+    # never be a reason to edit a boot/rollback/state script.
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-22.04 runners ship shellcheck, but install it explicitly so the
+      # job does not depend on the runner image's contents.
+      - name: Install shellcheck
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+          shellcheck --version
+
+      # Every tracked non-Markdown file whose first line is an sh/bash
+      # shebang. This covers the extensionless ones the *.sh glob misses:
+      # socmond, soc-ctl, socmond-watchdog, core-handler.sh, the state scripts
+      # (Artifact*/Download_*/Sync_*) and the init/firstboot scripts.
+      - name: shellcheck -S error (socmond, state scripts, shipped shell scripts)
+        run: |
+          files=()
+          while IFS= read -r f; do
+            case "$f" in *.md) continue ;; esac
+            if head -n 1 -- "$f" | grep -qE '^#!.*[/ ](ba)?sh([[:space:]]|$)'; then
+              files+=("$f")
+            fi
+          done < <(git ls-files)
+          echo "shellcheck: ${#files[@]} shell scripts"
+          # Guard against the enumeration silently matching nothing; socmond
+          # is the file this gate exists for.
+          printf '%s\n' "${files[@]}" | grep -qx 'meta-otapulse/recipes-core/socmond/files/socmond'
+          shellcheck -S error "${files[@]}"

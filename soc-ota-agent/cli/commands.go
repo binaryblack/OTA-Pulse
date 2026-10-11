@@ -433,12 +433,16 @@ func PrintProvides(device *dev.DeviceManager) error {
 }
 
 func runDaemon(d *app.MenderDaemon) error {
+	// Capture the channel once, synchronously: the goroutine below outlives
+	// this call's caller, and re-reading the package-level variable from it
+	// races with anything that re-assigns SignalHandlerChan (GC-AG-08).
+	sigCh := SignalHandlerChan
 	// Handle user forcing update check.
 	go func() {
-		defer signal.Stop(SignalHandlerChan)
+		defer signal.Stop(sigCh)
 
 		for {
-			s := <-SignalHandlerChan // Block until a signal is received.
+			s := <-sigCh // Block until a signal is received.
 			if s == syscall.SIGUSR1 {
 				log.Debug("SIGUSR1 signal received.")
 				d.ForceToState <- app.States.UpdateCheck

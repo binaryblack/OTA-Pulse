@@ -80,6 +80,66 @@ var (
 	ErrClientUnauthorized = errors.New("Client is unauthorized")
 )
 
+const (
+	// GC-AG-04: phase timeouts so that a server (or middlebox) that accepts
+	// the connection and then stalls cannot hold the daemon for the full
+	// defaultClientReadingTimeout. The body phase is deliberately NOT bounded
+	// here (large artifact downloads); only dial, TLS handshake and the wait
+	// for response headers are.
+	defaultDialTimeout         = 30 * time.Second
+	defaultTLSHandshakeTimeout = 10 * time.Second
+
+	// maxServerBodyBytes caps the in-memory read of any server response body
+	// the agent parses (update check, control map, auth reply, error text).
+	// Artifact downloads stream and are not subject to this (GC-AG-05).
+	maxServerBodyBytes = 4 << 20
+
+	// maxRedirects mirrors net/http's default of 10 hops.
+	maxRedirects = 10
+)
+
+// responseHeaderTimeout bounds the wait between a fully written request and
+// the response headers. A variable (not a const) only so tests can shorten it.
+var responseHeaderTimeout = 60 * time.Second
+
+// readServerBody reads a server response body fully, but fails with a clear
+// error once it exceeds maxServerBodyBytes instead of growing without bound.
+func readServerBody(r io.Reader) ([]byte, error) {
+	data, err := ioutil.ReadAll(io.LimitReader(r, maxServerBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxServerBodyBytes {
+		return nil, errors.Errorf(
+			"server response body exceeds the %d byte limit", maxServerBodyBytes)
+	}
+	return data, nil
+}
+
+// checkRedirect is the agent's redirect policy (GC-AG-03). Device credentials
+// travel in custom headers (X-API-Key, X-Device-ID, and the Bearer token) that
+// net/http only strips for Authorization/Cookie on cross-domain redirects, so
+// a redirect to another host would hand them over. Refuse cross-host
+// redirects and https->http downgrades; same-host redirects (trailing slash,
+// http->https upgrade) keep working.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return errors.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	first := via[0].URL
+	if !strings.EqualFold(req.URL.Hostname(), first.Hostname()) {
+		return errors.Errorf(
+			"refusing cross-host redirect from %q to %q",
+			first.Hostname(), req.URL.Hostname())
+	}
+	prev := via[len(via)-1].URL
+	if prev.Scheme == "https" && req.URL.Scheme != "https" {
+		return errors.Errorf(
+			"refusing redirect from https to http (%s)", req.URL.Hostname())
+	}
+	return nil
+}
+
 // Mender API Client wrapper. A standard http.Client is compatible with this
 // interface and can be used without further configuration where ApiRequester is
 // expected. Instead of instantiating the client by yourself, one can also use a
@@ -295,12 +355,19 @@ func NewApiClient(conf Config) (*ApiClient, error) {
 	}
 	// set connection timeout
 	client.Timeout = defaultClientReadingTimeout
+	client.CheckRedirect = checkRedirect
 
 	transport := client.Transport.(*http.Transport)
-	//set keepalive options
+	//set keepalive options and the dial timeout
 	transport.DialContext = (&net.Dialer{
+		Timeout:   defaultDialTimeout,
 		KeepAlive: connectionKeepaliveTime,
 	}).DialContext
+	// GC-AG-04: bound the TLS handshake and the wait for response headers.
+	// (With the cgo OpenSSL stack, DialTLS performs dial+handshake itself, so
+	// only ResponseHeaderTimeout applies there.)
+	transport.TLSHandshakeTimeout = defaultTLSHandshakeTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 
 	return &ApiClient{*client}, nil
 }
@@ -943,7 +1010,7 @@ func unmarshalErrorMessage(r io.Reader) string {
 	e := new(struct {
 		Error string `json:"error"`
 	})
-	resp, err := ioutil.ReadAll(r)
+	resp, err := readServerBody(r)
 	if err != nil {
 		return fmt.Sprintf("Failed to read the response body %s", err)
 	}

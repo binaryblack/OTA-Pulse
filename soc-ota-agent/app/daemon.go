@@ -14,6 +14,7 @@
 package app
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
@@ -35,7 +36,10 @@ type MenderDaemon struct {
 	Sctx                 StateContext
 	Store                store.Store
 	ForceToState         chan State
-	stop                 bool
+	// stop is set from the signal-handler goroutine (StopDaemon) and read by
+	// the daemon loop (shouldStop). Accessed only via sync/atomic; int32 rather
+	// than atomic.Bool because the Jetson image builds with Go 1.17 (GC-AG-08).
+	stop int32
 }
 
 func NewDaemon(
@@ -71,7 +75,7 @@ func NewDaemon(
 }
 
 func (d *MenderDaemon) StopDaemon() {
-	d.stop = true
+	atomic.StoreInt32(&d.stop, 1)
 }
 
 func (d *MenderDaemon) Cleanup() {
@@ -84,7 +88,7 @@ func (d *MenderDaemon) Cleanup() {
 }
 
 func (d *MenderDaemon) shouldStop() bool {
-	return d.stop
+	return atomic.LoadInt32(&d.stop) != 0
 }
 
 func (d *MenderDaemon) Run() error {

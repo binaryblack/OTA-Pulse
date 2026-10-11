@@ -54,7 +54,8 @@ config BR2_PACKAGE_SOCMOND_DASHBOARD
 	select BR2_PACKAGE_PYTHON3
 	help
 	  Install the local web dashboard (soc-dashboard) that provides
-	  real-time device status via a browser interface on port 8080.
+	  real-time device status via a browser interface on port 8080
+	  (bound to 127.0.0.1 only; reach it via an SSH port-forward).
 
 	  Requires Python 3. Adds ~5MB to the image.
 	  The dashboard service is disabled by default and must be
