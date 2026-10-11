@@ -9,7 +9,7 @@ OTAPulse is a complete OTA update solution designed for embedded Linux systems. 
 - **Atomic A/B Updates**: Dual partition scheme ensures safe updates with automatic fallback
 - **Secure Boot Chain**: RSA/ECDSA firmware signature verification
 - **Robust Recovery**: Automatic rollback on failed updates
-- **Bandwidth Efficient**: Resume interrupted downloads, delta updates support
+- **Bandwidth Efficient**: Resume interrupted downloads. Delta updates are implemented in the agent and the server, but they are off by default and are not yet supported on shipped images
 - **Hardware Watchdog**: System health monitoring with automatic recovery
 - **Fleet Telemetry**: Device metrics, logs, and crash reporting
 - **Yocto Integration**: Complete OpenEmbedded/Yocto layer for easy integration
