@@ -5,7 +5,10 @@ After=network.target socmond.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/soc-dashboard --port 8080
+# GC-IMG-09: loopback only. The dashboard has no authentication, and the script
+# itself defaults to 0.0.0.0, so the unit pins the bind explicitly. Reach it from
+# a workstation through an SSH local-port-forward (ssh -L 8080:127.0.0.1:8080).
+ExecStart=/usr/bin/soc-dashboard --bind 127.0.0.1 --port 8080
 Restart=on-failure
 RestartSec=10
 

@@ -724,7 +724,7 @@ Commands:
   logs -f             Follow logs in real-time
 
 Dashboard:
-  dashboard enable    Enable and start local web dashboard (port 8080)
+  dashboard enable    Enable and start local web dashboard (127.0.0.1:8080, loopback-only)
   dashboard disable   Disable and stop local web dashboard
   dashboard status    Show dashboard status
 
@@ -774,7 +774,8 @@ cmd_dashboard_enable() {
         
         if [ -n "${ip}" ]; then
             echo ""
-            echo "  Access dashboard at: http://${ip}:8080"
+            echo "  Dashboard is loopback-only: open http://127.0.0.1:8080 on the device,"
+            echo "  or from a workstation: ssh -L 8080:127.0.0.1:8080 root@${ip}"
         fi
     else
         print_error "Dashboard failed to start"
@@ -804,7 +805,7 @@ cmd_dashboard_status() {
         done
         
         if [ -n "${ip}" ]; then
-            echo "  URL: http://${ip}:8080"
+            echo "  URL: http://127.0.0.1:8080 (loopback-only; use: ssh -L 8080:127.0.0.1:8080 root@${ip})"
         fi
     else
         print_warning "Not running"

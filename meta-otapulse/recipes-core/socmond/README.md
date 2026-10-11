@@ -86,7 +86,14 @@ soc-ctl dashboard status
 soc-ctl dashboard disable
 ```
 
-Access dashboard at: `http://<device-ip>:8080`
+The dashboard is **loopback-only** (`soc-dashboard --bind 127.0.0.1`): it has no
+authentication, so it is not reachable from the LAN. Browse it on the device
+itself at `http://127.0.0.1:8080`, or from a workstation through an SSH
+local-port-forward and then open `http://127.0.0.1:8080` locally:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 root@<device-ip>
+```
 
 ### Manual Service Control
 
