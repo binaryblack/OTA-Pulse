@@ -46,6 +46,14 @@ type MenderConfigFromFile struct {
 	// to load). Prevents a device from silently falling back to unsigned
 	// artifact installation (GAP-OTA-003).
 	RequireArtifactVerification bool `json:",omitempty"`
+	// AllowUnsignedArtifacts is the explicit, dev/QEMU-only opt-in to install
+	// artifacts WITHOUT authenticating them. It only matters when NO
+	// verification key is configured; it never weakens verification when a key
+	// is configured. Default false: with no key configured and this unset, the
+	// agent refuses every install (GC-AG-07 / NEW-AG-010) so a mis-templated
+	// config cannot silently turn artifact authentication off. See the
+	// decision table on GetVerificationKeys.
+	AllowUnsignedArtifacts bool `json:",omitempty"`
 
 	// HTTPS client parameters
 	HttpsClient client.HttpsClient `json:",omitempty"`
@@ -460,6 +468,22 @@ type VerificationKey struct {
 // unsigned artifacts (GAP-OTA-003). When RequireArtifactVerification is set,
 // resolving zero keys (none configured, or all configured keys unreadable)
 // is also a hard error.
+//
+// Decision table (GC-AG-07). "keys" = at least one ArtifactVerifyKey(s)
+// entry is configured (ArtifactVerifyKey is folded into the list on load):
+//
+//	keys  RequireArtifactVerification  AllowUnsignedArtifacts  result
+//	yes   any                          any                     VERIFY every artifact with the keys
+//	                                                           (an unreadable key is fatal; Allow
+//	                                                           never downgrades a configured key)
+//	no    true                         any                     REFUSE (Require wins over Allow)
+//	no    false                        false                   REFUSE (new default, fail closed)
+//	no    false                        true                    INSTALL WITHOUT VERIFICATION (WARN);
+//	                                                           dev/QEMU images only
+//
+// A nil, nil return therefore always means "operator explicitly allowed
+// unauthenticated installs"; the installer's no-key path is only reachable
+// through that opt-in.
 func (c *MenderConfig) GetVerificationKeys() ([]*VerificationKey, error) {
 	if len(c.ArtifactVerifyKeys) == 0 {
 		if c.RequireArtifactVerification {
@@ -467,6 +491,17 @@ func (c *MenderConfig) GetVerificationKeys() ([]*VerificationKey, error) {
 				"config: RequireArtifactVerification is set but no " +
 					"ArtifactVerifyKey(s) are configured")
 		}
+		if !c.AllowUnsignedArtifacts {
+			return nil, errors.New(
+				"config: no ArtifactVerifyKey(s) are configured and " +
+					"AllowUnsignedArtifacts is not set; refusing to install an " +
+					"artifact that cannot be authenticated (configure " +
+					"ArtifactVerifyKeys, or set AllowUnsignedArtifacts=true on " +
+					"dev/test devices only)")
+		}
+		log.Warn("config: AllowUnsignedArtifacts is set and no ArtifactVerifyKey(s) " +
+			"are configured: artifacts will be installed WITHOUT authentication " +
+			"(dev/test only)")
 		return nil, nil
 	}
 

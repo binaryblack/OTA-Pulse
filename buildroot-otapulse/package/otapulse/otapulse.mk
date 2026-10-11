@@ -253,8 +253,13 @@ define OTAPULSE_INSTALL_TARGET_CMDS
 	$(if $(BR2_PACKAGE_OTAPULSE_BOOT_FILE),\
 		echo '  "UseFileBasedBootEnv": true$(comma)' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf)
 	$(if $(call qstrip,$(BR2_PACKAGE_OTAPULSE_VERIFY_KEY_SECONDARY)),\
-		echo '  "ArtifactVerifyKeys": ["/etc/otapulse/keys/artifact-verify-key.pem"$(comma) "/etc/otapulse/keys/artifact-verify-key-secondary.pem"]' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf,\
-		echo '  "ArtifactVerifyKeys": ["/etc/otapulse/keys/artifact-verify-key.pem"]' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf)
+		echo '  "ArtifactVerifyKeys": ["/etc/otapulse/keys/artifact-verify-key.pem"$(comma) "/etc/otapulse/keys/artifact-verify-key-secondary.pem"]$(comma)' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf,\
+		echo '  "ArtifactVerifyKeys": ["/etc/otapulse/keys/artifact-verify-key.pem"]$(comma)' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf)
+	# GC-AG-07: verification is mandatory on Buildroot images (the key is
+	# always installed above), so make it fail-closed in the agent too, like the
+	# Yocto recipe. No AllowUnsignedArtifacts here: Buildroot images never opt
+	# in to unauthenticated installs.
+	echo '  "RequireArtifactVerification": true' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 	echo '}' >> $(TARGET_DIR)/etc/otapulse/otapulse.conf
 
 	# Install device type file (in both locations the agent checks)

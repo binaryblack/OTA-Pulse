@@ -794,7 +794,10 @@ func TestMenderStoreUpdate(t *testing.T) {
 	// prepare fake artifactInfo file, with bogus
 	deviceType := path.Join(td, "device_type")
 
-	mender := newTestMender(conf.MenderConfig{},
+	mender := newTestMender(conf.MenderConfig{
+		// GC-AG-07: unsigned test artifact, no verify key => explicit opt-in.
+		MenderConfigFromFile: conf.MenderConfigFromFile{AllowUnsignedArtifacts: true},
+	},
 		testMenderPieces{
 			MenderPieces: MenderPieces{
 				DualRootfsDevice: &FakeDevice{ConsumeUpdate: true},
@@ -841,7 +844,10 @@ func TestMenderStoreUpdate(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, upd)
 
-	mender = newTestMender(conf.MenderConfig{},
+	mender = newTestMender(conf.MenderConfig{
+		// GC-AG-07: unsigned test artifact, no verify key => explicit opt-in.
+		MenderConfigFromFile: conf.MenderConfigFromFile{AllowUnsignedArtifacts: true},
+	},
 		testMenderPieces{
 			MenderPieces: MenderPieces{
 				DualRootfsDevice: &FakeDevice{RetStoreUpdate: errors.New("failed")},

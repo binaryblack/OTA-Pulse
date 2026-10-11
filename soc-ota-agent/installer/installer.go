@@ -107,7 +107,14 @@ func Install(art io.ReadCloser, dt string, keys []*conf.VerificationKey, scrDir 
 // enforces nothing about that fallback. Callers must obtain keys via
 // conf.MenderConfig.GetVerificationKeys, which fails closed (returns an
 // error instead of an empty key list) before this fallback can ever be
-// reached when RequireArtifactVerification is set (GAP-OTA-003).
+// reached unless the operator explicitly set AllowUnsignedArtifacts=true
+// (GAP-OTA-003, GC-AG-07). GetVerificationKeys' decision table is the single
+// source of truth: empty keys here means "unauthenticated install was
+// explicitly allowed" (no key configured, Require off, Allow on) and nothing
+// else; any other empty-key combination never reaches this function from a
+// production caller. ReadHeaders itself deliberately still accepts nil keys
+// so the standalone-install and golden-vector tests can exercise the
+// no-key path directly.
 func ReadHeaders(art io.ReadCloser, dt string, keys []*conf.VerificationKey, scrDir string,
 	inst *AllModules) (*Installer, []PayloadUpdatePerformer, error) {
 

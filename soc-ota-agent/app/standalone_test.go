@@ -74,6 +74,8 @@ func standaloneInstallSetup(t *testing.T, tmpdir string,
 				},
 			},
 			ModuleTimeoutSeconds: 5,
+			// GC-AG-07: unsigned test artifacts, no verify key => explicit opt-in.
+			AllowUnsignedArtifacts: true,
 		},
 		ModulesPath:         path.Join(tmpdir, "modules"),
 		ModulesWorkPath:     path.Join(tmpdir, "work"),
@@ -226,6 +228,10 @@ func Test_doManualUpdate_existingFile_updateSuccess(t *testing.T) {
 	imageFileName := f.Name()
 
 	config := conf.MenderConfig{
+		MenderConfigFromFile: conf.MenderConfigFromFile{
+			// GC-AG-07: unsigned test artifact, no verify key => explicit opt-in.
+			AllowUnsignedArtifacts: true,
+		},
 		ArtifactScriptsPath: tmpdir,
 	}
 	err = DoStandaloneInstall(getTestDeviceManager(
@@ -233,6 +239,39 @@ func Test_doManualUpdate_existingFile_updateSuccess(t *testing.T) {
 		imageFileName, client.Config{},
 		dev.NewStateScriptExecutor(&config), false)
 	assert.NoError(t, err)
+}
+
+// GC-AG-07: a valid, installable artifact with no verify key and no explicit
+// AllowUnsignedArtifacts opt-in must be refused, with the actionable error.
+func Test_doManualUpdate_noKeyNoOptIn_refused(t *testing.T) {
+	deviceType := zeroLengthDeviceTypeFile(t)
+	defer os.Remove(deviceType)
+
+	artifact, err := MakeRootfsImageArtifact(2, false)
+	require.NoError(t, err)
+
+	tmpdir, err := ioutil.TempDir("", "mendertest")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpdir)
+
+	f, err := ioutil.TempFile("", "update")
+	require.NoError(t, err)
+	defer os.Remove(f.Name())
+	_, err = io.Copy(f, artifact)
+	require.NoError(t, err)
+	f.Close()
+
+	dbdir, err := ioutil.TempDir("", "menderDbdir")
+	require.NoError(t, err)
+	defer os.RemoveAll(dbdir)
+
+	config := conf.MenderConfig{ArtifactScriptsPath: tmpdir}
+	err = DoStandaloneInstall(getTestDeviceManager(
+		FakeDevice{ConsumeUpdate: true}, &config, deviceType, dbdir),
+		f.Name(), client.Config{},
+		dev.NewStateScriptExecutor(&config), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AllowUnsignedArtifacts")
 }
 
 func Test_doManualUpdate_existingFile_updateSuccess_rebootExitCode(t *testing.T) {
@@ -267,6 +306,10 @@ func Test_doManualUpdate_existingFile_updateSuccess_rebootExitCode(t *testing.T)
 	imageFileName := f.Name()
 
 	config := conf.MenderConfig{
+		MenderConfigFromFile: conf.MenderConfigFromFile{
+			// GC-AG-07: unsigned test artifact, no verify key => explicit opt-in.
+			AllowUnsignedArtifacts: true,
+		},
 		ArtifactScriptsPath: tmpdir,
 	}
 	if err = DoStandaloneInstall(getTestDeviceManager(
@@ -320,6 +363,10 @@ func TestDoManualUpdateArtifactV3Dependencies(t *testing.T) {
 	fakeDev := FakeDevice{ConsumeUpdate: true}
 	imageFileName := f.Name()
 	config := conf.MenderConfig{
+		MenderConfigFromFile: conf.MenderConfigFromFile{
+			// GC-AG-07: unsigned test artifact, no verify key => explicit opt-in.
+			AllowUnsignedArtifacts: true,
+		},
 		ArtifactScriptsPath: tmpdir,
 	}
 

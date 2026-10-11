@@ -209,8 +209,16 @@ do_install() {
         done
         VERIFY_KEYS_LINE=",\n\n    \"ArtifactVerifyKeys\": [${KEYS_JSON}],\n    \"RequireArtifactVerification\": true"
     else
-        # Signature verification disabled - no ArtifactVerifyKeys/RequireArtifactVerification lines
-        VERIFY_KEYS_LINE=""
+        # Signature verification disabled (SOC_OTA_SIGNATURE_VERIFICATION=0): no
+        # ArtifactVerifyKeys/RequireArtifactVerification lines. Since GC-AG-07 the
+        # agent REFUSES installs when no verify key is configured unless the
+        # operator opts in explicitly, so this explicitly-unsigned dev/QEMU build
+        # must say so: AllowUnsignedArtifacts=true. (otapulse-sanity.bbclass
+        # already blocks this combination for 'inherit otapulse' images unless
+        # OTAPULSE_ALLOW_UNSIGNED=1.) The verification-enabled branch above does
+        # NOT emit this flag, so production output is unchanged.
+        VERIFY_KEYS_LINE=",\n\n    \"AllowUnsignedArtifacts\": true"
+        bbwarn "soc-ota-agent: SOC_OTA_SIGNATURE_VERIFICATION=0 - otapulse.conf gets AllowUnsignedArtifacts=true; artifacts install WITHOUT authentication (dev/QEMU only)"
     fi
 
     # TLS server-certificate verification (GAP-OTA-001): independent of artifact
