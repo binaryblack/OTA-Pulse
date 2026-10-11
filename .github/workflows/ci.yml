@@ -241,3 +241,45 @@ jobs:
             for f in $bad; do echo "  $f"; done
             exit 1
           fi
+
+  shellcheck:
+    # GC-CI-06: socmond (1038 lines of POSIX sh), core-handler.sh, soc-ctl,
+    # the firstboot/bootenv scripts, the Update-Module and state scripts
+    # (ArtifactReboot_Enter_01, ArtifactCommit_Enter_*, ...) and the
+    # Buildroot target scripts shipped to devices had no static analysis at
+    # all. NON-BLOCKING for now (continue-on-error): this is the first run of
+    # the gate and shellcheck's version on the runner differs from the one
+    # measured locally (0.11.0, 0 findings at `-S error` over every script
+    # below). Flip it to blocking by deleting `continue-on-error` once it has
+    # been green on develop. Scripts are analysed as they are; this job must
+    # never be a reason to edit a boot/rollback/state script.
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-22.04 runners ship shellcheck, but install it explicitly so the
+      # job does not depend on the runner image's contents.
+      - name: Install shellcheck
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+          shellcheck --version
+
+      # Every tracked non-Markdown file whose first line is an sh/bash
+      # shebang. This covers the extensionless ones the *.sh glob misses:
+      # socmond, soc-ctl, socmond-watchdog, core-handler.sh, the state scripts
+      # (Artifact*/Download_*/Sync_*) and the init/firstboot scripts.
+      - name: shellcheck -S error (socmond, state scripts, shipped shell scripts)
+        run: |
+          files=()
+          while IFS= read -r f; do
+            case "$f" in *.md) continue ;; esac
+            if head -n 1 -- "$f" | grep -qE '^#!.*[/ ](ba)?sh([[:space:]]|$)'; then
+              files+=("$f")
+            fi
+          done < <(git ls-files)
+          echo "shellcheck: ${#files[@]} shell scripts"
+          # Guard against the enumeration silently matching nothing; socmond
+          # is the file this gate exists for.
+          printf '%s\n' "${files[@]}" | grep -qx 'meta-otapulse/recipes-core/socmond/files/socmond'
+          shellcheck -S error "${files[@]}"
