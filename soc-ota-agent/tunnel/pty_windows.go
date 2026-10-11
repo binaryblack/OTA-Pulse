@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build windows
-// +build windows
+//go:build windows && ptyshell
+// +build windows,ptyshell
 
 // Package tunnel – Windows stub for PTY session management.
 // PTY sessions are only supported on embedded Linux (the target device

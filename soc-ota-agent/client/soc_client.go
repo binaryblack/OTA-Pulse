@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -169,9 +170,17 @@ func (c *SoCMonitoringClient) doRequest(req *http.Request) (*http.Response, erro
 		return nil, err
 	}
 
-	// Log response details for debugging
+	// Log response details for debugging. Header VALUES are never logged
+	// (GC-AG-06: they can carry cookies/tokens); names only, at debug level.
 	log.Infof("SoCMonitoringClient: Response status: %d, ContentLength: %d", resp.StatusCode, resp.ContentLength)
-	log.Infof("SoCMonitoringClient: Response headers: %v", resp.Header)
+	if log.IsLevelEnabled(log.DebugLevel) {
+		names := make([]string, 0, len(resp.Header))
+		for name := range resp.Header {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		log.Debugf("SoCMonitoringClient: Response header names: %v", names)
+	}
 
 	return resp, nil
 }

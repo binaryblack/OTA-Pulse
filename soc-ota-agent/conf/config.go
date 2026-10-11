@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -198,9 +199,27 @@ func LoadConfig(mainConfigFile string, fallbackConfigFile string) (*MenderConfig
 		return config, nil
 	}
 
-	log.Debugf("Loaded configuration = %#v", config)
+	log.Debugf("Loaded configuration = %#v", redactedForLog(config))
 
 	return config, nil
+}
+
+// redactedConfigValue replaces non-empty secrets in log output.
+const redactedConfigValue = "[REDACTED]"
+
+// redactedForLog returns a shallow copy of c with the secret fields (device API
+// key, tenant token) masked, for use in log lines only (GC-AG-06): debug dumps
+// end up in the journal and in uploaded deployment logs. The original c is
+// never modified. Empty secrets stay empty so "not configured" remains visible.
+func redactedForLog(c *MenderConfig) MenderConfig {
+	cp := *c
+	if cp.SoCAPIKey != "" {
+		cp.SoCAPIKey = redactedConfigValue
+	}
+	if cp.TenantToken != "" {
+		cp.TenantToken = redactedConfigValue
+	}
+	return cp
 }
 
 // Validate verifies the Servers fields in the configuration
@@ -235,7 +254,7 @@ func (c *MenderConfig) Validate() error {
 			" the former for the signing of auth requests.")
 	}
 
-	log.Debugf("Verified configuration = %#v", c)
+	log.Debugf("Verified configuration = %#v", redactedForLog(c))
 
 	return nil
 }
@@ -320,23 +339,76 @@ func readConfigFile(config interface{}, fileName string) error {
 	return nil
 }
 
+// SaveConfigFile writes config to filename atomically: the JSON is written to
+// a temporary file in the same directory, fsynced, and renamed over the target,
+// so a power cut can never leave a truncated or empty configuration (GC-AG-14).
+// An existing file keeps its permission bits; a new file is created 0600 (see
+// MEN-3762). A symlink at filename is followed so the link itself survives.
 func SaveConfigFile(config *MenderConfigFromFile, filename string) error {
 	configJson, err := json.MarshalIndent(config, "", "    ")
 	if err != nil {
 		return errors.Wrap(err, "Error encoding configuration to JSON")
 	}
+
+	// Open (creating if absent, never truncating) the target first: this keeps
+	// the historical behaviour that an unwritable target or missing parent
+	// directory is reported as an open error, and gives us the mode to carry
+	// over to the replacement.
 	f, err := os.OpenFile(
 		filename,
-		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		os.O_WRONLY|os.O_CREATE,
 		0600,
 	) // for mode see MEN-3762
 	if err != nil {
 		return errors.Wrap(err, "Error opening configuration file")
 	}
-	defer f.Close()
+	fi, statErr := f.Stat()
+	f.Close()
 
-	if _, err = f.Write(configJson); err != nil {
+	target := filename
+	if resolved, rerr := filepath.EvalSymlinks(filename); rerr == nil {
+		target = resolved
+	}
+
+	tmp, err := ioutil.TempFile(filepath.Dir(target), "."+filepath.Base(target)+".tmp-")
+	if err != nil {
+		return errors.Wrap(err, "Error creating temporary configuration file")
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}
+
+	if _, err = tmp.Write(configJson); err != nil {
+		cleanup()
 		return errors.Wrap(err, "Error writing to configuration file")
+	}
+	perm := os.FileMode(0600)
+	if statErr == nil {
+		perm = fi.Mode().Perm()
+	}
+	if err = tmp.Chmod(perm); err != nil {
+		cleanup()
+		return errors.Wrap(err, "Error setting configuration file mode")
+	}
+	if err = tmp.Sync(); err != nil {
+		cleanup()
+		return errors.Wrap(err, "Error syncing configuration file")
+	}
+	if err = tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return errors.Wrap(err, "Error closing configuration file")
+	}
+	if err = os.Rename(tmpName, target); err != nil {
+		os.Remove(tmpName)
+		return errors.Wrap(err, "Error replacing configuration file")
+	}
+	// Persist the directory entry too; best effort (not all filesystems allow
+	// fsync on a directory).
+	if d, derr := os.Open(filepath.Dir(target)); derr == nil {
+		d.Sync()
+		d.Close()
 	}
 	return nil
 }

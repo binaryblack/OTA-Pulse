@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !windows
-// +build !windows
+//go:build !windows && ptyshell
+// +build !windows,ptyshell
 
 // Package tunnel provides PTY session management for remote-shell access
 // on embedded Linux devices.  This file (pty.go) implements the device-side

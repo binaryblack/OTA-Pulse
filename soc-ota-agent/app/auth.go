@@ -676,12 +676,16 @@ func (m *menderAuthManagerService) MakeAuthRequest() (*client.AuthRequest, error
 
 	tentok := strings.TrimSpace(string(m.tenantToken))
 
-	log.Debugf("Tenant token: %s", tentok)
-
 	// fill tenant token
 	authd.TenantToken = string(tentok)
 
-	log.Debugf("Authorization data: %v", authd)
+	// Never log the tenant token (GC-AG-06): debug logs are uploaded to the
+	// server. Log a copy with the token masked instead.
+	logd := authd
+	if logd.TenantToken != "" {
+		logd.TenantToken = "[REDACTED]"
+	}
+	log.Debugf("Authorization data: %v", logd)
 
 	reqdata, err := authd.ToBytes()
 	if err != nil {

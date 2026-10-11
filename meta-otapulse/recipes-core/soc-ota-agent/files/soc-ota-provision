@@ -126,7 +126,11 @@ echo "  Device ID: $DEVICE_ID"
 echo "  Hardware: $HARDWARE_VERSION"
 
 # Call provisioning endpoint
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+# --connect-timeout/--max-time bound a stalled server (GC-AG-14); --fail makes an
+# HTTP >=400 a curl failure. The "|| true" keeps set -e from aborting here: the
+# status code printed by -w (000 on a transport failure) is checked below.
+RESPONSE=$(curl -s --fail --connect-timeout 10 --max-time 30 \
+    -w "\n%{http_code}" -X POST \
     "${SERVER_URL}/api/v1/provision" \
     -H "X-Provisioning-Token: $PROV_TOKEN" \
     -H "Content-Type: application/json" \
@@ -134,7 +138,7 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
         \"device_id\": \"$DEVICE_ID\",
         \"hardware_version\": \"$HARDWARE_VERSION\",
         \"firmware_version\": \"$FIRMWARE_VERSION\"
-    }")
+    }" || true)
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
 BODY=$(echo "$RESPONSE" | head -n -1)
@@ -164,12 +168,18 @@ mkdir -p "$CONFIG_DIR"
 
 # Write credentials to writable config location
 # This file will be loaded as fallback config by the agent
-cat > "$CONFIG_FILE" << EOF
+# umask 077 in a subshell so the file is created 0600 from the start (no window
+# at the default umask before the chmod); the rest of the script keeps the
+# caller's umask.
+(
+    umask 077
+    cat > "$CONFIG_FILE" << EOF
 {
     "SoCAPIKey": "$API_KEY",
     "SoCDeviceID": "$DEVICE_UUID"
 }
 EOF
+)
 chmod 0600 "$CONFIG_FILE"
 
 echo "Credentials saved to: $CONFIG_FILE"
