@@ -18,7 +18,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"time"
@@ -111,7 +110,7 @@ func (u *AuthClient) Request(
 		return nil, NewAPIError(AuthErrorUnauthorized, rsp)
 	case http.StatusOK:
 		log.Debugf("Receive response data")
-		data, err := ioutil.ReadAll(rsp.Body)
+		data, err := readServerBody(rsp.Body)
 		if err != nil {
 			return nil, NewAPIError(
 				errors.Wrapf(err, "failed to receive authorization response data"),
