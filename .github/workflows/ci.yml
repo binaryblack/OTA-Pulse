@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, master, develop]
 
+# GC-CI-11: least-privilege default for GITHUB_TOKEN; this workflow only reads the repo.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-22.04

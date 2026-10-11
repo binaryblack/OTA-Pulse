@@ -1,0 +1,53 @@
+# GC-CI-11 (TODO-153 / TASK-S108-062): there was no Dependabot config for this repo at all.
+# Weekly, at most 5 open PRs per entry, minor+patch folded into one grouped PR per entry.
+# Every PR runs .github/workflows/ci.yml (go vet/gofmt/test, go-compat, govulncheck, pytest).
+version: 2
+updates:
+  # soc-ota-agent Go module. CI also builds with the oldest supported Go (`go-compat`,
+  # 1.17.13), so semver-major bumps are left to a deliberate manual upgrade.
+  - package-ecosystem: gomod
+    directory: /soc-ota-agent
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+
+  # pytest requirements for the modules-artifact-gen tests.
+  - package-ecosystem: pip
+    directory: /soc-ota-agent/support/modules-artifact-gen/tests
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    groups:
+      python-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
