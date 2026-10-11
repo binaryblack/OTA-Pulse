@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
@@ -120,7 +121,10 @@ type MenderAuthManager struct {
 }
 
 type menderAuthManagerService struct {
-	hasStarted bool
+	// hasStarted is read and written from multiple goroutines (Start/Stop/
+	// EnableDBus); accessed only via sync/atomic. int32 rather than
+	// atomic.Bool because the Jetson image builds with Go 1.17 (GC-AG-08).
+	hasStarted int32
 	inChan     chan AuthManagerRequest
 
 	broadcastChansMutex sync.Mutex
@@ -224,7 +228,7 @@ func NewAuthManager(conf AuthManagerConfig) *MenderAuthManager {
 }
 
 func (m *MenderAuthManager) EnableDBus(api dbus.DBusAPI) {
-	if m.hasStarted {
+	if atomic.LoadInt32(&m.hasStarted) != 0 {
 		panic("Calling WithDBus() after the service has started is a programming mistake.")
 	}
 	m.dbus = api
@@ -323,11 +327,9 @@ func (m *menderAuthManagerService) registerDBusCallbacks() (unregisterFunc func(
 
 // This is idempotent, the service will only start once.
 func (m *MenderAuthManager) Start() {
-	if m.menderAuthManagerService.hasStarted {
+	if !atomic.CompareAndSwapInt32(&m.menderAuthManagerService.hasStarted, 0, 1) {
 		return
 	}
-
-	m.menderAuthManagerService.hasStarted = true
 
 	initDone := make(chan struct{}, 1)
 	go m.menderAuthManagerService.run(initDone)
@@ -452,13 +454,13 @@ func (m *menderAuthManagerService) longRunningWorkerLoop() {
 // routine as run(). This is idempotent, it is safe to call on a stopped
 // service.
 func (m *MenderAuthManager) Stop() {
-	if !m.menderAuthManagerService.hasStarted {
+	if atomic.LoadInt32(&m.menderAuthManagerService.hasStarted) == 0 {
 		return
 	}
 
 	m.menderAuthManagerService.quitReq <- true
 	<-m.menderAuthManagerService.quitResp
-	m.menderAuthManagerService.hasStarted = false
+	atomic.StoreInt32(&m.menderAuthManagerService.hasStarted, 0)
 
 	m.localProxy.Stop()
 

@@ -44,6 +44,25 @@ jobs:
       - name: go test
         run: go test -v ./...
 
+      # GC-AG-08: informational data-race detection (does not gate the build).
+      # Plain `go test -race` cannot even start in any package that imports
+      # dbus: upstream's dbus/dbus_libgio.go (NewDBusAPI, run from dbus.init)
+      # fakes C pointers with unsafe arithmetic, which -race's default
+      # checkptr instrumentation aborts on ("fatal error: checkptr: pointer
+      # arithmetic computed bad pointer value"). `-gcflags=all=-d=checkptr=0`
+      # turns only that check off. Packages listed are the ones verified to
+      # run clean this way. Still excluded (they report further races, mostly
+      # in shared test harnesses such as client/test/server*.go, plus
+      # app/auth.go and app/state.go): ./app/ and ./app/proxy/. Add them back
+      # once those are fixed.
+      - name: go test -race (informational)
+        continue-on-error: true
+        run: |
+          go test -race -gcflags=all=-d=checkptr=0 -count=1 \
+            ./app/updatecontrolmap/ ./cli/ ./client/ ./conf/ \
+            ./datastore/ ./dbus/ ./device/ ./installer/ ./inventory/ \
+            ./statescript/ ./store/ ./system/ ./tunnel/ ./utils/
+
   go-compat:
     # Jetson (meta-tegra / poky-kirkstone) builds the agent with Go 1.17.13.
     # go.mod says `go 1.21` but Go 1.17 does not enforce it, so a newer stdlib

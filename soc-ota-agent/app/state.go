@@ -91,6 +91,14 @@ type StateContext struct {
 	inventoryUpdateAttempts    int
 	nextAttemptAt              time.Time
 	pauseReported              map[string]bool
+
+	// Retry-After tracking (GC-AG-11): honoured server Retry-After waits do
+	// not consume fetchInstallAttempts (BUG-442), so they are bounded
+	// separately by count and by elapsed time for the update identified by
+	// retryAfterUpdateID.
+	retryAfterAttempts int
+	retryAfterSince    time.Time
+	retryAfterUpdateID string
 }
 
 type StateRunner interface {
@@ -875,6 +883,7 @@ func (u *updateStoreState) Handle(ctx *StateContext, c Controller) (State, bool)
 
 	// restart counter so that we are able to retry next time
 	ctx.fetchInstallAttempts = 0
+	ctx.resetRetryAfterTracking()
 
 	// check if update is not aborted
 	// this step is needed as installing might take a while and we might end up with
@@ -1151,6 +1160,25 @@ func NewFetchStoreRetryState(from State, update *datastore.UpdateInfo,
 	}
 }
 
+const (
+	// maxRetryAfterAttempts and maxRetryAfterDuration bound how long the
+	// agent keeps honouring a server's Retry-After hint for one update
+	// (GC-AG-11). Honoured waits are deliberately not counted against the
+	// ordinary retry budget (BUG-442), so without this a server that always
+	// answers 503/429 + Retry-After would leave the deployment "downloading"
+	// forever. Generous on purpose: the intended BUG-442 case (a busy
+	// download-concurrency cap) clears in minutes.
+	maxRetryAfterAttempts = 500
+	maxRetryAfterDuration = 24 * time.Hour
+)
+
+// resetRetryAfterTracking clears the Retry-After bookkeeping.
+func (ctx *StateContext) resetRetryAfterTracking() {
+	ctx.retryAfterAttempts = 0
+	ctx.retryAfterSince = time.Time{}
+	ctx.retryAfterUpdateID = ""
+}
+
 func (fir *fetchStoreRetryState) Cancel() bool {
 	return fir.WaitState.Cancel()
 }
@@ -1167,6 +1195,31 @@ func (fir *fetchStoreRetryState) Handle(ctx *StateContext, c Controller) (State,
 	// retry past.
 	var retryAfterErr *client.RetryAfterError
 	if errors.As(fir.err, &retryAfterErr) && retryAfterErr.After > 0 {
+		// GC-AG-11: bound the number and total span of honoured waits per
+		// update; past the bound, fail the update instead of waiting forever.
+		now := time.Now()
+		if ctx.retryAfterUpdateID != fir.update.ID || ctx.retryAfterSince.IsZero() {
+			ctx.retryAfterUpdateID = fir.update.ID
+			ctx.retryAfterAttempts = 0
+			ctx.retryAfterSince = now
+		}
+		ctx.retryAfterAttempts++
+		if ctx.retryAfterAttempts > maxRetryAfterAttempts ||
+			now.Sub(ctx.retryAfterSince) > maxRetryAfterDuration {
+			attempts, since := ctx.retryAfterAttempts, ctx.retryAfterSince
+			ctx.resetRetryAfterTracking()
+			log.Errorf(
+				"Giving up fetching update %q: server kept answering Retry-After "+
+					"(%d attempts over %s; limits %d attempts / %s)",
+				fir.update.ID, attempts-1, now.Sub(since).Round(time.Second),
+				maxRetryAfterAttempts, maxRetryAfterDuration,
+			)
+			return NewUpdateErrorState(
+				NewTransientError(errors.Wrapf(fir.err,
+					"server Retry-After bound exceeded (%d attempts / %s)",
+					maxRetryAfterAttempts, maxRetryAfterDuration)),
+				&fir.update), false
+		}
 		wait := retryAfterErr.After
 		if maxWait := c.GetUpdatePollInterval(); wait > maxWait {
 			wait = maxWait

@@ -639,6 +639,11 @@ func TestMenderInventoryRefresh(t *testing.T) {
 	assert.Contains(t, srv.Inventory.Attrs,
 		client.InventoryAttribute{Name: "otapulse_agent_version", Value: "v1.2.3-4-gabcdef0"})
 
+	// 1c. GC-AG-10: the signature-lockdown state is reported as an
+	// inventory attribute ("inactive" by default).
+	assert.Contains(t, srv.Inventory.Attrs,
+		client.InventoryAttribute{Name: "signature_lockdown", Value: "inactive"})
+
 	// 2. fake inventory script
 	err = ioutil.WriteFile(path.Join(invpath, "mender-inventory-foo"),
 		[]byte(`#!/bin/sh

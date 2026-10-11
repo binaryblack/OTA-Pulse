@@ -19,6 +19,7 @@
 package installer
 
 import (
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,20 @@ const (
 	// DefaultFailureWindow is the time window failures are counted within;
 	// a failure older than this resets the counter instead of accumulating.
 	DefaultFailureWindow = 24 * time.Hour
+
+	// DefaultLockdownCooldown is how long an activated lockdown lasts before
+	// it expires on its own (GC-AG-10). Expiry only re-opens the install gate:
+	// every artifact is still fully signature-verified, and the first
+	// verification failure after expiry re-activates lockdown immediately
+	// (see expireIfDueLocked).
+	DefaultLockdownCooldown = 1 * time.Hour
+
+	// LockdownCooldownEnv overrides DefaultLockdownCooldown. The value is a
+	// Go duration (for example "30m" or "6h"); "0" disables auto-expiry
+	// (lockdown then lasts until the agent restarts, the pre-GC-AG-10
+	// behaviour). An unparsable or negative value is ignored with a warning
+	// and the default applies.
+	LockdownCooldownEnv = "OTAPULSE_SIGNATURE_LOCKDOWN_COOLDOWN"
 
 	// errNoSignatureFile is the vendored areader's error text when a
 	// signed-mode reader (areader.NewReaderSigned) finds no signature
@@ -72,18 +87,88 @@ func isSignatureFailure(err error) bool {
 // implemented here (deliberately out of scope for this pass; the fail-closed
 // GetVerificationKeys check in conf/config.go still applies on every start
 // regardless of lockdown state).
+//
+// GC-AG-10: an active lockdown expires after cooldown (zero disables expiry).
+// Expiry never relaxes signature verification — lockdown is an availability
+// brake layered on top of it, not part of it — and it is "half-open": the
+// counter is left one failure short of the threshold, so a single further
+// verification failure locks down again for another full cooldown.
 type signatureLockdown struct {
 	mu             sync.Mutex
 	maxFailures    int
 	window         time.Duration
+	cooldown       time.Duration
 	failureCount   int
 	firstFailureAt time.Time
 	active         bool
+	activatedAt    time.Time
+	// now is the clock; nil means time.Now. Tests inject a fake.
+	now func() time.Time
 }
 
 var defaultLockdown = &signatureLockdown{
 	maxFailures: DefaultMaxVerificationFailures,
 	window:      DefaultFailureWindow,
+	cooldown:    lockdownCooldownFromEnv(),
+}
+
+// lockdownCooldownFromEnv resolves the cool-down from LockdownCooldownEnv.
+func lockdownCooldownFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(LockdownCooldownEnv))
+	if raw == "" {
+		return DefaultLockdownCooldown
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		log.Warnf("installer: ignoring invalid %s=%q (want a non-negative Go duration); using default %s",
+			LockdownCooldownEnv, raw, DefaultLockdownCooldown)
+		return DefaultLockdownCooldown
+	}
+	return d
+}
+
+// SetSignatureLockdownCooldown sets how long an activated lockdown lasts
+// before expiring on its own. Zero disables auto-expiry. It does not alter
+// the state of a lockdown that is already active beyond the new deadline
+// being applied on the next check.
+func SetSignatureLockdownCooldown(d time.Duration) {
+	defaultLockdown.mu.Lock()
+	defer defaultLockdown.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	defaultLockdown.cooldown = d
+}
+
+func (l *signatureLockdown) clock() time.Time {
+	if l.now != nil {
+		return l.now()
+	}
+	return time.Now()
+}
+
+// expireIfDueLocked ends an active lockdown whose cool-down has elapsed.
+// Caller must hold l.mu.
+func (l *signatureLockdown) expireIfDueLocked() {
+	if !l.active || l.cooldown <= 0 {
+		return
+	}
+	now := l.clock()
+	if now.Sub(l.activatedAt) < l.cooldown {
+		return
+	}
+	l.active = false
+	// Half-open: stay one failure short of the threshold and restart the
+	// tracking window, so one more bad signature re-locks immediately.
+	l.failureCount = l.maxFailures - 1
+	if l.failureCount < 0 {
+		l.failureCount = 0
+	}
+	l.firstFailureAt = now
+	log.Warnf(
+		"installer: signature verification lockdown expired after %s cool-down — installs allowed again; "+
+			"the next verification failure will re-activate it",
+		l.cooldown)
 }
 
 // checkNotLockedDown returns an error if lockdown is currently active.
@@ -91,7 +176,13 @@ var defaultLockdown = &signatureLockdown{
 func (l *signatureLockdown) checkNotLockedDown() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.expireIfDueLocked()
 	if l.active {
+		if l.cooldown > 0 {
+			return errors.Errorf(
+				"installer: signature verification lockdown active after %d consecutive failures — refusing further installs; it expires automatically after %s (at %s), or on agent restart",
+				l.failureCount, l.cooldown, l.activatedAt.Add(l.cooldown).Format(time.RFC3339))
+		}
 		return errors.Errorf(
 			"installer: signature verification lockdown active after %d consecutive failures — refusing further installs until the agent is restarted or ResetSignatureLockdown is called (not currently exposed via CLI/D-Bus)",
 			l.failureCount)
@@ -116,7 +207,7 @@ func (l *signatureLockdown) recordFailure() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	now := time.Now()
+	now := l.clock()
 	if l.failureCount == 0 || now.Sub(l.firstFailureAt) > l.window {
 		l.firstFailureAt = now
 		l.failureCount = 0
@@ -126,9 +217,10 @@ func (l *signatureLockdown) recordFailure() {
 
 	if l.failureCount >= l.maxFailures {
 		l.active = true
+		l.activatedAt = now
 		log.Errorf(
-			"installer: signature verification lockdown ACTIVATED after %d consecutive failures — further installs refused until manual reset",
-			l.failureCount)
+			"installer: signature verification lockdown ACTIVATED after %d consecutive failures — further installs refused (auto-expiry cool-down: %s, 0 = until restart)",
+			l.failureCount, l.cooldown)
 	}
 }
 
@@ -140,6 +232,7 @@ func ResetSignatureLockdown() {
 	defer defaultLockdown.mu.Unlock()
 	defaultLockdown.failureCount = 0
 	defaultLockdown.active = false
+	defaultLockdown.activatedAt = time.Time{}
 	log.Info("installer: signature verification lockdown reset")
 }
 
@@ -148,6 +241,7 @@ func ResetSignatureLockdown() {
 func SignatureLockdownActive() bool {
 	defaultLockdown.mu.Lock()
 	defer defaultLockdown.mu.Unlock()
+	defaultLockdown.expireIfDueLocked()
 	return defaultLockdown.active
 }
 
