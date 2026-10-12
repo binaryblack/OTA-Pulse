@@ -34,6 +34,33 @@
 # No-ops cleanly if switch-boot-slot.sh is absent (boards that don't ship
 # u-boot-env-config) or if there is no rollback target recorded.
 
+# ── OTAPULSE-BOOT-MODE-GATE BEGIN (TASK-S109-010) ───────────────────────────
+# Bootloader compat mode: when /etc/otapulse/boot_mode says "bootloader", the
+# board's own bootloader integration (U-Boot / GRUB environment) owns slot
+# switching, boot counting and rollback. Everything below rewrites native boot
+# media (boot.scr, extlinux, tryboot, FAT markers) and would corrupt that flow,
+# so in that mode this script does nothing.
+#
+# This script travels INSIDE artifacts and runs on the device, so the decision
+# is made here at runtime, from the DEVICE's own marker file ONLY — never from
+# what the boot partition holds (a bootloader-mode board may legitimately carry
+# a boot.scr or extlinux/ on its FAT). An absent file is the native mode, and so
+# is any value other than exactly "bootloader" (first line, surrounding blanks
+# and a trailing CR trimmed): both fall through to the unchanged logic below.
+# This block sits before every side effect (no mount, no sourcing, no writes).
+# Output goes to stderr (the only stream the agent captures, BUG-252) and syslog.
+_otp_bm=""
+if [ -f /etc/otapulse/boot_mode ]; then
+    _otp_bm=$(tr -d '\r' 2>/dev/null < /etc/otapulse/boot_mode | sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}')
+fi
+if [ "$_otp_bm" = "bootloader" ]; then
+    echo "ArtifactRollbackReboot_Enter: boot_mode=bootloader: slot switching is owned by the bootloader, state script skipped (no-op)" >&2
+    logger -t otapulse-rollback-reboot "boot_mode=bootloader: slot switching is owned by the bootloader, state script skipped (no-op)" 2>/dev/null || true
+    exit 0
+fi
+unset _otp_bm
+# ── OTAPULSE-BOOT-MODE-GATE END ─────────────────────────────────────────────
+
 log() {
     echo "ArtifactRollbackReboot_Enter: $*"
     logger -t otapulse-rollback-reboot "$*" 2>/dev/null || true

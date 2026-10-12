@@ -17,6 +17,33 @@
 # Same find_fat_boot / mount / cleanup pattern as ArtifactReboot_Enter_01 (sh,
 # not bash — runs under busybox/dash on-device).
 
+# ── OTAPULSE-BOOT-MODE-GATE BEGIN (TASK-S109-010) ───────────────────────────
+# Bootloader compat mode: when /etc/otapulse/boot_mode says "bootloader", the
+# board's own bootloader integration (U-Boot / GRUB environment) owns slot
+# switching, boot counting and rollback. Everything below rewrites native boot
+# media (boot.scr, extlinux, tryboot, FAT markers) and would corrupt that flow,
+# so in that mode this script does nothing.
+#
+# This script travels INSIDE artifacts and runs on the device, so the decision
+# is made here at runtime, from the DEVICE's own marker file ONLY — never from
+# what the boot partition holds (a bootloader-mode board may legitimately carry
+# a boot.scr or extlinux/ on its FAT). An absent file is the native mode, and so
+# is any value other than exactly "bootloader" (first line, surrounding blanks
+# and a trailing CR trimmed): both fall through to the unchanged logic below.
+# This block sits before every side effect (no mount, no sourcing, no writes).
+# Output goes to stderr (the only stream the agent captures, BUG-252) and syslog.
+_otp_bm=""
+if [ -f /etc/otapulse/boot_mode ]; then
+    _otp_bm=$(tr -d '\r' 2>/dev/null < /etc/otapulse/boot_mode | sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}')
+fi
+if [ "$_otp_bm" = "bootloader" ]; then
+    echo "ArtifactCommit_Enter: boot_mode=bootloader: slot switching is owned by the bootloader, state script skipped (no-op)" >&2
+    logger -t otapulse-commit-enter "boot_mode=bootloader: slot switching is owned by the bootloader, state script skipped (no-op)" 2>/dev/null || true
+    exit 0
+fi
+unset _otp_bm
+# ── OTAPULSE-BOOT-MODE-GATE END ─────────────────────────────────────────────
+
 BOOT_PART_FILE="/data/ota/mender_boot_part"
 
 # ── Every board: bounded wait for clock sync before commit ─────────────────
