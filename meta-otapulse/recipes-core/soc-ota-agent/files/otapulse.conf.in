@@ -1,10 +1,10 @@
 {
     "ServerURL": "@SERVER_URL@",
 
-    "RootfsPartA": "/dev/disk/by-partlabel/rootfs_a",
-    "RootfsPartB": "/dev/disk/by-partlabel/rootfs_b",
+    "RootfsPartA": "@ROOTFS_PART_A@",
+    "RootfsPartB": "@ROOTFS_PART_B@",
 
-    "UseFileBasedBootEnv": true,
+    @BOOT_ENV_MODE_BLOCK@"UseFileBasedBootEnv": @USE_FILE_BOOT_ENV@,
 
     "UpdatePollIntervalSeconds": 60,
     "InventoryPollIntervalSeconds": 300,

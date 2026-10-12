@@ -94,6 +94,83 @@ OTA_SERVER_URL ?= "http://192.168.0.123:8000"
 # with the OTA server. Leave empty if using runtime provisioning.
 OTAPULSE_TENANT_TOKEN ?= ""
 
+# ── Bootloader compat mode (TODO-157 / sprint S109) ──────────────────────────
+# Two flavours of image share this recipe:
+#   * native (default): the agent owns the boot-slot flag (file-based boot
+#     environment, by-partlabel rootfs devices, switch-boot-slot.sh).
+#   * bootloader: the bootloader's own environment (U-Boot env or GRUB grubenv)
+#     owns the boot-slot flag and its fallback (bootlimit/altbootcmd).
+# The flavour is selected by the OVERRIDE "otapulse-bootloader" (defined by
+# otapulse-full.bbclass, TASK-S109-008; for tests use
+# OVERRIDES:append = ":otapulse-bootloader" in local.conf).
+#
+# NATIVE OUTPUT IS BYTE-IDENTICAL to the pre-S109 recipe: every variable below
+# resolves, in native mode, to exactly the literal text the template used to
+# hardcode, no BootEnvMode key is written, no boot_mode file is installed and
+# no systemd drop-in is installed. Consumers (state scripts, TASK-S109-010)
+# treat an ABSENT /etc/otapulse/boot_mode as "native". The file exists only on
+# bootloader images, where it holds the single word "bootloader".
+OTAPULSE_BOOT_MODE = "native"
+OTAPULSE_BOOT_MODE:otapulse-bootloader = "bootloader"
+
+# Bootloader kind for bootloader mode: "uboot" or "grub". Set by the customer's
+# choice (TASK-S109-008). Unused (and may stay empty) in native mode; REQUIRED
+# and validated at parse time in bootloader mode.
+OTAPULSE_BOOTLOADER ?= ""
+
+# Root filesystem devices written to RootfsPartA/B. Native: by-partlabel (GPT
+# labels created by otapulse-partition-setup). Bootloader mode: the root
+# filesystem partition variables of the board integration layer.
+OTAPULSE_ROOTFS_PART_A = "/dev/disk/by-partlabel/rootfs_a"
+OTAPULSE_ROOTFS_PART_B = "/dev/disk/by-partlabel/rootfs_b"
+OTAPULSE_ROOTFS_PART_A:otapulse-bootloader = "${MENDER_ROOTFS_PART_A}"
+OTAPULSE_ROOTFS_PART_B:otapulse-bootloader = "${MENDER_ROOTFS_PART_B}"
+
+# device_type written to /etc/otapulse/device_type and /var/lib/otapulse/
+# device_type. It is the string artifacts are checked against, so bootloader
+# images must carry the board integration's device type. Native: ${MACHINE}.
+OTAPULSE_DEVICE_TYPE = "${MACHINE}"
+OTAPULSE_DEVICE_TYPE:otapulse-bootloader = "${MENDER_DEVICE_TYPE}"
+
+# Bootloader-environment tools the agent needs at runtime (fw_printenv /
+# fw_setenv for U-Boot, grub-editenv + the grubenv layout for GRUB).
+RDEPENDS:${PN}:append:otapulse-bootloader = " ${@'libubootenv-bin' if d.getVar('OTAPULSE_BOOTLOADER') == 'uboot' else ('grub-editenv grub-mender-grubenv' if d.getVar('OTAPULSE_BOOTLOADER') == 'grub' else '')}"
+
+# The native boot-switching helpers (switch-boot-slot.sh, partition tools) are
+# useless in bootloader mode (the bootloader owns the slot flag; the agent never
+# runs switch-boot-slot.sh there) and u-boot-env-config would drag a second,
+# conflicting U-Boot environment definition into the image.
+RRECOMMENDS:${PN}:remove:otapulse-bootloader = "u-boot-env-config gptfdisk"
+
+# Unit ordering drop-in: installed in bootloader mode only (see do_install).
+SRC_URI:append:otapulse-bootloader = " file://10-bootloader-mode.conf"
+FILES:${PN}:append:otapulse-bootloader = " ${systemd_system_unitdir}/soc-ota-agent.service.d"
+
+python () {
+    # Fail early and clearly (parse time) instead of shipping an image whose
+    # agent cannot find its bootloader environment.
+    if d.getVar('OTAPULSE_BOOT_MODE') != 'bootloader':
+        return
+    bl = d.getVar('OTAPULSE_BOOTLOADER') or ''
+    if bl not in ('uboot', 'grub'):
+        bb.fatal("soc-ota-agent: bootloader mode (override otapulse-bootloader) requires "
+                 "OTAPULSE_BOOTLOADER to be 'uboot' or 'grub' (got '%s')" % bl)
+    for var, what in (('MENDER_ROOTFS_PART_A', 'root filesystem partition A'),
+                      ('MENDER_ROOTFS_PART_B', 'root filesystem partition B'),
+                      ('MENDER_DEVICE_TYPE', 'device type')):
+        if not (d.getVar(var) or '').strip():
+            bb.fatal("soc-ota-agent: bootloader mode requires the %s to be defined by the "
+                     "board integration layer (%s is empty or unset); is the vendored "
+                     "board-integration layer (meta-otapulse-bsp/core) in bblayers.conf?"
+                     % (what, var))
+    # These values are substituted into otapulse.conf with sed ("s|...|...|g").
+    for var in ('MENDER_ROOTFS_PART_A', 'MENDER_ROOTFS_PART_B', 'MENDER_DEVICE_TYPE'):
+        val = d.getVar(var) or ''
+        if any(c in val for c in '|&\\'):
+            bb.fatal("soc-ota-agent: %s must not contain '|', '&' or a backslash (got '%s')"
+                     % (var, val))
+}
+
 S = "${EXTERNALSRC}"
 
 # Prevent base_do_configure from running 'make clean' when the configure task
@@ -236,29 +313,68 @@ do_install() {
     # Tenant token for device authentication
     TENANT_TOKEN="${OTAPULSE_TENANT_TOKEN}"
 
+    # Boot-environment mode (TODO-157/S109). Native: the template's historical
+    # literals (no BootEnvMode key at all, file-based boot env, by-partlabel
+    # devices) so the rendered file is byte-identical to the pre-S109 one.
+    # Bootloader: BootEnvMode=bootloader, bootloader-owned boot env, and the
+    # board integration's root filesystem devices. The block's trailing
+    # "\n    " keeps the following key on its own indented line.
+    if [ "${OTAPULSE_BOOT_MODE}" = "bootloader" ]; then
+        BOOT_ENV_MODE_BLOCK='"BootEnvMode": "bootloader",\n    '
+        USE_FILE_BOOT_ENV="false"
+    else
+        BOOT_ENV_MODE_BLOCK=""
+        USE_FILE_BOOT_ENV="true"
+    fi
+    ROOTFS_PART_A="${OTAPULSE_ROOTFS_PART_A}"
+    ROOTFS_PART_B="${OTAPULSE_ROOTFS_PART_B}"
+
     # Process the template and install as otapulse.conf
     sed -e "s|@SERVER_URL@|${SERVER_URL}|g" \
         -e "s|@SKIP_TLS_VERIFY@|${SKIP_VERIFY}|g" \
         -e "s|@TENANT_TOKEN@|${TENANT_TOKEN}|g" \
         -e "s|@ARTIFACT_VERIFICATION_BLOCK@|${VERIFY_KEYS_LINE}|g" \
+        -e "s|@BOOT_ENV_MODE_BLOCK@|${BOOT_ENV_MODE_BLOCK}|g" \
+        -e "s|@USE_FILE_BOOT_ENV@|${USE_FILE_BOOT_ENV}|g" \
+        -e "s|@ROOTFS_PART_A@|${ROOTFS_PART_A}|g" \
+        -e "s|@ROOTFS_PART_B@|${ROOTFS_PART_B}|g" \
         ${FILESDIR}/otapulse.conf.in > ${D}${sysconfdir}/otapulse/otapulse.conf
 
     chmod 0600 ${D}${sysconfdir}/otapulse/otapulse.conf
 
     # Generate device_type file dynamically from MACHINE variable
     # This ensures the device_type matches the mender artifact device type
-    echo "device_type=${MACHINE}" > ${D}${sysconfdir}/otapulse/device_type
+    # (OTAPULSE_DEVICE_TYPE is ${MACHINE} natively; the board integration's
+    # device type in bootloader mode.) otapulse-partition-setup seeds
+    # /data/otapulse/device_type from this file.
+    echo "device_type=${OTAPULSE_DEVICE_TYPE}" > ${D}${sysconfdir}/otapulse/device_type
     chmod 0444 ${D}${sysconfdir}/otapulse/device_type
+
+    # Bootloader mode only: mark the image so consumers (state scripts, boot
+    # health) can tell the two flavours apart. Deliberately NOT written in
+    # native mode - an absent file means native.
+    if [ "${OTAPULSE_BOOT_MODE}" = "bootloader" ]; then
+        echo "bootloader" > ${D}${sysconfdir}/otapulse/boot_mode
+        chmod 0444 ${D}${sysconfdir}/otapulse/boot_mode
+    fi
 
     # Install systemd service
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${FILESDIR}/soc-ota-agent.service ${D}${systemd_system_unitdir}/
 
+    # Bootloader mode only: order the agent after the /data mount (the
+    # bootloader env config lives there) and drop the native-only
+    # otapulse-partition-setup dependency. The base unit stays untouched.
+    if [ "${OTAPULSE_BOOT_MODE}" = "bootloader" ]; then
+        install -d ${D}${systemd_system_unitdir}/soc-ota-agent.service.d
+        install -m 0644 ${FILESDIR}/10-bootloader-mode.conf ${D}${systemd_system_unitdir}/soc-ota-agent.service.d/10-bootloader-mode.conf
+    fi
+
     # Create data directory (new OTAPulse path)
     install -d ${D}${localstatedir}/lib/otapulse
 
     # Generate device_type in data directory as well (agent looks for it here)
-    echo "device_type=${MACHINE}" > ${D}${localstatedir}/lib/otapulse/device_type
+    echo "device_type=${OTAPULSE_DEVICE_TYPE}" > ${D}${localstatedir}/lib/otapulse/device_type
     chmod 0444 ${D}${localstatedir}/lib/otapulse/device_type
 
     # Create scripts directory
@@ -378,7 +494,7 @@ do_create_runtime_spdx[noexec] = "1"
 # Track config variables in do_install hash so sstate is invalidated when they change.
 # Without this, BitBake cannot detect shell variable changes in do_install and will
 # reuse a stale cached package even when OTA_SERVER_URL or credentials change.
-do_install[vardeps] += "OTA_SERVER_URL OTAPULSE_TENANT_TOKEN SOC_OTA_SIGNATURE_VERIFICATION SOC_OTA_VERIFY_KEY_FILES SOC_OTA_SIGNING_KEYS_DIR SOC_OTA_TLS_SKIP_VERIFY"
+do_install[vardeps] += "OTA_SERVER_URL OTAPULSE_TENANT_TOKEN SOC_OTA_SIGNATURE_VERIFICATION SOC_OTA_VERIFY_KEY_FILES SOC_OTA_SIGNING_KEYS_DIR SOC_OTA_TLS_SKIP_VERIFY OTAPULSE_BOOT_MODE OTAPULSE_BOOTLOADER OTAPULSE_ROOTFS_PART_A OTAPULSE_ROOTFS_PART_B OTAPULSE_DEVICE_TYPE"
 
 # Ensure SPDX tasks don't fail even when SPDX generation is enabled globally
 # This is needed for compatibility with builds that have INHERIT += "create-spdx"
