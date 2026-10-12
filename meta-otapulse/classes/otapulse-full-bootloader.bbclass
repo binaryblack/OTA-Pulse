@@ -27,6 +27,13 @@
 #     binding adjustment). CONFIG_PANIC_TIMEOUT in a kernel config is deliberately
 #     NOT relied on: vendor kernels do not carry our kernel fragments.
 #
+#  7. provisioning token (TASK-S109-013, Opus decision): the customer's existing
+#     OTAPULSE_PROVISIONING_TOKEN is written into the IMAGE (never into a package) as
+#     /etc/otapulse/provision.env (mode 0600, that one variable only), which the
+#     unchanged otapulse-auto-provision.service already reads. OTAPULSE_PROVISIONING_MODE =
+#     "manual" ships no token at all; the otapulse-firstboot package then adds a drop-in
+#     that reads /data/otapulse/provision.env instead.
+#
 # How the native-only pieces are kept out of a bootloader image (TASK-S109-009), ONE
 # mechanism per item:
 #   * BBMASK (this class, section 4), the recipe is not parsed at all: the native U-Boot
@@ -50,6 +57,8 @@ DISTROOVERRIDES:append = ":otapulse-bootloader"
 # ---- 2a. customer variables ------------------------------------------------
 OTAPULSE_PANIC_TIMEOUT_S ?= "10"
 OTAPULSE_GENERATE_ARTIFACT ?= "1"
+OTAPULSE_PROVISIONING_MODE ?= "baked"
+OTAPULSE_PROVISIONING_TOKEN ?= ""
 
 # Feature switches derived from OTAPULSE_BOOTLOADER / OTAPULSE_IMAGE_TYPE. The
 # handler below validates both before anything here is expanded.
@@ -286,3 +295,30 @@ otapulse_full_check_uboot_defines() {
     fi
     bbnote "otapulse-full: bootloader setup commands carry: $(grep -E '^#define MENDER_UBOOT_POST_SETUP_COMMANDS' "$hdr")"
 }
+
+# ---- 7. provisioning token: image-level file, never a package -------------------
+# The token is a credential. A package that carried it would put it in the package feed
+# and in the shared package/sstate caches, so it is written here, into the root file
+# system of THIS image only, at the end of the image build. Mode 0600, root, and the file
+# holds that one variable (otapulse-auto-provision.service reads it as an EnvironmentFile).
+#   OTAPULSE_PROVISIONING_MODE = "baked" (default) and a token set: file written.
+#   OTAPULSE_PROVISIONING_MODE = "manual": no file; the operator places
+#       /data/otapulse/provision.env (see the otapulse-firstboot drop-in). A stale file is removed.
+ROOTFS_POSTPROCESS_COMMAND += "otapulse_bl_provision_env;"
+otapulse_bl_provision_env() {
+    f="${IMAGE_ROOTFS}${sysconfdir}/otapulse/provision.env"
+    if [ "${OTAPULSE_PROVISIONING_MODE}" != "baked" ]; then
+        rm -f "$f"
+        return 0
+    fi
+    token='${OTAPULSE_PROVISIONING_TOKEN}'
+    [ -n "$token" ] || return 0
+    case "$token" in
+        *[!A-Za-z0-9_.-]*) bbfatal "OTAPULSE_PROVISIONING_TOKEN contains characters that are not valid in a token (allowed: letters, digits, underscore, dot, dash)" ;;
+    esac
+    install -d -m 0755 ${IMAGE_ROOTFS}${sysconfdir}/otapulse
+    ( umask 077; printf 'OTAPULSE_PROVISIONING_TOKEN=%s\n' "$token" > "$f" )
+    chmod 0600 "$f"
+    chown 0:0 "$f"
+}
+otapulse_bl_provision_env[vardeps] += "OTAPULSE_PROVISIONING_TOKEN OTAPULSE_PROVISIONING_MODE"

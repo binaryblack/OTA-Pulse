@@ -149,7 +149,15 @@ OTAPULSE_BL_NATIVE_ONLY_UNITS = "otapulse-partition-setup.service otapulse-boot-
 SRC_URI:append:otapulse-bootloader = " \
     file://otapulse-data-seed \
     file://otapulse-data-seed.service \
+    file://10-otapulse-provision-data.conf \
 "
+
+# Where the provisioning token comes from (customer variable, see
+# otapulse-full.bbclass): "baked" (default) writes /etc/otapulse/provision.env into
+# the image (done by the image class, never by a package - a package would put the
+# secret into the package feed and the shared package cache); "manual" ships no
+# token and this package adds a drop-in that reads /data/otapulse/provision.env.
+OTAPULSE_PROVISIONING_MODE ?= "baked"
 
 # Partitioning tools only otapulse-partition-setup needs. (e2fsprogs stays: it
 # provides the fsck systemd runs on /data and the root filesystem.)
@@ -180,6 +188,7 @@ FILES:${PN}:remove:otapulse-bootloader = " \
 FILES:${PN}:append:otapulse-bootloader = " \
     ${bindir}/otapulse-data-seed \
     ${systemd_system_unitdir}/otapulse-data-seed.service \
+    ${systemd_system_unitdir}/otapulse-auto-provision.service.d \
 "
 
 do_install:append:otapulse-bootloader() {
@@ -194,4 +203,11 @@ do_install:append:otapulse-bootloader() {
 
     install -m 0755 ${WORKDIR}/otapulse-data-seed ${D}${bindir}/otapulse-data-seed
     install -m 0644 ${WORKDIR}/otapulse-data-seed.service ${D}${systemd_system_unitdir}/otapulse-data-seed.service
+
+    # OTAPULSE_PROVISIONING_MODE = "manual": the token is read from /data (see the drop-in).
+    if [ "${OTAPULSE_PROVISIONING_MODE}" = "manual" ]; then
+        install -d ${D}${systemd_system_unitdir}/otapulse-auto-provision.service.d
+        install -m 0644 ${WORKDIR}/10-otapulse-provision-data.conf \
+            ${D}${systemd_system_unitdir}/otapulse-auto-provision.service.d/10-otapulse-provision-data.conf
+    fi
 }

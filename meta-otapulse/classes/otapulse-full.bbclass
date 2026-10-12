@@ -39,6 +39,14 @@
 #   OTAPULSE_GENERATE_ARTIFACT      "1" (default): every image build also writes the
 #                                   .otapulse rootfs artifact (otapulse-artifact.bbclass);
 #                                   "0" to build the disk image only
+#   OTA_SERVER_URL                  your OTA-Pulse server (as in native mode)
+#   OTAPULSE_PROVISIONING_TOKEN     fleet provisioning token (as in native mode): the device
+#                                   registers itself with it on first boot
+#   OTAPULSE_PROVISIONING_MODE      "baked" (default): the token is written into the image
+#                                   (/etc/otapulse/provision.env, mode 0600, never into a
+#                                   package); "manual": the image carries no token and the
+#                                   device reads /data/otapulse/provision.env, which you
+#                                   place yourself
 #   OTAPULSE_GROW_DATA_PART         "1" (default): on every boot the persistent data
 #                                   partition is extended to the end of the storage medium and
 #                                   its file system grown to match, before the agent starts;
@@ -74,6 +82,17 @@ def otapulse_full_bsp_requirements(d):
         req.append(('mender-nxp', 'meta-otapulse-bsp/boards/nxp'))
     return req
 
+def otapulse_full_check_token(d):
+    """The provisioning token is written into a shell-readable environment file at image
+    build time; refuse anything that is not a plain token, with a message that names the
+    variable (and never prints the value)."""
+    import re
+    tok = d.getVar('OTAPULSE_PROVISIONING_TOKEN') or ''
+    if tok and not re.fullmatch(r'[A-Za-z0-9_.-]+', tok):
+        bb.fatal("OTAPULSE_PROVISIONING_TOKEN contains characters that are not valid in a "
+                 "provisioning token (allowed: letters, digits, underscore, dot, dash). "
+                 "Copy the token again from your dashboard.")
+
 def otapulse_full_validate(d):
     """Bootloader-mode customer variables. Runs BEFORE the board support is
     inherited (it expands them), so the messages are the customer's first contact."""
@@ -92,6 +111,12 @@ def otapulse_full_validate(d):
         bb.fatal("OTAPULSE_PANIC_TIMEOUT_S must be a positive number of seconds (got \"%s\"). "
                  "Bootloader mode requires a kernel panic timeout: a kernel that panics without "
                  "one hangs forever and a failed update is never rolled back." % pt)
+
+    pm = (d.getVar('OTAPULSE_PROVISIONING_MODE') or 'baked').strip()
+    if pm not in ('baked', 'manual'):
+        bb.fatal("OTAPULSE_PROVISIONING_MODE must be \"baked\" or \"manual\" (got \"%s\")." % pm)
+
+    otapulse_full_check_token(d)
 
     gd = (d.getVar('OTAPULSE_GROW_DATA_PART') or '1').strip()
     if gd not in ('0', '1'):

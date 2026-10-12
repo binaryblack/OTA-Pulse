@@ -37,6 +37,14 @@ OTAPULSE_BOOTLOADER = "uboot"
 OTA_SERVER_URL = "CHANGE_ME"
 OTAPULSE_PROVISIONING_TOKEN = "CHANGE_ME"
 
+# How the device gets the provisioning token:
+#   "baked" (default): the token above is written into the image (/etc/otapulse/provision.env,
+#                      mode 0600, root only; never into a package or the package feed)
+#   "manual":          the image carries NO token. You place it on the device yourself:
+#                      /data/otapulse/provision.env containing
+#                      OTAPULSE_PROVISIONING_TOKEN=<token> (mode 0600), then reboot.
+# OTAPULSE_PROVISIONING_MODE = "baked"
+
 # Your board's MACHINE value
 MACHINE = "CHANGE_ME"
 
