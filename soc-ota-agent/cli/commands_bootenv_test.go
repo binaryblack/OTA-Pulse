@@ -549,3 +549,109 @@ func TestCommonInit_BootloaderModeFailure_ReturnsError(t *testing.T) {
 	assert.Nil(t, mp)
 	assert.Contains(t, err.Error(), "dual rootfs device")
 }
+
+// --- bootloader mode, GRUB: refuse to start when the GRUB environment cannot be read ------
+// (TASK-S109-030; SPIKE TASK-005 left the GRUB branch untested)
+
+// writeFakeTool installs an executable shell script named name in dir.
+func writeFakeTool(t *testing.T, dir, name, body string) {
+	t.Helper()
+	require.NoError(t, ioutil.WriteFile(filepath.Join(dir, name),
+		[]byte("#!/bin/sh\n"+body+"\n"), 0755))
+}
+
+// grubBootloaderConfig is a bootloader-mode config as a GRUB/UEFI board gets it:
+// virtio disk, rootfs partitions 2 and 3, no fw_env.config anywhere.
+func grubBootloaderConfig() *conf.MenderConfig {
+	c := conf.NewMenderConfig()
+	c.BootEnvMode = conf.BootEnvModeBootloader
+	c.RootfsPartA = "/dev/vda2"
+	c.RootfsPartB = "/dev/vda3"
+	return c
+}
+
+// The failure modes grub-mender-grubenv-print really has (see the script): no
+// grub-editenv, both redundant environments corrupt, no environment directory.
+// Each exits non-zero with nothing on stdout. Whatever the tool says, the agent
+// must refuse to build the device and must not run fw_printenv instead.
+func TestSelectBootloaderEnv_GrubPrintFailureModes_AreErrors(t *testing.T) {
+	cases := map[string]fakeTool{
+		"no grub-editenv":      {1, ""},
+		"both envs corrupt":    {2, ""},
+		"no environment dir":   {2, ""},
+		"crash (signal-like)":  {139, ""},
+		"exit 0, error on out": {0, "Cannot determine environment directory."},
+	}
+	for name, tool := range cases {
+		cmds := &fakeBootCommands{tools: map[string]fakeTool{
+			"grub-mender-grubenv-print": tool,
+			"fw_printenv":               {0, "mender_boot_part=2"},
+		}}
+		dev, err := initBootloaderDualRootfsDevice(grubBootloaderConfig(), cmds,
+			filepath.Join(t.TempDir(), "no-fw-env-config"),
+			lookPathFrom("grub-mender-grubenv-print", "fw_printenv"))
+		require.Error(t, err, name)
+		assert.Nil(t, dev, name)
+		assert.False(t, cmds.called("fw_printenv"), name)
+	}
+}
+
+// What the real tool prints on success: "mender_boot_part=3" for one variable.
+func TestInitBootloaderDualRootfsDevice_GrubWorks(t *testing.T) {
+	cmds := &fakeBootCommands{tools: map[string]fakeTool{
+		"grub-mender-grubenv-print": {0, "mender_boot_part=3"},
+	}}
+	dev, err := initBootloaderDualRootfsDevice(grubBootloaderConfig(), cmds,
+		filepath.Join(t.TempDir(), "no-fw-env-config"),
+		lookPathFrom("grub-mender-grubenv-print"))
+	require.NoError(t, err)
+	assert.NotNil(t, dev)
+}
+
+// End to end through the production entry point with REAL executables on PATH
+// (no injected runner, no injected lookPath): a grub-mender-grubenv-print that
+// fails makes initDualRootfsDeviceChecked fail even though a working
+// fw_printenv is installed next to it, and never logs the file-mode fallback.
+func TestInitDualRootfsDeviceChecked_GrubPrintFails_RefusesToStart(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeTool(t, dir, "grub-mender-grubenv-print",
+		`echo "Unable to restore environment both are corrupt." 1>&2; exit 2`)
+	writeFakeTool(t, dir, "fw_printenv", `echo mender_boot_part=2`)
+	t.Setenv("PATH", dir)
+	lc := captureLogs(t)
+
+	dev, err := initDualRootfsDeviceChecked(grubBootloaderConfig())
+	require.Error(t, err)
+	assert.Nil(t, dev)
+	assert.Contains(t, err.Error(), "cannot read mender_boot_part with grub-mender-grubenv-print")
+	assert.False(t, lc.contains("falling back to file-based"))
+	assert.False(t, lc.contains("Using file-based boot environment"))
+}
+
+// Same entry point, working GRUB tool: the device is built and the log says the
+// GRUB tool was used.
+func TestInitDualRootfsDeviceChecked_GrubPrintWorks_Starts(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeTool(t, dir, "grub-mender-grubenv-print", `echo mender_boot_part=2`)
+	t.Setenv("PATH", dir)
+	lc := captureLogs(t)
+
+	dev, err := initDualRootfsDeviceChecked(grubBootloaderConfig())
+	require.NoError(t, err)
+	assert.NotNil(t, dev)
+	assert.True(t, lc.contains("BootEnvMode=bootloader, grub-mender-grubenv-print"))
+}
+
+// The commands that change the device state refuse to run when the GRUB
+// environment is unreadable (install/commit/rollback go through the same
+// initDualRootfsDeviceChecked); the process is not started.
+func TestHandleArtifactOperations_GrubPrintFails_RefusesMutatingCommands(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeTool(t, dir, "grub-mender-grubenv-print", `exit 1`)
+	t.Setenv("PATH", dir)
+	for _, name := range []string{"install", "commit", "rollback"} {
+		err := artifactOpsFixture(t, name, grubBootloaderConfig())
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "grub-mender-grubenv-print", name)
+	}
+}

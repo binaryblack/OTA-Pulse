@@ -17,9 +17,12 @@
 #     (native U-Boot bbappend, u-boot-env-config, base-files bbappend);
 #  5. replaces the board support's own ".mender" artifact image type and bootstrap
 #     artifact with our otapulse-artifact.bbclass (.otapulse);
-#  6. adds a kernel panic timeout (panic=N) to the kernel command line through the
-#     bootloader's setup-commands hook, and refuses to build an image without one:
-#     a kernel that panics without a timeout hangs forever and the bootloader
+#  6. adds a kernel panic timeout (panic=N) to the kernel command line and refuses to
+#     build an image without one (U-Boot: through the bootloader's setup-commands hook;
+#     GRUB: through a boot-configuration fragment added by a bbappend that lives in
+#     dynamic-layers/ and is only parsed when the board support is part of the build,
+#     see TASK-S109-030).
+#     A kernel that panics without a timeout hangs forever and the bootloader
 #     never gets the reset it needs to roll the update back (SPIKE.md s7.7, Opus
 #     binding adjustment). CONFIG_PANIC_TIMEOUT in a kernel config is deliberately
 #     NOT relied on: vendor kernels do not carry our kernel fragments.
@@ -36,7 +39,8 @@
 #         otapulse-growfs-data (recipe skipped outside bootloader mode).
 #
 # Not here (other tasks): BOOTCOUNT_LIMIT / redundant-env sanity checks (TASK-S109-012),
-# the bootloader-mode boot deadline (TASK-S109-011), GRUB panic delivery (TASK-S109-018).
+# the bootloader-mode boot deadline (TASK-S109-011), the real panic->rollback run on GRUB
+# (TASK-S109-018; panic=N DELIVERY for GRUB is section 6 above, TASK-S109-030).
 
 inherit mender-setup
 
@@ -199,13 +203,44 @@ def otapulse_full_last_panic(text):
     vals = re.findall(r'(?<![\w-])panic=(-?\d+)', text or '')
     return int(vals[-1]) if vals else None
 
+def otapulse_full_check_grub_panic_support(d):
+    """GRUB: the panic timeout is delivered by a boot-configuration fragment that a
+    bbappend in dynamic-layers/ adds to the board support's GRUB recipe. At
+    configuration level the most that can be proven is that the bbappend exists and
+    that BBFILES_DYNAMIC will really load it; the recipe-level check (python () below)
+    and the build gate in the bbappend (do_compile) prove the rest."""
+    import glob, os
+    base = (d.getVar('LAYERDIR_OTAPULSE') or '').rstrip('/')
+    support = os.path.join(base, 'dynamic-layers', 'mender', 'recipes-bsp',
+                           'grub-mender-grubenv', 'grub-mender-grubenv_%.bbappend')
+    if not base or not os.path.isfile(support):
+        bb.fatal("OTAPULSE_BOOTLOADER = \"grub\": the OTA-Pulse kernel panic timeout support for GRUB is "
+                 "missing from your meta-otapulse layer, so the kernel panic timeout cannot be delivered. "
+                 "Bootloader mode refuses to build an image whose hung kernel would never be rolled back. "
+                 "Update the layer.")
+    loaded = False
+    for ent in (d.getVar('BBFILES_DYNAMIC') or '').split():
+        coll, _, pattern = ent.partition(':')
+        if coll == 'mender' and support in glob.glob(pattern):
+            loaded = True
+    if not loaded:
+        bb.fatal("OTAPULSE_BOOTLOADER = \"grub\": the OTA-Pulse kernel panic timeout support for GRUB is not "
+                 "registered in BBFILES_DYNAMIC (conf/layer.conf of meta-otapulse), so it would not be loaded. "
+                 "Bootloader mode refuses to build an image whose hung kernel would never be rolled back.")
+
 def otapulse_full_check_panic(d):
-    """Fatal unless the bootloader setup commands leave a positive panic= on the
-    kernel command line."""
+    """Fatal unless the bootloader leaves a positive panic= on the kernel command
+    line. U-Boot: checked from the setup commands. GRUB: the timeout value is checked
+    here and the delivery is checked by otapulse_full_check_grub_panic_support (this
+    function), the recipe check and the grub.cfg build gate."""
     if d.getVar('OTAPULSE_BOOTLOADER') == 'grub':
-        bb.fatal("OTAPULSE_BOOTLOADER = \"grub\": delivering the kernel panic timeout through the "
-                 "GRUB environment is not supported yet, and bootloader mode refuses to build an "
-                 "image whose hung kernel would never be rolled back.")
+        pt = (d.getVar('OTAPULSE_PANIC_TIMEOUT_S') or '').strip()
+        if not pt.isdigit() or int(pt) < 1:
+            bb.fatal("OTAPULSE_PANIC_TIMEOUT_S must be a positive number of seconds (got \"%s\"). "
+                     "Bootloader mode requires a kernel panic timeout: a kernel that panics without one "
+                     "hangs forever and a failed update is never rolled back." % pt)
+        otapulse_full_check_grub_panic_support(d)
+        return
     text = (d.getVar('MENDER_UBOOT_PRE_SETUP_COMMANDS') or '') + ' ' + \
            (d.getVar('MENDER_UBOOT_POST_SETUP_COMMANDS') or '')
     panic = otapulse_full_last_panic(text)
@@ -226,6 +261,17 @@ python () {
                  "in local.conf, and remove it from your recipes.")
     if bb.data.inherits_class('image', d):
         otapulse_full_check_image(d)
+    # GRUB: the recipe that builds the boot configuration must really carry the panic
+    # timeout support from the dynamic-layers bbappend (fragment writer + build gate).
+    if d.getVar('PN') == 'grub-mender-grubenv' and d.getVar('OTAPULSE_BOOTLOADER') == 'grub':
+        gate = (d.getVarFlag('do_compile', 'postfuncs') or '').split()
+        # (the fragment writer is do_configure:prepend in the bbappend; it names the file
+        # through OTAPULSE_PANIC_FRAGMENT_NAME, which is how it is recognised here)
+        if 'otapulse_full_check_grub_panic' not in gate or \
+                '${OTAPULSE_PANIC_FRAGMENT_NAME}' not in (d.getVar('do_configure', False) or ''):
+            bb.fatal("OTAPULSE_BOOTLOADER = \"grub\": the GRUB boot configuration recipe does not carry the "
+                     "OTA-Pulse kernel panic timeout support (the bbappend from meta-otapulse was not applied). "
+                     "Bootloader mode refuses to build an image whose hung kernel would never be rolled back.")
     # Bootloader (U-Boot) recipes built with the board support: verify the generated
     # defines header really carries the panic= setting that goes into the compiled-in env.
     if d.getVar('do_provide_mender_defines', False):

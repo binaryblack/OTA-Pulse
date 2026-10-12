@@ -26,6 +26,11 @@ INHERIT += "otapulse-full"
 OTAPULSE_BOOT_MODE = "bootloader"
 
 # Which bootloader environment holds the boot-slot flag: "uboot" or "grub"
+#   "uboot": U-Boot environment (usual for ARM boards, SD/eMMC, OTAPULSE_IMAGE_TYPE "sd")
+#   "grub":  GRUB environment on a UEFI boot partition (x86-64 and UEFI ARM boards,
+#            OTAPULSE_IMAGE_TYPE "uefi"; set OTAPULSE_STORAGE_DEVICE to your disk, for
+#            example "/dev/vda" or "/dev/sda"). The build adds the kernel panic timeout
+#            to the GRUB boot configuration for you (see SAFETY below).
 OTAPULSE_BOOTLOADER = "uboot"
 
 # Your OTAPulse server URL and device provisioning token (from your dashboard)
@@ -62,8 +67,9 @@ OTAPULSE_STORAGE_TOTAL_SIZE_MB = "4096"
 
 # A kernel that panics without a reboot timeout hangs forever, and the
 # bootloader never gets the reset it needs to roll a bad update back. The
-# build adds "panic=<n>" to the kernel command line and REFUSES to build an
-# image without one. Default 10 seconds.
+# build adds "panic=<n>" to the kernel command line (U-Boot: through the boot
+# commands, GRUB: through the generated GRUB boot configuration) and REFUSES to
+# build an image without one. Default 10 seconds.
 # OTAPULSE_PANIC_TIMEOUT_S = "10"
 
 # ╔══════════════════════════════════════════════════════════════════╗

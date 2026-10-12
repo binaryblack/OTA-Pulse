@@ -31,7 +31,8 @@
 #   OTAPULSE_DEVICE_TYPE            device type artifacts are checked against
 #                                   (default: derived from MACHINE by the board support)
 #   OTAPULSE_PANIC_TIMEOUT_S        kernel panic -> reboot timeout in seconds, added to the
-#                                   kernel command line by the bootloader (default 10;
+#                                   kernel command line by the bootloader, U-Boot or GRUB
+#                                   (default 10;
 #                                   0 or negative is refused: a kernel that panics without
 #                                   a timeout hangs forever and the bootloader never gets
 #                                   the reset it needs to roll the update back)
