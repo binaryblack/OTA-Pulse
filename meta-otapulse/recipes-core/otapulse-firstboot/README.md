@@ -121,6 +121,23 @@ WKS_FILE = "your-static-ab.wks"  # With fixed partition sizes
 
 Static mode does not include `otapulse-firstboot`.
 
+## Bootloader Compatibility Mode
+
+With `OTAPULSE_BOOT_MODE = "bootloader"` (see `classes/otapulse-full.bbclass`) the
+board support owns the partition layout, the `/data` mount and the rollback net, so
+this package installs only the parts that do not depend on the native layout:
+
+| Installed | Not installed |
+|-----------|---------------|
+| `otapulse-auto-provision` (credentials, tunnel credential) | `otapulse-partition-setup` |
+| `otapulse-machine-id` (persistent machine-id and NIC MAC on `/data`) | `otapulse-boot-health` |
+| `otapulse-data-seed` (`/data/otapulse`, `device_type`; fails loudly on a device-type mismatch) | `otapulse-boot-deadline` (the bootloader-mode deadline is a separate unit) |
+| | the native udev partition-label aliases |
+
+`otapulse-growfs-data` (a separate recipe, pulled in by `soc-ota-agent`) grows the
+`/data` partition and file system to the storage medium. The native files are removed
+by `do_install:append:otapulse-bootloader`; the native task bodies are untouched.
+
 ## Cross-Platform Support
 
 ### Included WKS Templates

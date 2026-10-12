@@ -24,9 +24,19 @@
 #     binding adjustment). CONFIG_PANIC_TIMEOUT in a kernel config is deliberately
 #     NOT relied on: vendor kernels do not carry our kernel fragments.
 #
+# How the native-only pieces are kept out of a bootloader image (TASK-S109-009), ONE
+# mechanism per item:
+#   * BBMASK (this class, section 4), the recipe is not parsed at all: the native U-Boot
+#     bbappend, u-boot-env-config, the base-files bbappend (custom fstab).
+#   * the "otapulse-bootloader" override inside the recipe that is kept in part:
+#       - otapulse-firstboot keeps otapulse-auto-provision and otapulse-machine-id, drops
+#         otapulse-partition-setup / otapulse-boot-health / otapulse-boot-deadline and the
+#         native udev aliases, and adds otapulse-data-seed;
+#       - soc-ota-agent drops the /usr/bin/mender symlink and gptfdisk, adds
+#         otapulse-growfs-data (recipe skipped outside bootloader mode).
+#
 # Not here (other tasks): BOOTCOUNT_LIMIT / redundant-env sanity checks (TASK-S109-012),
-# gating of native-only runtime pieces in the image (TASK-S109-009), GRUB panic delivery
-# (TASK-S109-018).
+# the bootloader-mode boot deadline (TASK-S109-011), GRUB panic delivery (TASK-S109-018).
 
 inherit mender-setup
 
@@ -154,6 +164,12 @@ python otapulse_full_config_handler() {
 # fw_env.config; base-files bbappend: custom fstab with /data.) Anchored on THIS
 # layer's directory (LAYERDIR_OTAPULSE, set in conf/layer.conf) so the same paths in
 # meta-otapulse-bsp/ are never touched.
+# BBMASK is the single gate for these three (TASK-S109-009): each is a whole recipe or
+# bbappend that exists only for the native layout, so a mask is exact, and anything that
+# still asks for a masked recipe (an image listing u-boot-env-config, say) fails the
+# build with "Nothing PROVIDES" instead of silently getting a second boot environment.
+# Pieces that are only PART native (otapulse-firstboot, soc-ota-agent) are gated by the
+# override inside their own recipe instead; see the header of this class.
 def otapulse_full_bbmask(d):
     import re
     base = re.escape((d.getVar('LAYERDIR_OTAPULSE') or '').rstrip('/'))

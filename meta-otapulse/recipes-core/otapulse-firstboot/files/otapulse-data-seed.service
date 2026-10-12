@@ -1,0 +1,30 @@
+[Unit]
+Description=OTA-Pulse persistent data seeding (bootloader mode)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Installed ONLY in bootloader compatibility mode (TODO-157 / S109-009), where
+# the board support owns the partition layout and the /data mount and
+# otapulse-partition-setup is not installed. See otapulse-data-seed for what it
+# does (and, deliberately, what it does not).
+#
+# /data is a plain fstab mount in that layout (no nofail), so RequiresMountsFor
+# is exact: this unit starts only once the real /data is mounted and never seeds
+# onto the root filesystem.
+#
+# Ordered before everything that reads or writes /data/otapulse:
+#  * soc-ota-agent.service also Requires= this unit (bootloader-mode drop-in), so
+#    a device-type mismatch (this unit failing) keeps the agent from starting;
+#  * otapulse-auto-provision.service writes its credentials into /data/otapulse.
+RequiresMountsFor=/data
+After=data.mount
+Before=soc-ota-agent.service otapulse-auto-provision.service socmond.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/otapulse-data-seed
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

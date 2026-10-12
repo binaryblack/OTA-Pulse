@@ -139,8 +139,22 @@ RDEPENDS:${PN}:append:otapulse-bootloader = " ${@'libubootenv-bin' if d.getVar('
 # The native boot-switching helpers (switch-boot-slot.sh, partition tools) are
 # useless in bootloader mode (the bootloader owns the slot flag; the agent never
 # runs switch-boot-slot.sh there) and u-boot-env-config would drag a second,
-# conflicting U-Boot environment definition into the image.
+# conflicting U-Boot environment definition (fw_env.config) into the image.
+#  * gptfdisk (a core recipe): this removal is its only gate.
+#  * u-boot-env-config: the GATE is otapulse-full-bootloader.bbclass's BBMASK of the
+#    whole recipe (TASK-S109-009 reconciliation: one mechanism, so anything else that
+#    asks for it, e.g. an image listing it, fails with "Nothing PROVIDES"). Removing it
+#    from THIS recommends list is that mask's required companion, not a second gate:
+#    verified in TASK-S109-009, bitbake reports a recommendation of a masked recipe as an
+#    ERROR ("Nothing RPROVIDES 'u-boot-env-config'"), it does not skip it.
 RRECOMMENDS:${PN}:remove:otapulse-bootloader = "u-boot-env-config gptfdisk"
+
+# Bootloader mode only: grow /data (partition + file system) to the medium before
+# the agent starts, see the otapulse-growfs-data recipe. Customers can opt out with
+# OTAPULSE_GROW_DATA_PART = "0" (documented in otapulse-full.bbclass); a layout
+# whose /data is not the last partition is left alone by the unit itself.
+OTAPULSE_GROW_DATA_PART ?= "1"
+RDEPENDS:${PN}:append:otapulse-bootloader = " ${@'' if d.getVar('OTAPULSE_GROW_DATA_PART') == '0' else 'otapulse-growfs-data'}"
 
 # Unit ordering drop-in: installed in bootloader mode only (see do_install).
 SRC_URI:append:otapulse-bootloader = " file://10-bootloader-mode.conf"
@@ -467,6 +481,26 @@ do_install() {
         bbnote "OTA signature verification is DISABLED"
     fi
 }
+
+# Bootloader mode (TASK-S109-009): the image must not ship anything named "mender".
+# The native do_install above installs the /usr/bin/mender compatibility symlink
+# (and an inventory script that calls it); this append runs after it, only in
+# bootloader mode, so the native task body and its signature stay exactly as they
+# were. Nothing on a bootloader image uses the name: the agent, the state scripts
+# and the testing framework all call soc-ota-agent / otapulse.
+do_install:append:otapulse-bootloader() {
+    rm -f ${D}${bindir}/mender
+
+    # otapulse-inventory-provides calls "/usr/bin/mender show-provides"; point the
+    # installed copy at the agent binary (same command, same output). The source
+    # script is shared with native images and is not modified.
+    INV=${D}${datadir}/otapulse/inventory/otapulse-inventory-provides
+    sed -i 's|/usr/bin/mender show-provides|/usr/bin/soc-ota-agent show-provides|' "$INV"
+    if grep -q '/usr/bin/mender' "$INV" || ! grep -q '/usr/bin/soc-ota-agent show-provides' "$INV"; then
+        bbfatal "soc-ota-agent: bootloader mode could not repoint otapulse-inventory-provides at /usr/bin/soc-ota-agent (source script changed?)"
+    fi
+}
+FILES:${PN}:remove:otapulse-bootloader = "${bindir}/mender"
 
 # Systemd configuration
 SYSTEMD_SERVICE:${PN} = "soc-ota-agent.service"

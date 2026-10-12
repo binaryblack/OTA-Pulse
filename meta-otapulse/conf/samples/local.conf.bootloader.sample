@@ -73,6 +73,11 @@ OTAPULSE_STORAGE_TOTAL_SIZE_MB = "4096"
 # Device type that artifacts are checked against (default: derived from MACHINE)
 # OTAPULSE_DEVICE_TYPE = "my-device"
 
+# The persistent data partition is extended to the end of the storage medium on
+# every boot, and its file system grown to match, before the agent starts.
+# Set to "0" to keep the size the image was built with.
+# OTAPULSE_GROW_DATA_PART = "1"
+
 # Every image build also writes the signed .otapulse rootfs artifact.
 # Set to "0" to build the disk image only.
 # OTAPULSE_GENERATE_ARTIFACT = "1"

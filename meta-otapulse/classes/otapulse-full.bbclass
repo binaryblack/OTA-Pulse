@@ -38,6 +38,10 @@
 #   OTAPULSE_GENERATE_ARTIFACT      "1" (default): every image build also writes the
 #                                   .otapulse rootfs artifact (otapulse-artifact.bbclass);
 #                                   "0" to build the disk image only
+#   OTAPULSE_GROW_DATA_PART         "1" (default): on every boot the persistent data
+#                                   partition is extended to the end of the storage medium and
+#                                   its file system grown to match, before the agent starts;
+#                                   "0" to keep the size the image was built with
 # See conf/samples/local.conf.bootloader.sample for a complete example.
 #
 # Required layers in bootloader mode (the class cannot add layers, it checks and
@@ -87,6 +91,10 @@ def otapulse_full_validate(d):
         bb.fatal("OTAPULSE_PANIC_TIMEOUT_S must be a positive number of seconds (got \"%s\"). "
                  "Bootloader mode requires a kernel panic timeout: a kernel that panics without "
                  "one hangs forever and a failed update is never rolled back." % pt)
+
+    gd = (d.getVar('OTAPULSE_GROW_DATA_PART') or '1').strip()
+    if gd not in ('0', '1'):
+        bb.fatal("OTAPULSE_GROW_DATA_PART must be \"1\" or \"0\" (got \"%s\")." % gd)
 
 def otapulse_full_select(d):
     """Evaluated once, at configuration level, by the inherit below. Returns the

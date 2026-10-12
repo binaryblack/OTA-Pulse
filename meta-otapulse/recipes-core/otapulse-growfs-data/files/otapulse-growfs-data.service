@@ -1,0 +1,30 @@
+[Unit]
+Description=OTA-Pulse: grow the file system on /data to its partition
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Bootloader compatibility mode only (otapulse-growfs-data recipe). Step 2 of 2:
+# the file system (online, systemd-growfs; ext4 supports growing while mounted).
+# Step 1 is otapulse-resize-data-part.service.
+#
+# Ordered before the agent so that the agent never starts downloading a large
+# artifact into /data while the file system is still at its original (small)
+# size. It only grows the file system: files on /data (including /data/u-boot,
+# the bootloader environment configuration) are not read or written. Wants, not
+# Requires, from the agent: a failed grow leaves /data at its current size and
+# must not stop updates.
+DefaultDependencies=no
+BindsTo=data.mount
+After=data.mount
+Before=soc-ota-agent.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@SYSTEMD_UNITDIR@/systemd-growfs /data
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=0
+
+[Install]
+WantedBy=data.mount

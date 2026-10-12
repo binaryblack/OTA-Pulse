@@ -1,0 +1,24 @@
+[Unit]
+Description=OTA-Pulse: extend the /data partition to the end of the medium
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Bootloader compatibility mode only (otapulse-growfs-data recipe). Step 1 of 2:
+# the partition. It must finish BEFORE /data is mounted (a mounted partition is
+# not resized), so it is Before=data.mount and Wanted by it; step 2, growing the
+# filesystem, is otapulse-growfs-data.service. A failure here never blocks the
+# mount (Wants, not Requires): /data then simply keeps its current size.
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=data.mount
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/otapulse-resize-data-part
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=120
+
+[Install]
+WantedBy=data.mount

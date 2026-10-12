@@ -105,3 +105,93 @@ FILES:${PN} = " \
     ${nonarch_base_libdir}/udev/rules.d/99-otapulse-bsp-aliases.rules \
     ${localstatedir}/lib/otapulse \
 "
+
+# ── Bootloader compat mode (TODO-157 / sprint S109, TASK-S109-009) ───────────
+# In bootloader mode (override "otapulse-bootloader", set by otapulse-full.bbclass)
+# the board support owns the partition layout, the /data mount and the rollback
+# net, so this package is SPLIT: the native-only parts are not installed, the
+# parts the device cannot do without stay, and one bootloader-mode unit is added.
+#
+#   NOT installed (native only):
+#     otapulse-partition-setup(.service)  GPT/partition-label detection and
+#                                         (re)partitioning; it would mis-detect a
+#                                         Mender-style MBR/GPT layout, and its
+#                                         file-based boot environment init
+#                                         (/data/ota/*) is meaningless there.
+#     otapulse-boot-health(.service)      native direct-boot brick prevention
+#                                         (FAT boot_count / extlinux / boot.scr
+#                                         revert detection); the bootloader
+#                                         environment's own bootlimit/altbootcmd
+#                                         owns that here.
+#     otapulse-boot-deadline(.service/.timer)
+#                                         armed by boot-health; the userspace
+#                                         deadline of bootloader mode is a
+#                                         separate unit (TASK-S109-011: ADD ITS
+#                                         FILES TO THE LISTS BELOW, do not
+#                                         re-enable the native ones).
+#     99-otapulse-bsp-aliases.rules       aliases Tegra/MBR labels into the
+#                                         native by-partlabel names.
+#   KEPT unchanged (layout independent):
+#     otapulse-auto-provision(.service)   credentials, tunnel credential
+#     otapulse-machine-id(.service)       /data/etc/machine-id (+ NIC MAC) restore
+#     /var/lib/otapulse
+#   ADDED:
+#     otapulse-data-seed(.service)        /data/otapulse + device_type seeding
+#                                         and the device-type consistency check.
+#
+# Mechanism: files are installed by the unchanged native do_install above and
+# removed again by do_install:append:otapulse-bootloader below. That keeps the
+# native task bodies, and so every native task signature, exactly as before
+# (native-unchanged gate); nothing here is evaluated in native mode.
+OTAPULSE_BL_NATIVE_ONLY_BINS = "otapulse-partition-setup otapulse-boot-health otapulse-boot-deadline"
+OTAPULSE_BL_NATIVE_ONLY_UNITS = "otapulse-partition-setup.service otapulse-boot-health.service otapulse-boot-deadline.service otapulse-boot-deadline.timer"
+
+SRC_URI:append:otapulse-bootloader = " \
+    file://otapulse-data-seed \
+    file://otapulse-data-seed.service \
+"
+
+# Partitioning tools only otapulse-partition-setup needs. (e2fsprogs stays: it
+# provides the fsck systemd runs on /data and the root filesystem.)
+RDEPENDS:${PN}:remove:otapulse-bootloader = "gptfdisk util-linux-sfdisk"
+
+# otapulse-auto-provision parses the server's JSON replies and the JWT with python3
+# "json" and "base64". RDEPENDS above lists only python3-core, which has NEITHER
+# (found by booting a minimal bootloader-mode image: "No module named 'json'", so
+# ServerURL read back empty and the device never registered). The native production
+# image hides this by installing the full python3 package. Added here for bootloader
+# mode only so native stays byte-identical; the same two lines belong in the native
+# RDEPENDS (follow-up: it changes the native package metadata, not the rootfs).
+RDEPENDS:${PN}:append:otapulse-bootloader = " python3-json python3-netclient"
+
+SYSTEMD_SERVICE:${PN}:remove:otapulse-bootloader = "otapulse-partition-setup.service otapulse-boot-health.service otapulse-boot-deadline.timer"
+SYSTEMD_SERVICE:${PN}:append:otapulse-bootloader = " otapulse-data-seed.service"
+
+FILES:${PN}:remove:otapulse-bootloader = " \
+    ${bindir}/otapulse-partition-setup \
+    ${bindir}/otapulse-boot-health \
+    ${bindir}/otapulse-boot-deadline \
+    ${systemd_system_unitdir}/otapulse-partition-setup.service \
+    ${systemd_system_unitdir}/otapulse-boot-health.service \
+    ${systemd_system_unitdir}/otapulse-boot-deadline.service \
+    ${systemd_system_unitdir}/otapulse-boot-deadline.timer \
+    ${nonarch_base_libdir}/udev/rules.d/99-otapulse-bsp-aliases.rules \
+"
+FILES:${PN}:append:otapulse-bootloader = " \
+    ${bindir}/otapulse-data-seed \
+    ${systemd_system_unitdir}/otapulse-data-seed.service \
+"
+
+do_install:append:otapulse-bootloader() {
+    for f in ${OTAPULSE_BL_NATIVE_ONLY_BINS}; do
+        rm -f ${D}${bindir}/$f
+    done
+    for f in ${OTAPULSE_BL_NATIVE_ONLY_UNITS}; do
+        rm -f ${D}${systemd_system_unitdir}/$f
+    done
+    rm -f ${D}${nonarch_base_libdir}/udev/rules.d/99-otapulse-bsp-aliases.rules
+    rmdir ${D}${nonarch_base_libdir}/udev/rules.d ${D}${nonarch_base_libdir}/udev 2>/dev/null || true
+
+    install -m 0755 ${WORKDIR}/otapulse-data-seed ${D}${bindir}/otapulse-data-seed
+    install -m 0644 ${WORKDIR}/otapulse-data-seed.service ${D}${systemd_system_unitdir}/otapulse-data-seed.service
+}

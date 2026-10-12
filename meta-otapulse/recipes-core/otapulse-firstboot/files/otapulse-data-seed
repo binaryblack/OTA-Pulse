@@ -1,0 +1,72 @@
+#!/bin/sh
+#
+# otapulse-data-seed — bootloader compatibility mode only (TODO-157 / S109-009)
+#
+# In bootloader mode the board support (not otapulse-partition-setup) lays out
+# and mounts the partitions, so otapulse-partition-setup is not installed. It
+# used to do one thing besides partitioning that the agent still needs; this is
+# that one thing, and nothing else:
+#
+#   * create /data/otapulse (the agent's datastore, OTAPULSE_DATASTORE_DIR);
+#   * seed /data/otapulse/device_type from /etc/otapulse/device_type, so the
+#     agent can check the hardware compatibility of incoming artifacts;
+#   * verify an already-seeded device_type still equals the one the running
+#     image was built with, and FAIL LOUDLY if it does not.
+#
+# It does NOT partition, format, mount, repair or resize anything, never
+# touches /data/u-boot (the bootloader environment configuration), and writes
+# no boot-environment state of its own (the bootloader environment owns that).
+# Machine-id persistence is otapulse-machine-id's job and credentials are
+# otapulse-auto-provision's; both are kept in bootloader mode unchanged.
+#
+# Idempotent: safe to run on every boot (the unit does). A mismatch exits 1 so
+# the unit FAILS; soc-ota-agent.service Requires= this unit in bootloader mode,
+# so the agent does not start on an image/device-type mismatch (a /data
+# partition carried over from a different board would otherwise let the agent
+# accept artifacts built for hardware this is not).
+
+set -u
+
+TAG="otapulse-data-seed"
+DATA_DIR="/data"
+DST_DIR="${OTAPULSE_DATA_SEED_DIR:-$DATA_DIR/otapulse}"
+DST="$DST_DIR/device_type"
+SRC="${OTAPULSE_DATA_SEED_SRC:-/etc/otapulse/device_type}"
+
+# "<N>" prefixes are parsed by journald (SyslogLevelPrefix): <3> = error, so
+# "journalctl -p err -t otapulse-data-seed" finds every failure of this unit.
+info() { echo "<6>$TAG: $1"; }
+fail() { echo "<3>$TAG: ERROR: $1" >&2; exit 1; }
+
+# The file holds one "device_type=<value>" line; compare it without whitespace.
+norm() { tr -d '[:space:]' < "$1"; }
+
+[ "${OTAPULSE_DATA_SEED_SKIP_MOUNTCHECK:-0}" = "1" ] || mountpoint -q "$DATA_DIR" 2>/dev/null \
+    || fail "$DATA_DIR is not a mount point; refusing to seed onto the root filesystem"
+
+[ -s "$SRC" ] || fail "$SRC is missing or empty; this image carries no device type"
+case "$(norm "$SRC")" in
+    device_type=?*) ;;
+    *) fail "$SRC does not contain a device_type=<value> line" ;;
+esac
+
+mkdir -p "$DST_DIR" || fail "cannot create $DST_DIR"
+
+if [ ! -e "$DST" ]; then
+    # Write-then-rename: a power cut can never leave a truncated device_type
+    # behind (the agent would read it as the hardware type).
+    TMP="$DST_DIR/.device_type.$$"
+    cp "$SRC" "$TMP" || { rm -f "$TMP"; fail "cannot write $TMP"; }
+    chmod 0644 "$TMP"
+    sync "$TMP" 2>/dev/null || true
+    mv -f "$TMP" "$DST" || { rm -f "$TMP"; fail "cannot install $DST"; }
+    info "seeded $DST from $SRC: $(norm "$DST")"
+    exit 0
+fi
+
+if [ "$(norm "$DST")" != "$(norm "$SRC")" ]; then
+    fail "device type mismatch: $DST says '$(norm "$DST")' but this image ($SRC) says '$(norm "$SRC")'. The /data partition belongs to a different device type. The OTA-Pulse agent will not start. Reflash /data, or remove $DST if the change is intended."
+fi
+
+info "$DST already matches this image ($(norm "$DST"))"
+exit 0

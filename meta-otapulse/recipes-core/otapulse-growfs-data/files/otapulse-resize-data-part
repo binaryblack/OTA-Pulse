@@ -1,0 +1,142 @@
+#!/bin/sh
+#
+# otapulse-resize-data-part — bootloader compatibility mode only
+# (TODO-157 / S109-009). Part of the otapulse-growfs-data recipe.
+#
+# Extends the /data PARTITION to the end of the storage medium, so the
+# filesystem on it can then be grown to fill the medium (that second step is
+# otapulse-growfs-data.service: systemd-growfs on the mounted /data).
+#
+# Runs on every boot, BEFORE /data is mounted (Before=data.mount), and is a
+# cheap no-op once the partition already fills the medium. The method (parted
+# resizepart to 100% while the partition is not mounted) is the one the
+# upstream board support uses for the same job.
+#
+# What it touches: the partition table entry of the /data partition, and only
+# its END (the start never moves, no data is moved). The bootloader
+# environment copies live in the raw area BEFORE the first partition and are
+# never written; /data/u-boot (their configuration file) is a file on /data
+# and is not touched either. It does not format or repair anything.
+#
+# It skips (exit 0, with a log line) when: there is no /data fstab entry, the
+# entry is not a partition, another partition follows /data on the medium, /data
+# is already mounted, or less than 4 MiB are free behind it. A real failure
+# (the resize tool failing, the partition not growing) exits 1 and is logged at
+# error level. A failure never stops the boot: the unit is only Wanted by
+# data.mount.
+#
+# Test hooks (hermetic unit tests only; the unit sets none of them):
+# OTAPULSE_RESIZE_FSTAB, OTAPULSE_RESIZE_SYSFS, OTAPULSE_RESIZE_MOUNTS,
+# OTAPULSE_RESIZE_WAIT_S.
+
+set -u
+
+TAG="otapulse-resize-data-part"
+FSTAB="${OTAPULSE_RESIZE_FSTAB:-/etc/fstab}"
+SYSFS="${OTAPULSE_RESIZE_SYSFS:-/sys}"
+MOUNTS="${OTAPULSE_RESIZE_MOUNTS:-/proc/mounts}"
+WAIT_S="${OTAPULSE_RESIZE_WAIT_S:-30}"
+# Sectors of 512 bytes. 8192 = 4 MiB: after a resize some space stays unused
+# (alignment, the GPT backup table), which must not look like "not resized yet".
+MIN_FREE_SECTORS=8192
+
+# journald parses the "<N>" prefix: <6> info, <3> error.
+info() { echo "<6>$TAG: $1"; }
+fail() { echo "<3>$TAG: ERROR: $1" >&2; exit 1; }
+skip() { info "$1 - nothing to do"; exit 0; }
+
+# ---- which device holds /data? (the fstab entry: it is not mounted yet) ----
+[ -r "$FSTAB" ] || skip "no $FSTAB"
+SRC=$(awk '$1 !~ /^#/ && $2 == "/data" { print $1; exit }' "$FSTAB")
+[ -n "$SRC" ] || skip "no /data entry in $FSTAB"
+
+case "$SRC" in
+    /dev/*)
+        DEV="$SRC"
+        ;;
+    *=*)
+        # PARTUUID=... / UUID=... / LABEL=... / PARTLABEL=...: needs the udev links
+        DEV=""
+        i=0
+        while [ "$i" -lt "$WAIT_S" ]; do
+            DEV=$(blkid -t "$SRC" -o device 2>/dev/null | head -n 1)
+            [ -n "$DEV" ] && break
+            i=$((i + 1))
+            sleep 1
+        done
+        [ -n "$DEV" ] || fail "cannot resolve the /data device '$SRC' within ${WAIT_S}s"
+        ;;
+    *)
+        skip "the /data fstab source '$SRC' is not a block device"
+        ;;
+esac
+
+# The device node may not exist yet this early in boot.
+i=0
+while [ ! -b "$DEV" ] && [ "$i" -lt "$WAIT_S" ]; do
+    i=$((i + 1))
+    sleep 1
+done
+[ -b "$DEV" ] || [ -n "${OTAPULSE_RESIZE_FSTAB:-}" ] || fail "$DEV did not appear within ${WAIT_S}s"
+DEV=$(readlink -f "$DEV" 2>/dev/null || echo "$DEV")
+
+NAME=$(basename "$DEV")
+SYSDIR="$SYSFS/class/block/$NAME"
+[ -r "$SYSDIR/partition" ] || skip "$DEV is not a partition of a disk"
+PARTNUM=$(cat "$SYSDIR/partition")
+DISK=$(basename "$(readlink -f "$SYSDIR/..")")
+DISKDEV="/dev/$DISK"
+DISKSYS="$SYSFS/block/$DISK"
+
+# ---- is there anything to grow into? ----
+TOTAL=$(cat "$DISKSYS/size" 2>/dev/null) || fail "cannot read the size of $DISKDEV"
+START=$(cat "$SYSDIR/start") || fail "cannot read the start of $DEV"
+SIZE=$(cat "$SYSDIR/size") || fail "cannot read the size of $DEV"
+case "$TOTAL$START$SIZE" in *[!0-9]* | "") fail "unreadable sizes for $DEV ('$TOTAL' '$START' '$SIZE')" ;; esac
+END=$((START + SIZE))
+FREE=$((TOTAL - END))
+
+if [ "$FREE" -lt "$MIN_FREE_SECTORS" ]; then
+    skip "$DEV (partition $PARTNUM of $DISKDEV) already fills the medium ($FREE sectors free behind it)"
+fi
+
+# Another partition behind /data: it is not the last one, growing would collide.
+for p in "$DISKSYS"/"$DISK"*; do
+    [ -r "$p/start" ] || continue
+    [ "$p" = "$DISKSYS/$NAME" ] && continue
+    PSTART=$(cat "$p/start")
+    if [ "$PSTART" -ge "$END" ]; then
+        skip "another partition ($(basename "$p")) follows $DEV on $DISKDEV; not growing /data"
+    fi
+done
+
+# The partition is resized offline, like the upstream board support does.
+if grep -q "^$DEV " "$MOUNTS" 2>/dev/null; then
+    skip "$DEV is already mounted; this runs only before the mount"
+fi
+
+# ---- grow the partition (end only) ----
+info "growing $DEV (partition $PARTNUM of $DISKDEV) from $SIZE to the end of the medium ($FREE sectors free behind it)"
+
+# GPT keeps a backup table at the END of the medium; parted refuses to write a
+# table whose backup is not at the end, and writing it with fdisk moves it. On
+# MBR there is no backup table (and busybox fdisk may fail): both harmless.
+if [ "$(blkid -o value -s PTTYPE "$DISKDEV" 2>/dev/null)" = "gpt" ]; then
+    echo w | fdisk "$DISKDEV" >/dev/null 2>&1 || true
+fi
+
+parted -s "$DISKDEV" resizepart "$PARTNUM" 100% || fail "parted could not resize partition $PARTNUM of $DISKDEV"
+
+# The table change makes udev rebuild the /dev/disk links; wait for it so that
+# data.mount (ordered after this) sees a settled device.
+partprobe "$DISKDEV" >/dev/null 2>&1 || true
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout=30 >/dev/null 2>&1 || true
+fi
+
+NEWSIZE=$(cat "$SYSDIR/size" 2>/dev/null || echo 0)
+if [ "$NEWSIZE" -le "$SIZE" ]; then
+    fail "parted reported success but $DEV is still $NEWSIZE sectors; the kernel did not pick up the new size"
+fi
+info "$DEV now $NEWSIZE sectors (was $SIZE); the filesystem is grown after the mount by otapulse-growfs-data.service"
+exit 0
