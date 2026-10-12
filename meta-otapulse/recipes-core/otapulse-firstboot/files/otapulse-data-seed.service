@@ -17,6 +17,10 @@ Documentation=https://github.com/binaryblack/OTA-Pulse
 RequiresMountsFor=/data
 After=data.mount
 Before=soc-ota-agent.service otapulse-auto-provision.service socmond.service
+# TASK-S109-011: a seed failure keeps the agent down (above). On an uncommitted
+# update nothing would ever commit or reboot, so the failure handler reboots and the
+# bootloader rolls the update back; on a committed slot it only logs loudly.
+OnFailure=otapulse-bl-seed-failure.service
 
 [Service]
 Type=oneshot

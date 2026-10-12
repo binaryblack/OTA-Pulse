@@ -1,0 +1,31 @@
+[Unit]
+Description=OTA-Pulse clock-sync wait before a pending update is committed (bootloader mode)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Installed ONLY in bootloader compatibility mode (TODO-157 / S109-011). The native
+# wait lives in ArtifactCommit_Enter_01, which does nothing in bootloader mode (the
+# OTAPULSE-BOOT-MODE-GATE, TASK-S109-010). The agent resumes an interrupted update
+# when it starts and its first step is a TLS status report; on a board with no RTC
+# (or a dead RTC battery) a floor clock makes the server certificate "not yet
+# valid", that failure counts against the commit's retry budget, and exhausting it
+# forces a spurious rollback (BUG-432 / BUG-441). Holding the agent back until the
+# clock is NTP-synced prevents that, in the same place the commit happens: the
+# agent process.
+#
+# Bounded (60 s) and never blocking: Before= only orders; the agent has no
+# Requires= on this unit, so a timeout or failure here never keeps it from starting.
+# Waits only when the bootloader environment says an update is pending (or cannot be
+# read); a committed boot starts the agent immediately.
+After=data.mount network-online.target systemd-timesyncd.service time-sync.target
+Wants=network-online.target systemd-timesyncd.service
+Before=soc-ota-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/otapulse-bl-guard clock-wait
+StandardOutput=journal
+StandardError=journal
+# 60 s wait + environment reads + slack.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

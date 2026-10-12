@@ -1,0 +1,16 @@
+[Unit]
+Description=OTA-Pulse pending-update boot deadline check (bootloader mode)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Started only by otapulse-bl-boot-deadline.timer. Reads the bootloader
+# environment (read-only) and reboots when upgrade_available is still 1 after the
+# deadline; see otapulse-bl-guard for the full decision table and fail-safe rules.
+# An unreadable environment never reboots: the unit exits non-zero instead, so it
+# shows up in "systemctl --failed" and "journalctl -p err -t otapulse-bl-guard".
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/otapulse-bl-guard deadline
+StandardOutput=journal
+StandardError=journal
+# Three environment reads (2 s apart) and two 60 s-bounded reboot attempts plus slack.
+TimeoutStartSec=240

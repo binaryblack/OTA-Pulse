@@ -1,0 +1,609 @@
+#!/bin/sh
+#
+# otapulse-bl-guard — bootloader compatibility mode only (TODO-157 / S109-011)
+# OTAPULSE-BL-GUARD/1
+#
+# In bootloader mode the bootloader's own environment (U-Boot env or GRUB grubenv)
+# owns slot switching, boot counting and rollback: after an install the new slot
+# boots with upgrade_available=1, the bootloader counts every boot while that flag
+# is 1, and once the count exceeds the limit (bootlimit / the GRUB fallback) it
+# switches back to the old slot. The agent clears upgrade_available (commit) once
+# the new slot has proven healthy.
+#
+# That net only turns over when the device RESETS. A kernel panic resets it (the
+# image sets panic=N, TASK-S109-008/030); a userspace that wedges while the kernel
+# stays up does not. This script is the userspace half of the net. It never writes
+# the bootloader environment and never decides what a rollback is: it only turns
+# "still uncommitted after a long time" and "cannot even start the agent" into a
+# plain reboot, and the bootloader does the rest.
+#
+# Sub-commands (units in brackets):
+#   deadline     [otapulse-bl-boot-deadline.timer, 20 min after boot]
+#                reboot if the bootloader environment still says upgrade_available=1 on
+#                a boot that started as the trial boot of an update
+#   seed-failed  [OnFailure= of otapulse-data-seed.service]
+#                the agent cannot start (Requires= the seed unit): reboot at once if
+#                the update is still uncommitted, so it is rolled back instead of
+#                sitting dark until the deadline
+#   clock-wait   [otapulse-bl-clock-wait.service, Before=soc-ota-agent.service]
+#                first records the trial-boot marker the deadline needs (when
+#                upgrade_available=1 at boot), then waits, bounded, for an NTP-synced
+#                clock before the agent can commit (replaces the wait in
+#                ArtifactCommit_Enter_01, gated off in bootloader mode; BUG-432 / BUG-441)
+#   status       print what the others would see (read-only, for support/tests)
+#
+# DECISION TABLE (reboot only on the rows marked REBOOT; everything else leaves the
+# device alone):
+#
+#   environment                uptime       guards               deadline    seed-failed
+#   -------------------------  -----------  -------------------  ----------  -----------
+#   upgrade_available=0        any          -                    no-op       loud, no reboot
+#   upgrade_available=1,       any          -                    no-op       no-op
+#     bootcount=0              (installed, waiting for the agent's own reboot)
+#   upgrade_available=1,       any          -                    loud, none  loud, none
+#     bootcount absent/odd
+#   upgrade_available=1,       < deadline   -                    no-op       (n/a)
+#     bootcount>=1
+#   upgrade_available=1,       >= deadline  no trial marker /    no-op       (marker not
+#     bootcount>=1                          other boot / slot                 required)
+#                                           changed since boot
+#   upgrade_available=1,       >= deadline  all guards pass      REBOOT      REBOOT
+#     bootcount>=1
+#   upgrade_available=1,       >= deadline  a guard fails        loud, none  loud, none
+#   UNREADABLE / undecidable   any          -                    loud, none  loud, none
+#
+#   FAIL-SAFE: an environment that cannot be read (tool missing, /data not mounted,
+#   both GRUB copies disagree with no way to tell, a value that is not 0 or 1) is NOT
+#   evidence of a pending update. Rebooting on it could reboot-loop a healthy,
+#   committed system, so it never reboots; it logs at error level (journald
+#   priority 3: journalctl -p err -t otapulse-bl-guard) and the deadline unit exits
+#   non-zero so the failure is visible in "systemctl --failed". The price: a pending
+#   update on a board whose environment is unreadable is not rescued by userspace
+#   (the kernel-panic path still works).
+#
+#   Guards (all must pass before a REBOOT):
+#     0. this is the TRIAL boot of an update, not a device that has merely been told to
+#        reboot into one: bootcount>=1 and (deadline only) the clock-wait marker for this
+#        boot and slot, see "is this boot the TRIAL boot" below;
+#     1. at most one guard reboot per boot (marker in /run);
+#     2. the environment is read AGAIN right before rebooting and must still say
+#        upgrade_available=1 for the same trial (the agent may have committed, or
+#        started a new install, in the meantime);
+#     3. a persistent budget of consecutive guard reboots (default 5, shared by
+#        deadline and seed-failed, kept in /data/otapulse/bl-guard-reboots, cleared
+#        the first time upgrade_available=0 is seen). A device whose rollback is
+#        impossible (limit never reached, no old slot) therefore stops rebooting
+#        instead of rebooting forever; it stays up and the log says so. The deadline
+#        also fires at most once per boot (OnBootSec), i.e. one reboot per 20 min
+#        at the very worst.
+#     seed-failed additionally refuses to reboot when the budget cannot be persisted
+#     (/data not writable): its reboots are immediate, so without a durable count a
+#     rollback-impossible device would reboot every few seconds. The deadline still
+#     rescues that device after 20 min.
+#
+# KNOWN GAPS (by design or inherited; none makes a healthy device reboot):
+#   (a) A /data mount failure is NOT covered. fw_env.config points into /data/u-boot, so
+#       on U-Boot the environment is unreadable (fail-safe: no reboot), and /data is a
+#       plain fstab mount (no nofail), so the system most likely drops to emergency.target,
+#       where timers do not run. Such a boot is only rescued by the kernel-panic /
+#       watchdog path, not by this script. (On GRUB the environment is on the boot
+#       partition and stays readable, but the same emergency.target applies.)
+#   (b) With rollback impossible AND /data not writable there is no persistent budget, so
+#       the deadline reboots once per boot, i.e. every ~20 minutes, indefinitely. With a
+#       writable /data it stops after the budget (default 5).
+#   (c) pause_before_committing: an update control map that pauses the agent before the
+#       commit for longer than the deadline is turned into a reboot (and eventually a
+#       rollback). No server emits one today; raise OnBootSec in
+#       otapulse-bl-boot-deadline.timer, or disable the timer, before introducing one.
+#   (d) A trial boot whose environment is unreadable at boot (no marker) is not rescued by
+#       the deadline.
+#
+# Environment access (read-only):
+#   U-Boot:  fw_printenv upgrade_available / bootcount / mender_boot_part
+#   GRUB:    grub-editenv <dir>/mender_grubenv{1,2}/env list   (never the lock-taking,
+#            self-healing grub-mender-grubenv-print: a read must not write; bootcount
+#            and mender_boot_part are taken from the same copy(ies) as the decision).
+#            Copy selection is the same rule as the test framework's
+#            framework/bootloader_env.py: copies agree -> accept; disagree -> the
+#            unique highest editcount wins (an absent editcount ranks below any
+#            present one); otherwise undecidable. One readable copy is accepted.
+#   The tool is chosen by what is installed: fw_printenv -> U-Boot, else
+#   grub-editenv/grub2-editenv -> GRUB (an image carries exactly one of them; the agent
+#   recipe pulls libubootenv-bin or grub-editenv by OTAPULSE_BOOTLOADER).
+#   A read that fails or is undecidable is retried (3 tries, 2 s apart): the agent
+#   writes the two GRUB copies one after the other.
+#
+# Overrides for tests (all optional, defaults are the on-device values):
+#   OTAPULSE_BL_DEADLINE_S, OTAPULSE_BL_UPTIME_FILE, OTAPULSE_BL_STATE_DIR,
+#   OTAPULSE_BL_RUN_DIR, OTAPULSE_BL_SKIP_MOUNTCHECK, OTAPULSE_BL_MAX_REBOOTS,
+#   OTAPULSE_BL_READ_TRIES, OTAPULSE_BL_READ_DELAY_S, OTAPULSE_BL_CLOCK_WAIT_S,
+#   OTAPULSE_BL_GRUBENV_DIRS, OTAPULSE_BL_GRUBENV_CONFIG, OTAPULSE_BL_SYSRQ,
+#   OTAPULSE_BL_BOOT_ID_FILE.
+
+set -u
+# No pathname expansion: the unquoted word lists below (GRUB directories, env rows)
+# must never be globbed.
+set -f
+
+TAG="otapulse-bl-guard"
+DEADLINE_S="${OTAPULSE_BL_DEADLINE_S:-1200}"
+UPTIME_FILE="${OTAPULSE_BL_UPTIME_FILE:-/proc/uptime}"
+STATE_DIR="${OTAPULSE_BL_STATE_DIR:-/data/otapulse}"
+RUN_DIR="${OTAPULSE_BL_RUN_DIR:-/run/otapulse}"
+MAX_REBOOTS="${OTAPULSE_BL_MAX_REBOOTS:-5}"
+READ_TRIES="${OTAPULSE_BL_READ_TRIES:-3}"
+READ_DELAY_S="${OTAPULSE_BL_READ_DELAY_S:-2}"
+CLOCK_WAIT_S="${OTAPULSE_BL_CLOCK_WAIT_S:-60}"
+SYSRQ="${OTAPULSE_BL_SYSRQ:-/proc/sysrq-trigger}"
+GRUBENV_CONFIG="${OTAPULSE_BL_GRUBENV_CONFIG:-/etc/mender_grubenv.config}"
+BOOT_ID_FILE="${OTAPULSE_BL_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+COUNTER="$STATE_DIR/bl-guard-reboots"
+MARKER="$RUN_DIR/bl-guard-rebooted"
+TRIAL="$RUN_DIR/bl-trial-boot"
+
+# "<N>" prefixes are parsed by journald (SyslogLevelPrefix): <3> error, <4> warning,
+# <6> info. logger reaches syslog on images where journald is not the only sink.
+info() { echo "<6>$TAG: $1"; logger -t "$TAG" -p user.info "$1" 2>/dev/null || true; }
+warn() { echo "<4>$TAG: WARNING: $1" >&2; logger -t "$TAG" -p user.warning "$1" 2>/dev/null || true; }
+err()  { echo "<3>$TAG: ERROR: $1" >&2; logger -t "$TAG" -p user.err "$1" 2>/dev/null || true; }
+
+# bounded <seconds> <command...>: a hung tool must not stall the guard.
+bounded() {
+    _secs=$1; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$_secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+# ---- bootloader environment (read-only) -------------------------------------------
+
+# kv_get <text> <name>: value of the first "name=value" line.
+kv_get() {
+    printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1
+}
+
+BL_KIND=""      # uboot | grub | ""
+BL_UA=""        # 0 | 1 when decided
+BL_BOOTCOUNT="" # as the bootloader environment reports it ("" = absent / not decidable)
+BL_SLOT=""      # mender_boot_part: the slot the bootloader is booting / will boot
+BL_WHY=""       # why the last read was not decided
+
+valid_ua() { [ "$1" = "0" ] || [ "$1" = "1" ]; }
+
+read_uboot() {
+    BL_KIND="uboot"
+    _out=$(bounded 10 fw_printenv upgrade_available 2>&1)
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        BL_WHY="fw_printenv failed (rc=$_rc): $(printf '%s' "$_out" | head -n 1)"
+        return 1
+    fi
+    _ua=$(kv_get "$_out" upgrade_available | tr -d '[:space:]')
+    # separate calls: an undefined bootcount / slot must not fail the upgrade_available read
+    # (the deadline treats an absent bootcount as "do not reboot", see trial_evidence)
+    BL_BOOTCOUNT=$(kv_get "$(bounded 10 fw_printenv bootcount 2>/dev/null)" bootcount | tr -d '[:space:]')
+    BL_SLOT=$(kv_get "$(bounded 10 fw_printenv mender_boot_part 2>/dev/null)" mender_boot_part | tr -d '[:space:]')
+    if ! valid_ua "$_ua"; then
+        BL_WHY="fw_printenv reports upgrade_available='$_ua' (expected 0 or 1)"
+        return 1
+    fi
+    BL_UA="$_ua"
+    return 0
+}
+
+grub_tool() {
+    command -v grub-editenv 2>/dev/null && return 0
+    command -v grub2-editenv 2>/dev/null && return 0
+    return 1
+}
+
+grub_dirs() {
+    if [ -n "${OTAPULSE_BL_GRUBENV_DIRS:-}" ]; then
+        echo "$OTAPULSE_BL_GRUBENV_DIRS"
+        return
+    fi
+    _cfg=""
+    [ -r "$GRUBENV_CONFIG" ] && _cfg=$(sed -n 's/^ENV_DIR *= *//p' "$GRUBENV_CONFIG" 2>/dev/null | tail -n 1)
+    echo "$_cfg /boot/efi/grub-mender-grubenv /boot/grub/grub-mender-grubenv /boot/efi/EFI/BOOT /boot/grub"
+}
+
+read_grub() {
+    BL_KIND="grub"
+    _tool=$(grub_tool)
+    _rows=""
+    _found=""
+    for _d in $(grub_dirs); do
+        for _e in mender_grubenv1 mender_grubenv2; do
+            [ -f "$_d/$_e/env" ] || continue
+            _found=1
+            _list=$(bounded 10 "$_tool" "$_d/$_e/env" list 2>/dev/null) || continue
+            _ua=$(kv_get "$_list" upgrade_available | tr -d '[:space:]')
+            valid_ua "$_ua" || continue
+            _rows="$_rows
+$_ua|$(kv_get "$_list" editcount | tr -d '[:space:]')|$(kv_get "$_list" bootcount | tr -d '[:space:]')|$(kv_get "$_list" mender_boot_part | tr -d '[:space:]')"
+        done
+        # the first directory that holds environment files is the environment
+        [ -n "$_found" ] && break
+    done
+    if [ -z "$_found" ]; then
+        BL_WHY="no GRUB environment files found (is the boot partition mounted?)"
+        return 1
+    fi
+    if [ -z "$_rows" ]; then
+        BL_WHY="no GRUB environment copy could be read with a valid upgrade_available"
+        return 1
+    fi
+    # agree -> accept; disagree -> the unique highest editcount wins; else undecidable.
+    # bootcount and slot are taken from the winning copy(ies); when the copies the
+    # decision rests on differ in them they are left empty (= "not decidable").
+    _first=""
+    _agree=1
+    _best=""; _best_edit=-2; _best_n=0; _best_bc=""; _best_slot=""
+    _all_bc=""; _all_slot=""; _rows_n=0
+    OLDIFS=$IFS
+    IFS='
+'
+    for _r in $_rows; do
+        [ -n "$_r" ] || continue
+        _v=${_r%%|*}; _rest=${_r#*|}
+        _edit=${_rest%%|*}; _rest=${_rest#*|}
+        _bc=${_rest%%|*}; _sl=${_rest#*|}
+        _rows_n=$((_rows_n + 1))
+        if [ "$_rows_n" -eq 1 ]; then
+            _first=$_v; _all_bc=$_bc; _all_slot=$_sl
+        else
+            [ "$_v" = "$_first" ] || _agree=0
+            [ "$_bc" = "$_all_bc" ] || _all_bc=""
+            [ "$_sl" = "$_all_slot" ] || _all_slot=""
+        fi
+        case "$_edit" in
+            ''|*[!0-9a-fA-F]*) _ec=-1 ;;
+            *) _ec=$((0x$_edit)) ;;
+        esac
+        if [ "$_ec" -gt "$_best_edit" ]; then
+            _best=$_v; _best_edit=$_ec; _best_n=1; _best_bc=$_bc; _best_slot=$_sl
+        elif [ "$_ec" -eq "$_best_edit" ]; then
+            _best_n=$((_best_n + 1))
+        fi
+    done
+    IFS=$OLDIFS
+    if [ "$_agree" = "1" ]; then
+        BL_UA=$_first; BL_BOOTCOUNT=$_all_bc; BL_SLOT=$_all_slot
+        return 0
+    fi
+    if [ "$_best_n" -eq 1 ] && [ "$_best_edit" -ge 0 ]; then
+        BL_UA=$_best; BL_BOOTCOUNT=$_best_bc; BL_SLOT=$_best_slot
+        return 0
+    fi
+    BL_WHY="the GRUB environment copies disagree on upgrade_available and no copy has a unique highest editcount"
+    return 1
+}
+
+# read_env_once: sets BL_KIND, BL_UA, BL_BOOTCOUNT, BL_SLOT (0 = decided) or BL_WHY (1).
+read_env_once() {
+    BL_UA=""; BL_BOOTCOUNT=""; BL_SLOT=""; BL_WHY=""
+    if command -v fw_printenv >/dev/null 2>&1; then
+        read_uboot
+    elif grub_tool >/dev/null; then
+        read_grub
+    else
+        BL_KIND=""
+        BL_WHY="neither fw_printenv (U-Boot) nor grub-editenv (GRUB) is installed"
+        return 1
+    fi
+}
+
+read_env() {
+    _try=1
+    while :; do
+        read_env_once && return 0
+        [ "$_try" -ge "$READ_TRIES" ] && return 1
+        _try=$((_try + 1))
+        sleep "$READ_DELAY_S"
+    done
+}
+
+# ---- persistent reboot budget -----------------------------------------------------
+
+state_usable() {
+    [ "${OTAPULSE_BL_SKIP_MOUNTCHECK:-0}" = "1" ] || mountpoint -q /data 2>/dev/null || return 1
+    [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]
+}
+
+# counter_get: prints the count; "bad" when the file is not a plain number.
+counter_get() {
+    [ -e "$COUNTER" ] || { echo 0; return; }
+    _c=$(tr -d '[:space:]' < "$COUNTER" 2>/dev/null)
+    case "$_c" in
+        ''|*[!0-9]*) echo bad ;;
+        *) echo "$_c" ;;
+    esac
+}
+
+counter_set() {
+    _tmp="$STATE_DIR/.bl-guard-reboots.$$"
+    { echo "$1" > "$_tmp"; } 2>/dev/null || { rm -f "$_tmp"; return 1; }
+    sync "$_tmp" 2>/dev/null || true
+    mv -f "$_tmp" "$COUNTER" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+}
+
+counter_clear() {
+    [ -e "$COUNTER" ] || return 0
+    rm -f "$COUNTER" 2>/dev/null && info "update committed (upgrade_available=0): reboot budget reset"
+}
+
+# ---- is this boot the TRIAL boot of an update? -------------------------------------
+#
+# upgrade_available=1 alone does NOT mean "the running slot is the one being tried".
+# The agent's InstallUpdate writes upgrade_available=1, mender_boot_part=<new slot>,
+# bootcount=0 into the environment as soon as the install has finished, BEFORE its own
+# reboot, while the OLD slot is still running; a standalone "install" ("manual reboot
+# required") or pause_before_rebooting leaves the device in that state for as long as it
+# likes. Rebooting then would boot the new slot unasked. Two independent protections:
+#
+#  (a) bootcount. The bootloader raises bootcount to 1 on the trial boot itself: GRUB
+#      (04_mender_setup_env_functions_grub.cfg, mender_load_env_with_rollback: "Booting
+#      new update..." sets bootcount=1; any other value with upgrade_available=1 rolls
+#      back) and U-Boot (generic bootcount_inc on every boot with bootlimit=1 from
+#      0001-Generic-boot-code-for-Mender.patch; a trial boot shows bootcount=1, a second
+#      boot would exceed the limit and run mender_altbootcmd). So upgrade_available=1 with
+#      bootcount=0 means "installed, waiting for the agent's own reboot": do nothing. An
+#      absent or non-numeric bootcount is "cannot tell": do nothing, loudly.
+#  (b) the trial marker. otapulse-bl-clock-wait (ordered before the agent) records, in
+#      /run, the boot_id and the active slot (mender_boot_part) when it sees
+#      upgrade_available=1 at boot. The deadline acts only on a boot that has the marker,
+#      whose boot_id matches and whose active slot is still the marker's slot. A commit
+#      followed by a NEW install in the same boot writes a different mender_boot_part and
+#      so stands the deadline down (the native otapulse-boot-deadline does the same with
+#      the inode:mtime of its flag file). No marker (clock-wait did not run, the
+#      environment was unreadable at boot): no action, the kernel-panic path still works.
+
+TRIAL_WHY=""
+
+is_uint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# trial_check <need_marker 0|1>, after a successful read_env with upgrade_available=1.
+# Returns 0 = this is a trial boot, may act; 1 = not a trial boot (TRIAL_WHY, info level);
+# 2 = cannot tell (TRIAL_WHY, error level). Never reboots by itself.
+trial_check() {
+    if ! is_uint "$BL_BOOTCOUNT"; then
+        TRIAL_WHY="bootcount is '${BL_BOOTCOUNT}' (absent or not a number), so it cannot be told whether the update was tried yet"
+        return 2
+    fi
+    if [ "$BL_BOOTCOUNT" -eq 0 ]; then
+        TRIAL_WHY="upgrade_available=1 with bootcount=0: an update is installed and waiting for the agent's own reboot, the bootloader has not tried it yet"
+        return 1
+    fi
+    [ "$1" = "1" ] || return 0
+    if [ ! -f "$TRIAL" ]; then
+        TRIAL_WHY="no trial-boot marker ($TRIAL): this boot did not start as an update trial (or the environment was unreadable at boot)"
+        return 1
+    fi
+    _cur=$(tr -d '[:space:]' < "$BOOT_ID_FILE" 2>/dev/null)
+    if [ -z "$_cur" ]; then
+        TRIAL_WHY="cannot read the boot id from $BOOT_ID_FILE"
+        return 2
+    fi
+    _m_id=$(kv_get "$(cat "$TRIAL" 2>/dev/null)" boot_id | tr -d '[:space:]')
+    _m_slot=$(kv_get "$(cat "$TRIAL" 2>/dev/null)" slot | tr -d '[:space:]')
+    if [ "$_m_id" != "$_cur" ]; then
+        TRIAL_WHY="the trial-boot marker belongs to another boot (${_m_id:-?} != $_cur)"
+        return 1
+    fi
+    if [ -z "$_m_slot" ] || [ -z "$BL_SLOT" ]; then
+        TRIAL_WHY="the active slot is unknown (marker '${_m_slot}', environment '${BL_SLOT}')"
+        return 2
+    fi
+    if [ "$_m_slot" != "$BL_SLOT" ]; then
+        TRIAL_WHY="the bootloader's active slot changed since this boot started ($_m_slot -> $BL_SLOT): a new install after a commit, not this boot's trial"
+        return 1
+    fi
+    return 0
+}
+
+# write_trial_marker: called by clock-wait when the environment says upgrade_available=1
+# with bootcount>=1 at boot. First writer wins: a manual restart of the unit later in the
+# same boot (after a commit and a new install) must not re-arm the deadline.
+write_trial_marker() {
+    is_uint "$BL_BOOTCOUNT" && [ "$BL_BOOTCOUNT" -ge 1 ] || {
+        warn "clock wait: upgrade_available=1 but bootcount='${BL_BOOTCOUNT}': not a trial boot, no deadline marker written"
+        return 0
+    }
+    [ -n "$BL_SLOT" ] || { warn "clock wait: active slot unknown, no deadline marker written (the boot deadline will not act on this boot)"; return 0; }
+    _cur=$(tr -d '[:space:]' < "$BOOT_ID_FILE" 2>/dev/null)
+    [ -n "$_cur" ] || { warn "clock wait: cannot read the boot id, no deadline marker written"; return 0; }
+    if [ -f "$TRIAL" ] && [ "$(kv_get "$(cat "$TRIAL" 2>/dev/null)" boot_id | tr -d '[:space:]')" = "$_cur" ]; then
+        return 0
+    fi
+    _tmp="$RUN_DIR/.bl-trial-boot.$$"
+    if mkdir -p "$RUN_DIR" 2>/dev/null && printf 'boot_id=%s\nslot=%s\n' "$_cur" "$BL_SLOT" > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$TRIAL" 2>/dev/null; then
+        info "clock wait: this boot is the trial boot of an update (slot $BL_SLOT, bootcount $BL_BOOTCOUNT): boot deadline armed"
+    else
+        rm -f "$_tmp" 2>/dev/null
+        warn "clock wait: cannot write $TRIAL (the boot deadline will not act on this boot)"
+    fi
+}
+
+# ---- reboot -----------------------------------------------------------------------
+
+# Graceful first, then forced, then the kernel directly (the same ladder
+# otapulse-boot-deadline and socmond-watchdog end in). Each step is time-bounded so a
+# hung userspace cannot stall the escalation. A plain reboot, never a one-shot.
+do_reboot() {
+    mkdir -p "$RUN_DIR" 2>/dev/null && : > "$MARKER" 2>/dev/null || true
+    sync
+    if bounded 60 systemctl reboot 2>/dev/null; then
+        return 0
+    fi
+    warn "systemctl reboot failed - forcing"
+    bounded 60 reboot -f 2>/dev/null
+    sync
+    echo b > "$SYSRQ" 2>/dev/null
+    return 1
+}
+
+# guarded_reboot <reason> <persist-required 0|1> <marker-required 0|1>: apply the guards,
+# re-read the environment, reboot. Returns 0 when it rebooted or deliberately did not.
+guarded_reboot() {
+    _reason=$1; _need_persist=$2; _need_marker=$3
+    if [ -e "$MARKER" ]; then
+        err "$_reason: a guard reboot was already issued this boot - not issuing another"
+        return 0
+    fi
+    if state_usable; then
+        _n=$(counter_get)
+        if [ "$_n" = "bad" ]; then
+            err "$_reason: $COUNTER is corrupt - not rebooting (treating the budget as spent); it is cleared once upgrade_available=0 is seen"
+            return 0
+        fi
+        if [ "$_n" -ge "$MAX_REBOOTS" ]; then
+            err "$_reason: $_n consecutive guard reboots did not roll the update back (limit $MAX_REBOOTS) - the bootloader is not reverting this device. NOT rebooting again; the device stays up for diagnosis. Check the bootloader environment (bootlimit, the old slot) or reflash."
+            return 0
+        fi
+        _persist=1
+    else
+        _persist=0
+        if [ "$_need_persist" = "1" ]; then
+            err "$_reason: $STATE_DIR is not writable, the reboot budget cannot be kept - not rebooting immediately (the boot deadline still applies)"
+            return 0
+        fi
+        warn "$_reason: $STATE_DIR is not writable, the reboot budget cannot be kept (this boot is still limited to one guard reboot)"
+    fi
+    # The agent may have committed while the checks above ran.
+    if ! read_env; then
+        err "$_reason: bootloader environment unreadable on the final check ($BL_WHY) - NOT rebooting"
+        return 3
+    fi
+    if [ "$BL_UA" != "1" ]; then
+        info "$_reason: upgrade_available=$BL_UA on the final check - the update was committed in the meantime, not rebooting"
+        [ "$BL_UA" = "0" ] && counter_clear
+        return 0
+    fi
+    trial_check "$_need_marker"
+    case $? in
+        1) info "$_reason: $TRIAL_WHY - not rebooting"; return 0 ;;
+        2) err "$_reason: $TRIAL_WHY - NOT rebooting"; return 3 ;;
+    esac
+    if [ "$_persist" = "1" ]; then
+        if ! counter_set $((_n + 1)); then
+            if [ "$_need_persist" = "1" ]; then
+                err "$_reason: cannot write $COUNTER - not rebooting immediately"
+                return 0
+            fi
+            warn "$_reason: cannot write $COUNTER"
+        fi
+        _used=" (guard reboot $((_n + 1)) of $MAX_REBOOTS)"
+    else
+        _used=""
+    fi
+    err "$_reason: upgrade_available=1 [$BL_KIND, bootcount=${BL_BOOTCOUNT:-?}] - rebooting so the bootloader can roll the update back$_used"
+    do_reboot
+}
+
+# ---- sub-commands -----------------------------------------------------------------
+
+uptime_s() {
+    _u=$(cut -d. -f1 "$UPTIME_FILE" 2>/dev/null | tr -d '[:space:]')
+    case "$_u" in
+        ''|*[!0-9]*) echo "" ;;
+        *) echo "$_u" ;;
+    esac
+}
+
+cmd_deadline() {
+    if ! read_env; then
+        err "boot deadline: cannot read the bootloader environment ($BL_WHY) - NOT rebooting (an unreadable environment is not evidence of a pending update)"
+        return 3
+    fi
+    if [ "$BL_UA" = "0" ]; then
+        counter_clear
+        info "boot deadline: upgrade_available=0 [$BL_KIND] - nothing pending, no-op"
+        return 0
+    fi
+    _up=$(uptime_s)
+    if [ -z "$_up" ]; then
+        err "boot deadline: cannot read the uptime from $UPTIME_FILE - NOT rebooting"
+        return 3
+    fi
+    if [ "$_up" -lt "$DEADLINE_S" ]; then
+        info "boot deadline: upgrade_available=1 [$BL_KIND] but uptime ${_up}s < ${DEADLINE_S}s - not yet, no-op"
+        return 0
+    fi
+    trial_check 1
+    case $? in
+        1) info "boot deadline: upgrade_available=1 [$BL_KIND] and uptime ${_up}s >= ${DEADLINE_S}s, but $TRIAL_WHY - not acting"; return 0 ;;
+        2) err "boot deadline: $TRIAL_WHY - NOT rebooting"; return 3 ;;
+    esac
+    guarded_reboot "boot deadline (uptime ${_up}s >= ${DEADLINE_S}s, update never committed)" 0 1
+}
+
+cmd_seed_failed() {
+    err "otapulse-data-seed failed, so soc-ota-agent will not start on this boot (journalctl -u otapulse-data-seed)"
+    if ! read_env; then
+        err "seed failure: cannot read the bootloader environment ($BL_WHY) - NOT rebooting"
+        return 3
+    fi
+    if [ "$BL_UA" = "0" ]; then
+        err "seed failure on a committed slot (upgrade_available=0 [$BL_KIND]): a reboot cannot fix it and would loop - NOT rebooting. The agent stays down until the /data device type is fixed."
+        return 0
+    fi
+    guarded_reboot "seed failure on an uncommitted update" 1 0
+}
+
+cmd_clock_wait() {
+    # Only a boot that still has an update to commit needs a synced clock: the
+    # agent's pre-commit status report is a TLS call, and a not-yet-valid
+    # certificate there counts against the commit's retry budget and can force a
+    # spurious rollback (BUG-432 / BUG-441). Any other boot makes its first TLS
+    # call under the agent's ordinary retries.
+    if read_env; then
+        if [ "$BL_UA" = "0" ]; then
+            counter_clear
+            info "clock wait: upgrade_available=0 [$BL_KIND] - no update to commit, not waiting"
+            return 0
+        fi
+        # Arm the boot deadline FIRST: whatever the clock wait does next (timeout,
+        # no timedatectl, killed) this boot stays covered.
+        write_trial_marker
+    else
+        warn "clock wait: cannot read the bootloader environment ($BL_WHY) - waiting for the clock anyway; no deadline marker is written, so the boot deadline will not act on this boot"
+    fi
+    if ! command -v timedatectl >/dev/null 2>&1; then
+        warn "clock wait: timedatectl not installed - cannot wait for the clock, continuing"
+        return 0
+    fi
+    _w=0
+    _synced="no"
+    while [ "$_w" -lt "$CLOCK_WAIT_S" ]; do
+        _synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+        [ "$_synced" = "yes" ] && break
+        sleep 1
+        _w=$((_w + 1))
+    done
+    if [ "$_synced" = "yes" ]; then
+        info "clock wait: clock NTP-synced after ${_w}s (update pending, BUG-432/BUG-441)"
+    else
+        warn "clock wait: clock still not NTP-synced after ${_w}s - starting the agent anyway (a commit may hit a certificate-not-yet-valid retry)"
+    fi
+    return 0
+}
+
+cmd_status() {
+    if read_env; then
+        echo "kind=$BL_KIND upgrade_available=$BL_UA bootcount=${BL_BOOTCOUNT:-?} slot=${BL_SLOT:-?} trial_marker=$([ -f "$TRIAL" ] && echo set || echo clear)"
+    else
+        echo "kind=${BL_KIND:-none} upgrade_available=UNREADABLE why=$BL_WHY"
+    fi
+    echo "uptime_s=$(uptime_s) deadline_s=$DEADLINE_S"
+    echo "reboot_budget=$(counter_get)/$MAX_REBOOTS marker=$([ -e "$MARKER" ] && echo set || echo clear)"
+}
+
+case "${1:-}" in
+    deadline)    cmd_deadline ;;
+    seed-failed) cmd_seed_failed ;;
+    clock-wait)  cmd_clock_wait ;;
+    status)      cmd_status ;;
+    *) echo "usage: $0 deadline|seed-failed|clock-wait|status" >&2; exit 2 ;;
+esac

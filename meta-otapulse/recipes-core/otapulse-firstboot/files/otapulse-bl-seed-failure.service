@@ -1,0 +1,17 @@
+[Unit]
+Description=OTA-Pulse reboot-for-rollback after a failed data seed (bootloader mode)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+# Started ONLY by OnFailure= of otapulse-data-seed.service (no [Install] section).
+# soc-ota-agent.service Requires= the seed unit, so a seed failure keeps the agent
+# from starting. If that boot is an uncommitted update (upgrade_available=1) nothing
+# would ever commit or reboot it, so this unit reboots at once and lets the
+# bootloader's boot counting roll the update back; on a committed slot it only logs
+# loudly (a reboot cannot fix it). See otapulse-bl-guard.
+After=data.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/otapulse-bl-guard seed-failed
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=240

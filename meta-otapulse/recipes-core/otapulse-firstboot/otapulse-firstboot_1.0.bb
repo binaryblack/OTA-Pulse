@@ -126,9 +126,8 @@ FILES:${PN} = " \
 #     otapulse-boot-deadline(.service/.timer)
 #                                         armed by boot-health; the userspace
 #                                         deadline of bootloader mode is a
-#                                         separate unit (TASK-S109-011: ADD ITS
-#                                         FILES TO THE LISTS BELOW, do not
-#                                         re-enable the native ones).
+#                                         separate unit (otapulse-bl-*, below),
+#                                         the native ones are never re-enabled.
 #     99-otapulse-bsp-aliases.rules       aliases Tegra/MBR labels into the
 #                                         native by-partlabel names.
 #   KEPT unchanged (layout independent):
@@ -138,6 +137,16 @@ FILES:${PN} = " \
 #   ADDED:
 #     otapulse-data-seed(.service)        /data/otapulse + device_type seeding
 #                                         and the device-type consistency check.
+#     otapulse-bl-guard                   the userspace half of the bootloader's
+#                                         rollback net (TASK-S109-011), one script,
+#                                         three units, all read-only on the
+#                                         bootloader environment:
+#       otapulse-bl-boot-deadline.timer/.service  reboot when upgrade_available is
+#                                         still 1 after 20 min (wedged userspace)
+#       otapulse-bl-seed-failure.service  OnFailure= of otapulse-data-seed: reboot
+#                                         at once on an uncommitted update
+#       otapulse-bl-clock-wait.service    bounded NTP wait before the agent commits
+#                                         (replaces the gated state-script wait)
 #
 # Mechanism: files are installed by the unchanged native do_install above and
 # removed again by do_install:append:otapulse-bootloader below. That keeps the
@@ -150,6 +159,11 @@ SRC_URI:append:otapulse-bootloader = " \
     file://otapulse-data-seed \
     file://otapulse-data-seed.service \
     file://10-otapulse-provision-data.conf \
+    file://otapulse-bl-guard \
+    file://otapulse-bl-boot-deadline.service \
+    file://otapulse-bl-boot-deadline.timer \
+    file://otapulse-bl-seed-failure.service \
+    file://otapulse-bl-clock-wait.service \
 "
 
 # Where the provisioning token comes from (customer variable, see
@@ -173,7 +187,8 @@ RDEPENDS:${PN}:remove:otapulse-bootloader = "gptfdisk util-linux-sfdisk"
 RDEPENDS:${PN}:append:otapulse-bootloader = " python3-json python3-netclient"
 
 SYSTEMD_SERVICE:${PN}:remove:otapulse-bootloader = "otapulse-partition-setup.service otapulse-boot-health.service otapulse-boot-deadline.timer"
-SYSTEMD_SERVICE:${PN}:append:otapulse-bootloader = " otapulse-data-seed.service"
+# otapulse-bl-seed-failure.service is static (no [Install]): started only by OnFailure=.
+SYSTEMD_SERVICE:${PN}:append:otapulse-bootloader = " otapulse-data-seed.service otapulse-bl-boot-deadline.timer otapulse-bl-clock-wait.service"
 
 FILES:${PN}:remove:otapulse-bootloader = " \
     ${bindir}/otapulse-partition-setup \
@@ -189,6 +204,11 @@ FILES:${PN}:append:otapulse-bootloader = " \
     ${bindir}/otapulse-data-seed \
     ${systemd_system_unitdir}/otapulse-data-seed.service \
     ${systemd_system_unitdir}/otapulse-auto-provision.service.d \
+    ${bindir}/otapulse-bl-guard \
+    ${systemd_system_unitdir}/otapulse-bl-boot-deadline.service \
+    ${systemd_system_unitdir}/otapulse-bl-boot-deadline.timer \
+    ${systemd_system_unitdir}/otapulse-bl-seed-failure.service \
+    ${systemd_system_unitdir}/otapulse-bl-clock-wait.service \
 "
 
 do_install:append:otapulse-bootloader() {
@@ -203,6 +223,13 @@ do_install:append:otapulse-bootloader() {
 
     install -m 0755 ${WORKDIR}/otapulse-data-seed ${D}${bindir}/otapulse-data-seed
     install -m 0644 ${WORKDIR}/otapulse-data-seed.service ${D}${systemd_system_unitdir}/otapulse-data-seed.service
+
+    # TASK-S109-011: the userspace half of the bootloader's rollback net.
+    install -m 0755 ${WORKDIR}/otapulse-bl-guard ${D}${bindir}/otapulse-bl-guard
+    for u in otapulse-bl-boot-deadline.service otapulse-bl-boot-deadline.timer \
+             otapulse-bl-seed-failure.service otapulse-bl-clock-wait.service; do
+        install -m 0644 ${WORKDIR}/$u ${D}${systemd_system_unitdir}/$u
+    done
 
     # OTAPULSE_PROVISIONING_MODE = "manual": the token is read from /data (see the drop-in).
     if [ "${OTAPULSE_PROVISIONING_MODE}" = "manual" ]; then

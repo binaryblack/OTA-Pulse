@@ -1,0 +1,31 @@
+[Unit]
+Description=OTA-Pulse pending-update boot deadline (bootloader mode)
+Documentation=https://github.com/binaryblack/OTA-Pulse
+
+[Timer]
+# Installed ONLY in bootloader compatibility mode (TODO-157 / S109-011); the native
+# otapulse-boot-deadline.timer is not installed there. See otapulse-bl-guard.
+#
+# 20 minutes from kernel start (monotonic, unaffected by NTP steps). The service is
+# a no-op unless the bootloader environment still says upgrade_available=1, i.e. the
+# agent never committed the update, so on every healthy boot this timer fires into
+# nothing. It fires once per boot (OnBootSec), which is also the reboot-storm bound.
+#
+# 1200 s: before it commits, a healthy pending boot spends up to ~120 s on time
+# sync, the bounded clock wait (otapulse-bl-clock-wait, 60 s) and up to 4 x 30 s of
+# pre-commit status-report retries. State scripts are no-ops in bootloader mode.
+#
+# pause_before_committing: an update control map that pauses the agent before
+# commit for longer than this would be turned into a reboot (and so, eventually, a
+# rollback). No server emits one today; raise this, or disable the timer, before
+# introducing one.
+#
+# Worst case to roll back a wedged update: the deadline plus one boot per
+# bootloader attempt (U-Boot bootlimit=1 in the board support: the first deadline
+# reboot is the second boot, which the bootloader reverts).
+OnBootSec=1200
+AccuracySec=1s
+Unit=otapulse-bl-boot-deadline.service
+
+[Install]
+WantedBy=timers.target

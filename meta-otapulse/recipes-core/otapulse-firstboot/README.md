@@ -131,12 +131,44 @@ this package installs only the parts that do not depend on the native layout:
 |-----------|---------------|
 | `otapulse-auto-provision` (credentials, tunnel credential) | `otapulse-partition-setup` |
 | `otapulse-machine-id` (persistent machine-id and NIC MAC on `/data`) | `otapulse-boot-health` |
-| `otapulse-data-seed` (`/data/otapulse`, `device_type`; fails loudly on a device-type mismatch) | `otapulse-boot-deadline` (the bootloader-mode deadline is a separate unit) |
-| | the native udev partition-label aliases |
+| `otapulse-data-seed` (`/data/otapulse`, `device_type`; fails loudly on a device-type mismatch) | `otapulse-boot-deadline` (replaced by `otapulse-bl-boot-deadline`, below) |
+| `otapulse-bl-guard` + `otapulse-bl-boot-deadline.timer/.service`, `otapulse-bl-seed-failure.service`, `otapulse-bl-clock-wait.service` (below) | the native udev partition-label aliases |
 
 `otapulse-growfs-data` (a separate recipe, pulled in by `soc-ota-agent`) grows the
 `/data` partition and file system to the storage medium. The native files are removed
 by `do_install:append:otapulse-bootloader`; the native task bodies are untouched.
+
+### Userspace half of the bootloader rollback net (`otapulse-bl-guard`)
+
+The bootloader counts boots while `upgrade_available=1` and rolls back at its limit, but only a
+device that RESETS gets counted. These bootloader-mode-only units close the userspace gaps. They
+only ever READ the bootloader environment (`fw_printenv` on U-Boot, `grub-editenv` on GRUB, with
+the same copy-selection rule as the test framework) and never write it.
+
+| Unit | What it does |
+|------|--------------|
+| `otapulse-bl-boot-deadline.timer` (20 min after boot) | Reboots when the environment still says `upgrade_available=1` on the TRIAL boot of an update: a wedged userspace that never committed. It never acts on a device that has only been told to reboot into an update (`upgrade_available=1` with `bootcount=0`, written by the agent before its own reboot), and only on a boot that `otapulse-bl-clock-wait` marked as a trial boot (boot id and active slot recorded in `/run`). |
+| `otapulse-bl-seed-failure.service` (`OnFailure=` of `otapulse-data-seed`) | The agent cannot start after a failed seed. On an uncommitted update: reboot at once. On a committed slot: loud log, no reboot. |
+| `otapulse-bl-clock-wait.service` (`Before=soc-ota-agent.service`) | Bounded (60 s) wait for an NTP-synced clock while an update is pending, so the agent's pre-commit TLS report does not hit a not-yet-valid certificate on boards without an RTC. Never blocks the agent. |
+
+An unreadable environment never reboots (it is not evidence of a pending update); it logs at error
+level and the deadline unit fails visibly. A budget of 5 consecutive guard reboots, kept in
+`/data/otapulse/bl-guard-reboots` and cleared on the first `upgrade_available=0`, stops a device
+whose rollback is impossible from rebooting forever. The decision table is in the header of
+`files/otapulse-bl-guard`.
+
+Known gaps (also listed in that header):
+
+- A `/data` mount failure is NOT covered by the deadline. On U-Boot the environment config points
+  into `/data/u-boot`, so the environment is unreadable (fail-safe: no reboot). `/data` is a plain
+  fstab mount without `nofail`, so the system most likely drops to `emergency.target`, where timers
+  do not run. Only the kernel-panic path and a hardware watchdog help there.
+- With rollback impossible and `/data` not writable there is no persistent budget: the deadline
+  then reboots once per boot, about every 20 minutes, indefinitely.
+- `pause_before_committing`: an update control map that pauses the agent before the commit for longer
+  than the deadline is turned into a reboot (and eventually a rollback). No server emits one today;
+  raise `OnBootSec` or disable the timer before introducing one.
+- A trial boot whose environment is unreadable at boot gets no marker, so the deadline does not act on it.
 
 ## Cross-Platform Support
 
