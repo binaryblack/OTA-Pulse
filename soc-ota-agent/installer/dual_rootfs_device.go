@@ -47,7 +47,39 @@ type dualRootfsDeviceImpl struct {
 	system.Commander
 	*partitions
 	rebooter systemRebooter
+	// bootloaderMode is true when conf BootEnvMode is "bootloader" (set via
+	// WithBootloaderMode). The bootloader (U-Boot altbootcmd / GRUB grubenv)
+	// then owns the slot switch and the rollback: the standard boot variables
+	// are still written through BootEnvReadWriter, exactly as upstream does,
+	// but the native switch-boot-slot.sh is never run and the in-agent
+	// boot-count fallback never clears the flags. false (the zero value) is
+	// the unchanged native/file mode.
+	bootloaderMode bool
 }
+
+// DualRootfsDeviceOption customises NewDualRootfsDevice. No option means the
+// native/file behaviour that every pre-existing caller relies on.
+type DualRootfsDeviceOption func(*dualRootfsDeviceImpl)
+
+// WithBootloaderMode selects BootEnvMode "bootloader" semantics: skip the
+// native switch-boot-slot.sh in InstallUpdate and Rollback and leave
+// upgrade_available / bootcount alone in HandleBootCountFallback, because the
+// bootloader owns the slot flip and the rollback.
+func WithBootloaderMode() DualRootfsDeviceOption {
+	return func(d *dualRootfsDeviceImpl) { d.bootloaderMode = true }
+}
+
+// IsBootloaderMode reports whether the device was built WithBootloaderMode.
+// It is on the concrete type, not on DualRootfsDevice, so no fake of that
+// interface has to change; callers reach it by type assertion.
+func (d *dualRootfsDeviceImpl) IsBootloaderMode() bool {
+	return d.bootloaderMode
+}
+
+// switchBootSlotScriptPath is the native slot-switch helper. A variable (not a
+// constant) only so tests can point it at a recording fake; production never
+// changes it.
+var switchBootSlotScriptPath = "/usr/sbin/switch-boot-slot.sh"
 
 // systemRebooter is what dualRootfsDeviceImpl needs from
 // system.SystemRebootCmd — an interface so tests can substitute a recording
@@ -95,6 +127,7 @@ func NewDualRootfsDevice(
 	env BootEnvReadWriter,
 	sc system.StatCommander,
 	config conf.DualRootfsDeviceConfig,
+	opts ...DualRootfsDeviceOption,
 ) DualRootfsDevice {
 	if config.RootfsPartA == "" || config.RootfsPartB == "" {
 		return nil
@@ -113,6 +146,9 @@ func NewDualRootfsDevice(
 		Commander:         sc,
 		partitions:        &partitions,
 		rebooter:          system.NewSystemRebootCmd(sc),
+	}
+	for _, opt := range opts {
+		opt(&dualRootfsDevice)
 	}
 	return &dualRootfsDevice
 }
@@ -220,13 +256,20 @@ func (d *dualRootfsDeviceImpl) Rollback() error {
 	// upgrade_available=0. Re-invoke the same script so the bootloader
 	// config actually reverts to match. Do not swallow a failure here:
 	// this is the last-resort safety path for an already-failed install.
-	if err := d.switchBootSlot(nextPartition); err != nil {
-		log.Errorf(
-			"switchBootSlot failed during Rollback for partition %s: %v — "+
-				"bootloader config may still point at the failed slot",
-			nextPartition, err,
-		)
-		return errors.Wrap(err, "failed to switch boot slot via switch-boot-slot.sh during rollback")
+	//
+	// Bootloader mode (BootEnvMode "bootloader"): the bootloader reads
+	// mender_boot_part itself, and the WriteEnv above already points it back at
+	// nextPartition with upgrade_available=0 — the complete upstream rollback.
+	// The native switch-boot-slot.sh must never run there.
+	if !d.bootloaderMode {
+		if err := d.switchBootSlot(nextPartition); err != nil {
+			log.Errorf(
+				"switchBootSlot failed during Rollback for partition %s: %v — "+
+					"bootloader config may still point at the failed slot",
+				nextPartition, err,
+			)
+			return errors.Wrap(err, "failed to switch boot slot via switch-boot-slot.sh during rollback")
+		}
 	}
 
 	return nil
@@ -431,12 +474,19 @@ func (d *dualRootfsDeviceImpl) InstallUpdate() error {
 	// leave upgrade_available=1 set while the boot slot was never switched,
 	// causing the device to reboot expecting an update that never landed.
 	// So: clear upgrade_available and fail the install.
-	if err := d.switchBootSlot(inactivePartition); err != nil {
-		log.Errorf("switchBootSlot failed for partition %s: %v — clearing upgrade_available", inactivePartition, err)
-		if clearErr := d.WriteEnv(BootVars{"upgrade_available": "0"}); clearErr != nil {
-			log.Errorf("Failed to clear upgrade_available after switchBootSlot failure: %v", clearErr)
+	//
+	// Bootloader mode (BootEnvMode "bootloader"): skipped entirely. The
+	// WriteEnv above (mender_boot_part, upgrade_available=1, bootcount=0) is
+	// the whole slot switch, as in upstream; the bootloader boots whatever
+	// mender_boot_part names and its altbootcmd/grubenv owns the revert.
+	if !d.bootloaderMode {
+		if err := d.switchBootSlot(inactivePartition); err != nil {
+			log.Errorf("switchBootSlot failed for partition %s: %v — clearing upgrade_available", inactivePartition, err)
+			if clearErr := d.WriteEnv(BootVars{"upgrade_available": "0"}); clearErr != nil {
+				log.Errorf("Failed to clear upgrade_available after switchBootSlot failure: %v", clearErr)
+			}
+			return errors.Wrap(err, "failed to switch boot slot via switch-boot-slot.sh")
 		}
-		return errors.Wrap(err, "failed to switch boot slot via switch-boot-slot.sh")
 	}
 
 	return nil
@@ -445,7 +495,7 @@ func (d *dualRootfsDeviceImpl) InstallUpdate() error {
 // switchBootSlot calls the switch-boot-slot.sh script to update bootloader configuration.
 // This is necessary for platforms like Rockchip that use PARTUUID swapping.
 func (d *dualRootfsDeviceImpl) switchBootSlot(partitionNumber string) error {
-	const switchBootSlotScript = "/usr/sbin/switch-boot-slot.sh"
+	switchBootSlotScript := switchBootSlotScriptPath
 
 	log.Infof("switchBootSlot called with partition number: %s", partitionNumber)
 
@@ -550,6 +600,16 @@ const (
 // Hardware and architecture independent: works through the BootEnvReadWriter
 // interface regardless of whether U-Boot env or file-based env is in use.
 func (d *dualRootfsDeviceImpl) HandleBootCountFallback() {
+	// Bootloader mode (BootEnvMode "bootloader"): U-Boot altbootcmd / grubenv
+	// owns the retry budget (bootlimit, typically 1) and the revert, and it
+	// is unrelated to DefaultMaxBootRetries. Clearing upgrade_available /
+	// bootcount here would disarm the bootloader's own net mid-flight, so
+	// this must neither clear flags nor revert, whatever bootcount says.
+	if d.bootloaderMode {
+		log.Debug("HandleBootCountFallback: bootloader mode, the bootloader owns boot-count rollback — nothing to do")
+		return
+	}
+
 	env, err := d.ReadEnv("upgrade_available", "bootcount")
 	if err != nil {
 		log.Warnf("HandleBootCountFallback: cannot read boot env: %v", err)

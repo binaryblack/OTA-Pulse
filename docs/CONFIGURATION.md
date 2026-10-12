@@ -36,6 +36,7 @@ Configuration file: `/etc/otapulse/otapulse.conf`
 | `StateScriptTimeoutSeconds` | int | 0 | State script timeout |
 | `ModuleTimeoutSeconds` | int | 0 | Update module timeout |
 | `UseFileBasedBootEnv` | bool | false | Use file-based boot env instead of U-Boot |
+| `BootEnvMode` | string | `file` | `file` (or absent): current behaviour, i.e. `UseFileBasedBootEnv`, otherwise try the bootloader environment and silently fall back to the file-based one. `bootloader`: the board's bootloader owns the boot flag. The agent uses the bootloader environment (GRUB, systemd-boot or U-Boot tools) and refuses to start or install if `mender_boot_part` cannot be read, if `/etc/fw_env.config` is missing or empty on a U-Boot board with no GRUB/systemd-boot tool, or if `RootfsPartA`/`RootfsPartB` are unset. It never falls back to the file-based environment. `bootloader` together with `UseFileBasedBootEnv: true` is a configuration error. Any other value is rejected |
 | `Servers` | []object | - | Server list for failover (mutually exclusive with ServerURL) |
 | `RootfsPartA` | string | auto | Primary rootfs partition |
 | `RootfsPartB` | string | auto | Secondary rootfs partition |

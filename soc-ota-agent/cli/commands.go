@@ -189,7 +189,8 @@ func initBootloaderDualRootfsDevice(
 	if err != nil {
 		return nil, err
 	}
-	dualRootfsDevice := installer.NewDualRootfsDevice(env, sc, deviceConfig)
+	dualRootfsDevice := installer.NewDualRootfsDevice(env, sc, deviceConfig,
+		installer.WithBootloaderMode())
 	if dualRootfsDevice == nil {
 		return nil, errors.New("BootEnvMode \"bootloader\": could not create the " +
 			"dual rootfs device")
