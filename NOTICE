@@ -46,6 +46,38 @@ vendored Mender-originated modules:
   github.com/mendersoftware/progressbar       Apache-2.0
 
 --------------------------------------------------------------------------
+Vendored Yocto layers (meta-otapulse-bsp)
+--------------------------------------------------------------------------
+
+meta-otapulse-bsp/ contains unmodified copies of the following upstream
+Yocto layers, used for OTA-Pulse bootloader compatibility mode. Each
+directory carries its own LICENSE and an UPSTREAM file recording the
+upstream URL and exact commit; ota-pulse/mender-upstream.lock lists all of
+them with content hashes.
+
+  meta-mender-core                    Apache-2.0   Copyright Northern.tech AS
+  meta-mender-qemu                    Apache-2.0   Copyright Northern.tech AS
+    (github.com/mendersoftware/meta-mender, tag scarthgap-v2026.09)
+  meta-mender-raspberrypi             Apache-2.0   Copyright Northern.tech AS
+  meta-mender-nxp                     Apache-2.0   Copyright Northern.tech AS
+    (github.com/mendersoftware/meta-mender-community, commit 57f10880a166)
+  grub-mender-grubenv                 Apache-2.0   Copyright Northern.tech AS
+    (github.com/mendersoftware/grub-mender-grubenv, commit 6eabae13042a)
+
+These layers also contain patch files that are applied to other projects'
+source at build time. Those patches are covered by the license of the
+project they patch, not by Apache-2.0: the U-Boot patches (for example
+the Mender boot-code integration under core/recipes-bsp/u-boot/patches)
+are GPL-2.0-or-later; the GRUB patches under core/recipes-bsp/grub are
+GPL-3.0-or-later; the systemd-boot patch under core/recipes-core/systemd
+is LGPL-2.1-or-later; the rng-tools patch under qemu/recipes-support is
+GPL-2.0; and the one kernel patch under qemu/recipes-kernel/linux is
+GPL-2.0. The corresponding U-Boot, GRUB, systemd, rng-tools and kernel
+source is available from the upstream projects.
+
+The commercial Mender layer (meta-mender-commercial) is not included.
+
+--------------------------------------------------------------------------
 Device images (meta-otapulse / multiboard_yocto)
 --------------------------------------------------------------------------
 

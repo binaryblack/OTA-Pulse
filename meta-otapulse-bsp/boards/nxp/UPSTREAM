@@ -1,0 +1,12 @@
+# Vendored upstream source. DO NOT EDIT any file in this directory.
+# Local changes go in ota-pulse/patches/mender/ (TASK-S109-004).
+# Verify with: python3 ota-pulse/scripts/mender_tree_hash.py <this dir>
+# (compare with ota-pulse/mender-upstream.lock).
+component: meta-mender-nxp
+url: https://github.com/mendersoftware/meta-mender-community
+ref: branch:scarthgap
+commit: 57f10880a166ccca9b49fa451983f44e72a39561
+subpath: meta-mender-nxp
+license: Apache-2.0 (the *.patch files are under the license of the project they patch: GPL-2.0-or-later for U-Boot)
+added-file: LICENSE (copy of upstream repo-root LICENSE at the same commit; the sublayer has no LICENSE of its own)
+note: meta-mender-community has no scarthgap tags; pinned by commit SHA only

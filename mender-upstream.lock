@@ -1,0 +1,31 @@
+# mender-upstream.lock -- pinned, vendored upstream Mender board-integration layers (TASK-S109-003)
+#
+# Format: one record per line, TAB separated, no quoting. Lines starting with '#' are comments.
+#   component  url  ref  commit  subpath  vendored-dir  tree-sha256
+#   component     upstream layer name
+#   url           upstream git repository (https)
+#   ref           "tag:<tag>" or "branch:<branch>" the commit was taken from. The COMMIT is the pin;
+#                 the ref is informational (meta-mender-community has no scarthgap tags: SHA only)
+#   commit        full 40-hex upstream commit SHA
+#   subpath       directory inside the upstream repo that was vendored ("." = whole repo)
+#   vendored-dir  destination, relative to ota-pulse/
+#   tree-sha256   tree hash of vendored-dir, algorithm below
+#
+# Tree-hash algorithm v1 (implemented by scripts/mender_tree_hash.py -- the reference implementation):
+#   1. Walk vendored-dir. Skip every directory named ".git", the top-level file "UPSTREAM", and every path
+#      named on an "added-file:" line of that UPSTREAM (files we added that do not exist upstream,
+#      e.g. a copied repo-root LICENSE). Nothing else is skipped.
+#   2. Sort entries by their "/"-separated relative path as UTF-8 bytes. Directories are not listed.
+#   3. One line per entry, "\n" terminated:
+#        regular file: "F <mode> <sha256(content)> <relpath>"   mode = 755 if owner-exec bit set, else 644
+#        symlink:      "L 120000 <sha256(link target string)> <relpath>"
+#   4. tree-sha256 = lowercase hex sha256 of all those lines concatenated.
+#   The same algorithm run on the upstream <subpath> at <commit> gives the same value (added files excluded).
+#
+# Rules: never vendor meta-mender-commercial. Never edit vendored files (use patches/mender/, TASK-S109-004).
+# Re-pin only via the sync tooling (TASK-S109-004), never by hand.
+meta-mender-core	https://github.com/mendersoftware/meta-mender	tag:scarthgap-v2026.09	d996cfd2e6a74e342e6c441c4357264a190da34c	meta-mender-core	meta-otapulse-bsp/core	7ea2c394418b1b57e756fd43f3d8fa3fa353d24f8b1bc6cff1aed11dbf6ab63a
+meta-mender-qemu	https://github.com/mendersoftware/meta-mender	tag:scarthgap-v2026.09	d996cfd2e6a74e342e6c441c4357264a190da34c	meta-mender-qemu	meta-otapulse-bsp/qemu	4544cdaa99418126c9cc1248597f9bb2e77bfffb47981e25258f8b10ee9e01d2
+meta-mender-raspberrypi	https://github.com/mendersoftware/meta-mender-community	branch:scarthgap	57f10880a166ccca9b49fa451983f44e72a39561	meta-mender-raspberrypi	meta-otapulse-bsp/boards/raspberrypi	67e1605d7ed0449645e78f07aee94f478640abc1cd63f8350803a40ea90bc619
+meta-mender-nxp	https://github.com/mendersoftware/meta-mender-community	branch:scarthgap	57f10880a166ccca9b49fa451983f44e72a39561	meta-mender-nxp	meta-otapulse-bsp/boards/nxp	682b4588705c053b392561e992ea1fb86cba1ee3e1e75e1311bb88f3f5a60270
+grub-mender-grubenv	https://github.com/mendersoftware/grub-mender-grubenv	branch:master	6eabae13042a0f4128b15d9a7416cbf200f0853b	.	meta-otapulse-bsp/grub-mender-grubenv	68004fc880f96a106cb3b55552528b670794f4f2bbe48b50bc4ee427d24a3b5a

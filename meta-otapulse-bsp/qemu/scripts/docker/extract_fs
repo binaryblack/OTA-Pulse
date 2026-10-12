@@ -1,0 +1,37 @@
+#!/bin/bash
+
+set -e
+
+failure() {
+    echo "Failed!" 1>&2
+    cleanup
+    exit 1
+}
+
+trap failure ERR
+
+# Helpers from mender-convert
+disk_get_part_value() {
+    echo "$(partx -o ${3} -g -r --nr ${2} ${1})"
+}
+disk_extract_part() {
+    dd if=$1 of=$4 skip=${2}b bs=1M count=${3}b status=none iflag=count_bytes,skip_bytes
+}
+
+IMG=$(ls /${IMG_PREFIX}*img* | head -n 1)
+[[ $IMG == *gz ]] && gzip -d "$IMG"
+IMG=$(ls /${IMG_PREFIX}*img | head -n 1)
+
+# if we are given the prefix, we need to remove it.
+CLEAN_FLAGS="s/^${IMG_PREFIX}//"
+
+# if the prefix we did not get, we need to remove the default prefix
+[[ "${IMG_PREFIX}" == "" ]] && CLEAN_FLAGS="s/^clean-//"
+OUTPUT=/output/$(sed -e 's/\.[^.]*img$/.ext4/' -e "${CLEAN_FLAGS}" <<<$(basename $IMG))
+
+echo "Extracting partition 2, size: $(disk_get_part_value ${IMG} 2 SIZE)"
+echo "Extracting to ${OUTPUT}"
+disk_extract_part "${IMG}" $(disk_get_part_value ${IMG} 2 START) \
+    $(disk_get_part_value ${IMG} 2 SECTORS) ${OUTPUT}
+
+chown $(stat -c '%u:%g' /output) $OUTPUT

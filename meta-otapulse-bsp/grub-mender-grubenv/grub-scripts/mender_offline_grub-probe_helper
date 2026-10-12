@@ -1,0 +1,48 @@
+#!/bin/sh
+
+set -e
+
+DEBUG=${DEBUG:-0}
+
+. /etc/default/grub.d/00_mender_grubenv_defines.cfg
+. /etc/default/grub.d/03_mender_compute_variables.cfg
+
+if [ "$DEBUG" = 1 ]; then
+    echo "Called with arguments $@" 1>&2
+fi
+
+# If there is a `--target=partmap` argument, return "gpt" for device names.
+if echo "$@" | egrep -q ' --target=partmap| -t partmap'; then
+    if echo "$@" | egrep -q '/dev/'; then
+        echo gpt
+    fi
+    exit 0
+fi
+
+BOOT_PART_DEVICE=$("${mender_real_grub_probe}" -t device /boot/efi)
+ROOT_PART_DEVICE=$("${mender_real_grub_probe}" -t device /)
+
+# Replace grub-probe arguments with loopback device names. Also replace
+# "part-*.fs" entries, which mender-convert uses.
+ARGS="$(echo "$@" | sed -E \
+    -e "s,${mender_full_boot_part}\\b,${BOOT_PART_DEVICE},g" \
+    -e "s,${mender_full_rootfsa_part}\\b,${ROOT_PART_DEVICE},g" \
+    -e "s,[^ ]*part-1.fs,${BOOT_PART_DEVICE},g" \
+    -e "s,[^ ]*part-2.fs,${ROOT_PART_DEVICE},g")"
+
+# Replace grub-probe results with real device names.
+ret=0
+OUTPUT="$( "${mender_real_grub_probe}" $ARGS )" || ret=$?
+
+OUTPUT="$(echo "${OUTPUT}" | sed -E \
+    -e "s,${BOOT_PART_DEVICE}\\b,${mender_full_boot_part},g" \
+    -e "s,${ROOT_PART_DEVICE}\\b,${mender_full_rootfsa_part},g")"
+
+if [ "$DEBUG" = 1 ]; then
+    echo "Returning output: $OUTPUT" 1>&2
+fi
+
+echo "${OUTPUT}"
+
+# Return real exit code.
+exit $ret

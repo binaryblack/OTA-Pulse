@@ -1,0 +1,11 @@
+# Vendored upstream source. DO NOT EDIT any file in this directory.
+# Local changes go in ota-pulse/patches/mender/ (TASK-S109-004).
+# Verify with: python3 ota-pulse/scripts/mender_tree_hash.py <this dir>
+# (compare with ota-pulse/mender-upstream.lock).
+component: grub-mender-grubenv
+url: https://github.com/mendersoftware/grub-mender-grubenv
+ref: branch:master
+commit: 6eabae13042a0f4128b15d9a7416cbf200f0853b
+subpath: .
+license: Apache-2.0
+note: standalone repo, whole repo vendored (git describe 1.3.0-79-g6eabae1). Pin = GRUB_MENDER_GRUBENV_REV default in core/classes/grub-mender-grubenv.bbclass at meta-mender scarthgap-v2026.09. The precompiled-GRUB recipes in core pin other revs (2.04: eeb7ebd9e6558cf6bbe661b4f2e4e45d52efa305, 2.12: d7c3ec217e281727f56c3651799f805637cb2cda) and fetch them over the network; those are NOT vendored.

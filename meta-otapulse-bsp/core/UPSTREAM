@@ -1,0 +1,12 @@
+# Vendored upstream source. DO NOT EDIT any file in this directory.
+# Local changes go in ota-pulse/patches/mender/ (TASK-S109-004).
+# Verify with: python3 ota-pulse/scripts/mender_tree_hash.py <this dir>
+# (compare with ota-pulse/mender-upstream.lock).
+component: meta-mender-core
+url: https://github.com/mendersoftware/meta-mender
+ref: tag:scarthgap-v2026.09
+commit: d996cfd2e6a74e342e6c441c4357264a190da34c
+subpath: meta-mender-core
+license: Apache-2.0 (patch files use the license of the project they patch: U-Boot GPL-2.0-or-later; GRUB patches under recipes-bsp/grub GPL-3.0-or-later; systemd-boot patch under recipes-core/systemd LGPL-2.1-or-later; mender-client patches Apache-2.0)
+added-file: LICENSE (copy of upstream repo-root LICENSE at the same commit; meta-mender-core has no LICENSE of its own)
+note: the tag object is d9b81a701d9c55917421eaec5ab24a9ec02abcc6; meta-mender-commercial is NEVER vendored
