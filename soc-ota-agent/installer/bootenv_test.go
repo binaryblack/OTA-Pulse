@@ -200,3 +200,21 @@ func TestNoBootUtilitiesFound(t *testing.T) {
 	err = env.WriteEnv(BootVars{"mender_boot_part": "3"})
 	assert.ErrorIs(t, err, exec.ErrNotFound)
 }
+
+func TestReadCommands(t *testing.T) {
+	runner := stest.NewTestOSCalls("", 0)
+
+	// Default chain: GRUB, systemd-boot, then U-Boot (order matters, it is
+	// the order the read is attempted in).
+	assert.Equal(t,
+		[]string{"grub-mender-grubenv-print", "systemd-boot-printenv", "fw_printenv"},
+		NewEnvironment(runner, "", "").ReadCommands())
+
+	// A configured command replaces the whole chain.
+	assert.Equal(t, []string{"my-get"}, NewEnvironment(runner, "", "my-get").ReadCommands())
+
+	// The returned slice is a copy.
+	env := NewEnvironment(runner, "", "")
+	env.ReadCommands()[0] = "changed"
+	assert.Equal(t, "grub-mender-grubenv-print", env.ReadCommands()[0])
+}

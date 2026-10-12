@@ -69,6 +69,14 @@ func NewEnvironment(cmd system.Commander, setCmd, getCmd string) *UBootEnv {
 	return &env
 }
 
+// ReadCommands returns the bootloader environment read tools in the order
+// getEnvironmentVariable tries them. It lets callers (cli bootloader mode)
+// check, before running anything, which tool will really be used, without
+// duplicating the default list.
+func (e *UBootEnv) ReadCommands() []string {
+	return append([]string(nil), e.getCommand...)
+}
+
 // If "mender_check_saveenv_canary=1" exists in the environment, check that
 // "mender_saveenv_canary=1" also does. This is a way to verify that U-Boot has
 // successfully written to the environment and that the user space tools can

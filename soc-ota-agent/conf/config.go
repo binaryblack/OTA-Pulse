@@ -133,6 +133,50 @@ type MenderConfigFromFile struct {
 	// When true, boot state is stored in /data/ota/ directory.
 	// When false (default), tries U-Boot env first, falls back to file-based if it fails.
 	UseFileBasedBootEnv bool `json:",omitempty"`
+
+	// BootEnvMode selects who owns the boot-slot flag. See the BootEnvMode*
+	// constants. Empty (the default) and "file" behave exactly as before this
+	// field existed (UseFileBasedBootEnv, then bootloader probing with a silent
+	// fall back to the file-based environment). "bootloader" is for boards
+	// that use the bootloader's own A/B integration: the agent must use the
+	// bootloader environment and must refuse to run without it (it never
+	// falls back to the file-based environment). Any other value is rejected
+	// by ValidateBootEnvMode.
+	BootEnvMode string `json:",omitempty"`
+}
+
+const (
+	// BootEnvModeFile is the default mode. It is the value the agent assumes
+	// when BootEnvMode is absent or empty.
+	BootEnvModeFile = "file"
+	// BootEnvModeBootloader makes the bootloader environment mandatory.
+	BootEnvModeBootloader = "bootloader"
+)
+
+// ValidateBootEnvMode checks BootEnvMode, failing closed. It rejects:
+//   - any value other than "", "file" or "bootloader" (a typo such as
+//     "Bootloader" must not silently select file mode on a board whose
+//     bootloader owns the boot flag), and
+//   - BootEnvMode=bootloader combined with UseFileBasedBootEnv=true, which
+//     contradict each other (file-based state vs. bootloader-owned state).
+//     BootEnvMode=bootloader is only valid when UseFileBasedBootEnv is false
+//     or absent. The agent does not pick a winner, because the wrong guess
+//     would leave the boot flag in the wrong place.
+func (c *MenderConfigFromFile) ValidateBootEnvMode() error {
+	switch c.BootEnvMode {
+	case "", BootEnvModeFile:
+		return nil
+	case BootEnvModeBootloader:
+		if c.UseFileBasedBootEnv {
+			return errors.New("invalid configuration: BootEnvMode \"bootloader\" " +
+				"contradicts UseFileBasedBootEnv=true; set UseFileBasedBootEnv to false " +
+				"or remove it")
+		}
+		return nil
+	default:
+		return errors.Errorf("invalid BootEnvMode %q: must be %q or %q",
+			c.BootEnvMode, BootEnvModeFile, BootEnvModeBootloader)
+	}
 }
 
 type MenderConfig struct {
@@ -232,6 +276,10 @@ func redactedForLog(c *MenderConfig) MenderConfig {
 
 // Validate verifies the Servers fields in the configuration
 func (c *MenderConfig) Validate() error {
+	if err := c.ValidateBootEnvMode(); err != nil {
+		return err
+	}
+
 	if c.Servers == nil {
 		if c.ServerURL == "" {
 			log.Warn("No server URL(s) specified in OTAPulse configuration.")

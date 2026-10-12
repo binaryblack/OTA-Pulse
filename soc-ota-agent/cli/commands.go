@@ -19,8 +19,10 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -142,6 +144,128 @@ func initDualRootfsDevice(config *conf.MenderConfig) installer.DualRootfsDevice 
 	return dualRootfsDevice
 }
 
+// initDualRootfsDeviceChecked is the entry point production code uses to build
+// the dual-rootfs device. It exists because initDualRootfsDevice cannot report
+// failure: it returns nil for "no dual rootfs configuration", and every caller
+// reads nil as "run without a rootfs installer", which is the right answer for
+// a board with no RootfsPartA/B but the WRONG answer for a board whose
+// bootloader owns the boot flag and whose environment cannot be read.
+//
+//   - BootEnvMode "" or "file": the result of initDualRootfsDevice, unchanged
+//     (UseFileBasedBootEnv, BUG-178 guard, silent fall back to file mode), and
+//     a nil error. initDualRootfsDevice must only be reached through here.
+//   - BootEnvMode "bootloader": the bootloader environment, or an error. The
+//     error means the agent must refuse to start / install. There is no file
+//     fallback and no "nil device" outcome in this mode.
+//   - Any other BootEnvMode: an error (fail closed; also checked by
+//     conf.MenderConfig.Validate, repeated here for callers that skip it).
+func initDualRootfsDeviceChecked(config *conf.MenderConfig) (installer.DualRootfsDevice, error) {
+	if err := config.ValidateBootEnvMode(); err != nil {
+		return nil, err
+	}
+	if config.BootEnvMode != conf.BootEnvModeBootloader {
+		return initDualRootfsDevice(config), nil
+	}
+	return initBootloaderDualRootfsDevice(config, new(system.OsCalls),
+		fwEnvConfigPath, exec.LookPath)
+}
+
+// initBootloaderDualRootfsDevice builds the dual-rootfs device for
+// BootEnvMode=bootloader. sc, fwEnvPath and lookPath are injected so tests
+// never run the host's real fw_printenv.
+func initBootloaderDualRootfsDevice(
+	config *conf.MenderConfig,
+	sc system.StatCommander,
+	fwEnvPath string,
+	lookPath func(string) (string, error),
+) (installer.DualRootfsDevice, error) {
+	deviceConfig := config.GetDeviceConfig()
+	if deviceConfig.RootfsPartA == "" || deviceConfig.RootfsPartB == "" {
+		// NewDualRootfsDevice would return nil ("no dual rootfs") here.
+		return nil, errors.New("BootEnvMode \"bootloader\" requires RootfsPartA " +
+			"and RootfsPartB to be configured")
+	}
+	env, err := selectBootloaderEnv(config, sc, fwEnvPath, lookPath)
+	if err != nil {
+		return nil, err
+	}
+	dualRootfsDevice := installer.NewDualRootfsDevice(env, sc, deviceConfig)
+	if dualRootfsDevice == nil {
+		return nil, errors.New("BootEnvMode \"bootloader\": could not create the " +
+			"dual rootfs device")
+	}
+	// Same diagnostic as file mode; an unreadable active partition is not
+	// made fatal here, because it already fails every install in GetInactive.
+	if ap, err := dualRootfsDevice.GetActive(); err != nil {
+		log.Errorf("Failed to read the current active partition: %s", err.Error())
+	} else {
+		log.Infof("OTAPulse running on partition: %s", ap)
+	}
+	return dualRootfsDevice, nil
+}
+
+// selectBootloaderEnv returns the bootloader environment for
+// BootEnvMode=bootloader, or an error. On boards whose bootloader (U-Boot or
+// GRUB) owns the boot-slot flag, silently using the file-based environment
+// would leave that flag untouched and let an install write the slot the
+// bootloader does not boot. So it fails in every case file mode would have
+// fallen back:
+//
+//  1. no read tool is installed;
+//  2. the tool that would be used is fw_printenv and fw_env.config has no
+//     active entries (checked before running it: fw_printenv crashes on an
+//     empty config, BUG-178). When a GRUB/systemd-boot read tool is present
+//     it is used first and fw_env.config is not required;
+//  3. mender_boot_part cannot be read (tool exits non-zero, canary check
+//     fails, output unparsable) or is empty / not set.
+func selectBootloaderEnv(
+	config *conf.MenderConfig,
+	cmd system.Commander,
+	fwEnvPath string,
+	lookPath func(string) (string, error),
+) (installer.BootEnvReadWriter, error) {
+	ubootEnv := installer.NewEnvironment(cmd, config.BootUtilitiesSetActivePart,
+		config.BootUtilitiesGetNextActivePart)
+
+	// Find the tool UBootEnv will really run: the first one that exists.
+	tools := ubootEnv.ReadCommands()
+	tool := ""
+	for _, t := range tools {
+		if _, err := lookPath(t); err == nil {
+			tool = t
+			break
+		}
+	}
+	if tool == "" {
+		return nil, errors.Errorf("BootEnvMode \"bootloader\": no bootloader "+
+			"environment read tool found (tried %s); not falling back to the "+
+			"file-based boot environment", strings.Join(tools, ", "))
+	}
+	if filepath.Base(tool) == "fw_printenv" && !fwEnvConfigHasActiveEntries(fwEnvPath) {
+		return nil, errors.Errorf("BootEnvMode \"bootloader\": %s has no active "+
+			"entries (or is missing) and no GRUB/systemd-boot environment tool is "+
+			"available; not falling back to the file-based boot environment", fwEnvPath)
+	}
+
+	vars, err := ubootEnv.ReadEnv("mender_boot_part")
+	if err != nil {
+		return nil, errors.Wrapf(err, "BootEnvMode \"bootloader\": cannot read "+
+			"mender_boot_part with %s; not falling back to the file-based boot "+
+			"environment", tool)
+	}
+	// An unset variable is not an error to the tools: grub-mender-grubenv-print
+	// prints "mender_boot_part=" and exits 0. An empty value would then match
+	// every partition (strings.HasSuffix(part, "")) and the active slot would
+	// be guessed. Both real bootloader integrations always define it.
+	if strings.TrimSpace(vars["mender_boot_part"]) == "" {
+		return nil, errors.Errorf("BootEnvMode \"bootloader\": mender_boot_part is "+
+			"empty or not set in the bootloader environment (read with %s); not "+
+			"falling back to the file-based boot environment", tool)
+	}
+	log.Infof("Using bootloader environment for boot state (BootEnvMode=bootloader, %s)", tool)
+	return ubootEnv, nil
+}
+
 // fwEnvConfigPath is the standard libubootenv/fw_printenv config location
 // (see the mender_saveenv_canary error message in installer/bootenv.go for
 // the same reference path).
@@ -259,7 +383,14 @@ func commonInit(
 		AuthManager: authmgr,
 	}
 
-	mp.DualRootfsDevice = initDualRootfsDevice(config)
+	dualRootfsDevice, err := initDualRootfsDeviceChecked(config)
+	if err != nil {
+		// Do not continue without the rootfs installer: see
+		// initDualRootfsDeviceChecked.
+		dbstore.Close()
+		return nil, nil, errors.Wrap(err, "error initializing dual rootfs device")
+	}
+	mp.DualRootfsDevice = dualRootfsDevice
 
 	m, err := app.NewMender(config, mp)
 	if err != nil {
@@ -333,7 +464,21 @@ func handleArtifactOperations(ctx *cli.Context, runOptions runOptionsType,
 		return errors.New("failed to initialize DB store")
 	}
 
-	dualRootfsDevice := initDualRootfsDevice(config)
+	dualRootfsDevice, err := initDualRootfsDeviceChecked(config)
+	if err != nil {
+		switch ctx.Command.Name {
+		case "show-artifact", "show-provides":
+			// Read-only commands only read the datastore and never touch the
+			// boot environment, so an unreadable bootloader environment must
+			// not stop them (it also fails for unprivileged users).
+			log.Warnf("Continuing without dual rootfs device: %s", err.Error())
+			dualRootfsDevice = nil
+		default:
+			// install, commit and rollback must not run without it.
+			dbstore.Close()
+			return err
+		}
+	}
 
 	stateExec := dev.NewStateScriptExecutor(config)
 	deviceManager := dev.NewDeviceManager(dualRootfsDevice, config, dbstore)
