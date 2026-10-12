@@ -9,4 +9,6 @@ commit: d996cfd2e6a74e342e6c441c4357264a190da34c
 subpath: meta-mender-core
 license: Apache-2.0 (patch files use the license of the project they patch: U-Boot GPL-2.0-or-later; GRUB patches under recipes-bsp/grub GPL-3.0-or-later; systemd-boot patch under recipes-core/systemd LGPL-2.1-or-later; mender-client patches Apache-2.0)
 added-file: LICENSE (copy of upstream repo-root LICENSE at the same commit; meta-mender-core has no LICENSE of its own)
+added-file-sha256: LICENSE d7e8fd4ad05371007d60285c309ba7a7ce3e61029b843f949fbb9ec79dc9eb47
+patches: none
 note: the tag object is d9b81a701d9c55917421eaec5ab24a9ec02abcc6; meta-mender-commercial is NEVER vendored
