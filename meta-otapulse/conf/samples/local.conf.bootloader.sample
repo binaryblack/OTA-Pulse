@@ -1,0 +1,82 @@
+# Sample local.conf for OTAPulse "bootloader mode"
+# Copy the lines you need into your build/conf/local.conf.
+#
+# Bootloader mode keeps the boot-slot flag and the rollback fallback in your
+# device's own bootloader environment (U-Boot env or GRUB grubenv) and lets the
+# OTAPulse agent drive it. Use it when your board already boots through a
+# bootloader A/B layout. For everything else keep the default (native) mode:
+# do not set OTAPULSE_BOOT_MODE at all and nothing below applies.
+#
+# In bootloader mode you also need the OTAPulse bootloader support layers in
+# bblayers.conf (they ship next to meta-otapulse):
+#   meta-otapulse-bsp/core
+#   meta-otapulse-bsp/qemu                 (QEMU machines)
+#   meta-otapulse-bsp/boards/<vendor>      (the layer for your board, if any)
+# A native (default) build must NOT list them.
+#
+# Your image recipe stays an ordinary image recipe. Do not set any other
+# variable than the OTAPULSE_* ones below to configure the boot layout.
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  REQUIRED                                                        ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Enable the mode switch. Must be a build-wide INHERIT (not "inherit" in a recipe).
+INHERIT += "otapulse-full"
+OTAPULSE_BOOT_MODE = "bootloader"
+
+# Which bootloader environment holds the boot-slot flag: "uboot" or "grub"
+OTAPULSE_BOOTLOADER = "uboot"
+
+# Your OTAPulse server URL and device provisioning token (from your dashboard)
+OTA_SERVER_URL = "CHANGE_ME"
+OTAPULSE_PROVISIONING_TOKEN = "CHANGE_ME"
+
+# Your board's MACHINE value
+MACHINE = "CHANGE_ME"
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  BOARD LAYOUT — set what differs from the defaults               ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Disk image type: "sd" (MBR, U-Boot boards), "uefi" (GRUB / UEFI), "gpt"
+# (default: sd for uboot, uefi for grub)
+# OTAPULSE_IMAGE_TYPE = "sd"
+
+# Block device that holds the partitions on the target
+OTAPULSE_STORAGE_DEVICE = "/dev/mmcblk0"
+
+# Size of the medium the image is written to. The two root filesystem partitions
+# are what is left after the boot partition, the data partition and a small
+# overhead.
+OTAPULSE_STORAGE_TOTAL_SIZE_MB = "4096"
+
+# Optional partition sizes (megabytes)
+# OTAPULSE_BOOT_PART_SIZE_MB = "16"
+# OTAPULSE_DATA_PART_SIZE_MB = "128"
+# OTAPULSE_SWAP_PART_SIZE_MB = "0"
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  SAFETY                                                          ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# A kernel that panics without a reboot timeout hangs forever, and the
+# bootloader never gets the reset it needs to roll a bad update back. The
+# build adds "panic=<n>" to the kernel command line and REFUSES to build an
+# image without one. Default 10 seconds.
+# OTAPULSE_PANIC_TIMEOUT_S = "10"
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  OPTIONAL                                                        ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Device type that artifacts are checked against (default: derived from MACHINE)
+# OTAPULSE_DEVICE_TYPE = "my-device"
+
+# Every image build also writes the signed .otapulse rootfs artifact.
+# Set to "0" to build the disk image only.
+# OTAPULSE_GENERATE_ARTIFACT = "1"
+
+# Production: require signed OTA updates and sign the artifacts
+# SOC_OTA_SIGNATURE_VERIFICATION = "1"
+# SOC_OTA_SIGNING_KEY = "/path/to/your/private.pem"

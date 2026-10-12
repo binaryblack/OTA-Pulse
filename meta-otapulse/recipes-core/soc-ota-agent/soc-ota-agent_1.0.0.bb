@@ -362,10 +362,32 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${FILESDIR}/soc-ota-agent.service ${D}${systemd_system_unitdir}/
 
-    # Bootloader mode only: order the agent after the /data mount (the
-    # bootloader env config lives there) and drop the native-only
-    # otapulse-partition-setup dependency. The base unit stays untouched.
+    # Bootloader mode only: the native-only otapulse-partition-setup service may
+    # be gated or absent (TASK-S109-009), and a missing Requires= target makes
+    # the agent fail to start ("Unit otapulse-partition-setup.service not
+    # found"). A drop-in cannot fix that: on systemd 255 an empty "Requires=" in
+    # a drop-in does NOT reset the base unit's list. So the installed copy of
+    # the base unit loses the service from its Requires= line(s) (After= is kept:
+    # while the service is installed the agent must still start after it). The
+    # source unit and the native install stay byte-identical. The sed must work
+    # whether the service is alone or among other units on the line, and the
+    # build FAILS if it changes nothing, so a change of the base unit can never
+    # silently bring the dependency back.
     if [ "${OTAPULSE_BOOT_MODE}" = "bootloader" ]; then
+        UNIT=${D}${systemd_system_unitdir}/soc-ota-agent.service
+        sed -i -E '/^Requires=/ s/^(Requires=([^[:space:]]+[[:space:]]+)*)otapulse-partition-setup\.service[[:space:]]*/\1/' "$UNIT"
+        if grep -E '^Requires=.*otapulse-partition-setup' "$UNIT" >/dev/null; then
+            bbfatal "soc-ota-agent: bootloader mode could not remove otapulse-partition-setup.service from the Requires= line of soc-ota-agent.service (base unit changed?); the agent would not start without that service"
+        fi
+        if cmp -s "$UNIT" ${FILESDIR}/soc-ota-agent.service; then
+            bbfatal "soc-ota-agent: bootloader mode left soc-ota-agent.service unchanged: the Requires=otapulse-partition-setup.service line was not found (base unit changed?)"
+        fi
+        if ! grep -E '^After=.*otapulse-partition-setup\.service' "$UNIT" >/dev/null; then
+            bbfatal "soc-ota-agent: bootloader mode expects soc-ota-agent.service to keep After=otapulse-partition-setup.service"
+        fi
+
+        # Order the agent after the /data mount (the bootloader env config
+        # lives there).
         install -d ${D}${systemd_system_unitdir}/soc-ota-agent.service.d
         install -m 0644 ${FILESDIR}/10-bootloader-mode.conf ${D}${systemd_system_unitdir}/soc-ota-agent.service.d/10-bootloader-mode.conf
     fi
