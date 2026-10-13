@@ -23,6 +23,14 @@
 #     Example — skip signing and networking checks:
 #       OTAPULSE_SANITY_SKIP:append = " signing networking"
 #
+#   Bootloader mode (OTAPULSE_BOOT_MODE = "bootloader", TODO-157 / TASK-S109-012):
+#     its sanity checks are NOT in this class. They must run in every bootloader-mode build,
+#     including images that never inherit this class, so they live in the build-wide
+#     otapulse-full-bootloader.bbclass (section 8): image type against bootloader, U-Boot
+#     environment (redundancy, offsets, boot counter, panic timeout on the kernel command
+#     line), GRUB debug options, the state-script gate and /etc/otapulse/boot_mode.
+#     Nothing in this class changes in bootloader mode.
+#
 #   OTAPULSE_PROVISIONING_MODE (defined in otapulse.bbclass, read here)
 #     'token'  — a valid credential must exist at build time (default)
 #     'manual' — credentials are injected at runtime; skip the provisioning check

@@ -36,6 +36,20 @@
 #                                   0 or negative is refused: a kernel that panics without
 #                                   a timeout hangs forever and the bootloader never gets
 #                                   the reset it needs to roll the update back)
+#   OTAPULSE_UBOOT_ENV_OFFSET       (uboot only, optional) byte offset on the storage device of the
+#                                   first copy of the U-Boot environment; default: the board
+#                                   integration's layout
+#   OTAPULSE_UBOOT_ENV_OFFSET_REDUND (uboot only, optional) byte offset of the second (redundant)
+#                                   copy of the U-Boot environment; at least OTAPULSE_UBOOT_ENV_SIZE
+#                                   bytes away from the first
+#   OTAPULSE_UBOOT_ENV_SIZE         (uboot only, optional) size in bytes of one environment copy
+#                                   (default 0x20000)
+#   OTAPULSE_UBOOT_AUTO_CONFIGURE   (uboot only, optional) "1" (default): OTA-Pulse adds the boot
+#                                   counter and the redundant environment to U-Boot's configuration;
+#                                   "0": your U-Boot already has them (the build checks it)
+#   OTAPULSE_ALLOW_GRUB_DEBUG       "0" (default): a GRUB image built with the board support's debug
+#                                   options (PACKAGECONFIG force-grub-prompt / debug-pause) is
+#                                   refused; "1" is a developer-only opt-out, never for a shipped image
 #   OTAPULSE_GENERATE_ARTIFACT      "1" (default): every image build also writes the
 #                                   .otapulse rootfs artifact (otapulse-artifact.bbclass);
 #                                   "0" to build the disk image only
@@ -51,6 +65,9 @@
 #                                   partition is extended to the end of the storage medium and
 #                                   its file system grown to match, before the agent starts;
 #                                   "0" to keep the size the image was built with
+# Build checks: a misconfiguration fails the build with a message that names the OTAPULSE_*
+# variable to fix, as early as the answer exists (configuration, recipe parse, U-Boot configuration,
+# compiled-in U-Boot environment, finished image). See otapulse-full-bootloader.bbclass section 8.
 # See conf/samples/local.conf.bootloader.sample for a complete example.
 #
 # Required layers in bootloader mode (the class cannot add layers, it checks and
@@ -93,6 +110,19 @@ def otapulse_full_check_token(d):
                  "provisioning token (allowed: letters, digits, underscore, dot, dash). "
                  "Copy the token again from your dashboard.")
 
+def otapulse_full_image_type_conflict(bl, it):
+    """Message when OTAPULSE_IMAGE_TYPE cannot be combined with OTAPULSE_BOOTLOADER (TASK-S109-012),
+    else None. "gpt" is accepted with both bootloaders."""
+    if bl == 'grub' and it == 'sd':
+        return ("OTAPULSE_IMAGE_TYPE = \"sd\" (an MBR disk image for U-Boot boards) cannot be combined with "
+                "OTAPULSE_BOOTLOADER = \"grub\". Set OTAPULSE_IMAGE_TYPE = \"uefi\" (or \"gpt\"), or set "
+                "OTAPULSE_BOOTLOADER = \"uboot\" if your board boots through U-Boot.")
+    if bl == 'uboot' and it == 'uefi':
+        return ("OTAPULSE_IMAGE_TYPE = \"uefi\" (a UEFI disk image that boots through GRUB) cannot be combined "
+                "with OTAPULSE_BOOTLOADER = \"uboot\". Set OTAPULSE_IMAGE_TYPE = \"sd\" (or \"gpt\"), or set "
+                "OTAPULSE_BOOTLOADER = \"grub\" if your board boots through GRUB and UEFI.")
+    return None
+
 def otapulse_full_validate(d):
     """Bootloader-mode customer variables. Runs BEFORE the board support is
     inherited (it expands them), so the messages are the customer's first contact."""
@@ -106,6 +136,9 @@ def otapulse_full_validate(d):
         d.setVar('OTAPULSE_IMAGE_TYPE', it)
     if it not in ('sd', 'uefi', 'gpt'):
         bb.fatal("OTAPULSE_IMAGE_TYPE must be \"sd\", \"uefi\" or \"gpt\" (got \"%s\")." % it)
+    conflict = otapulse_full_image_type_conflict(bl, it)
+    if conflict:
+        bb.fatal(conflict)
     pt = (d.getVar('OTAPULSE_PANIC_TIMEOUT_S') or '10').strip()
     if not pt.isdigit() or int(pt) < 1:
         bb.fatal("OTAPULSE_PANIC_TIMEOUT_S must be a positive number of seconds (got \"%s\"). "

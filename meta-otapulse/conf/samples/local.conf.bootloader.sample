@@ -69,6 +69,19 @@ OTAPULSE_STORAGE_TOTAL_SIZE_MB = "4096"
 # OTAPULSE_DATA_PART_SIZE_MB = "128"
 # OTAPULSE_SWAP_PART_SIZE_MB = "0"
 
+# U-Boot only (OTAPULSE_BOOTLOADER = "uboot"): where your U-Boot keeps its environment.
+# Leave these out to use the layout of the board integration. Set them when your board's
+# U-Boot already keeps the environment somewhere else; the build compares them with U-Boot's
+# own configuration and stops on a mismatch. The environment must be redundant (two copies
+# at least OTAPULSE_UBOOT_ENV_SIZE bytes apart), otherwise a power cut while it is written
+# leaves the device unable to boot or to roll back.
+# OTAPULSE_UBOOT_ENV_OFFSET = "0x800000"
+# OTAPULSE_UBOOT_ENV_OFFSET_REDUND = "0x1000000"
+# OTAPULSE_UBOOT_ENV_SIZE = "0x20000"
+# "1" (default): OTA-Pulse adds the boot counter and the redundant environment to U-Boot's
+# configuration. "0": your U-Boot already has them; the build checks it and stops if not.
+# OTAPULSE_UBOOT_AUTO_CONFIGURE = "1"
+
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  SAFETY                                                          ║
 # ╚══════════════════════════════════════════════════════════════════╝
@@ -79,6 +92,17 @@ OTAPULSE_STORAGE_TOTAL_SIZE_MB = "4096"
 # commands, GRUB: through the generated GRUB boot configuration) and REFUSES to
 # build an image without one. Default 10 seconds.
 # OTAPULSE_PANIC_TIMEOUT_S = "10"
+#
+# The build also stops when the image could not roll a failed update back: no boot counter or
+# no redundant environment in U-Boot, a boot command that drops the panic timeout from the
+# kernel command line, an image type that does not match the bootloader, a missing
+# /etc/otapulse/boot_mode, or OTA-Pulse state scripts without the bootloader-mode gate. The
+# message names the OTAPULSE_* variable to fix.
+#
+# GRUB debug options (PACKAGECONFIG force-grub-prompt / debug-pause of the GRUB boot
+# configuration) stop a device at a GRUB prompt, so the build refuses them. For a
+# developer-only debug image set OTAPULSE_ALLOW_GRUB_DEBUG = "1". NEVER ship such an image.
+# OTAPULSE_ALLOW_GRUB_DEBUG = "0"
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  OPTIONAL                                                        ║
