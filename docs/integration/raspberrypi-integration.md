@@ -2,6 +2,10 @@
 
 This guide covers OTA-Pulse integration for Raspberry Pi boards. Note that Raspberry Pi uses a different boot mechanism than standard ARM boards - it uses `config.txt` instead of U-Boot boot scripts.
 
+> **Check this before you follow the steps below.** The "Approach A" text describes a design that switches between `cmdline_a.txt` and `cmdline_b.txt`. The native mechanism that is proven on a Raspberry Pi 4 (64-bit) is the Raspberry Pi firmware's one-shot `tryboot` boot, and the Yocto integration guide lists it as proven on hardware. Use that guide for native Raspberry Pi 4 images. The step-by-step content below has not been rewritten for `tryboot`.
+>
+> **Bootloader compatibility mode.** Raspberry Pi 4 with U-Boot in the opt-in bootloader compatibility mode (`OTAPULSE_BOOT_MODE = "bootloader"`) builds and passes the image checks. It booted once on a bench board, and a later image did not come back after a reflash, so it is **not qualified**. Do not rely on it. See the [integration README](README.md#bootloader-compatibility-mode-and-otapulse-convert).
+
 ## Supported Platforms
 
 | Platform | Status |

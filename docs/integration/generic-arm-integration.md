@@ -11,6 +11,8 @@ OTA-Pulse is designed to work with any ARM platform that has:
 
 The generic approach uses U-Boot environment variables that are already set by your board's defconfig.
 
+> **Alternative: bootloader compatibility mode.** If your U-Boot already keeps an A/B environment (or you boot through GRUB on UEFI), you can let the bootloader own the slot switch and the rollback instead of using the boot script below. That mode is opt-in (`OTAPULSE_BOOT_MODE = "bootloader"`). Two QEMU targets are qualified in it. No physical board is, and Raspberry Pi 4 in that mode is not qualified. See [Bootloader compatibility mode](https://docs.ota-pulse.com/device-integration/bootloader-compat/) and `meta-otapulse/conf/samples/local.conf.bootloader.sample`. The boot script in this guide belongs to the default (native) mode.
+
 ## Generic Integration Steps
 
 ### Step 1: Add meta-otapulse Layer
@@ -131,14 +133,15 @@ setenv fdt_addr_r 0x82000000
 setenv scriptaddr 0x82100000
 
 # OTA-Pulse boot slot selection (don't modify this part)
+# Same logic as the shipped boot-generic.cmd.
 if load mmc ${mmcdev}:${mmcpart} ${scriptaddr} mender_boot_part; then
-    echo "OTAPulse: Found boot slot file"
+    echo "OTAPulse: Found mender_boot_part file"
+    # Read the first character (ASCII: '2' = 0x32, '3' = 0x33)
     setexpr.b bootpart *${scriptaddr}
-    if test ${bootpart} = 32; then
+    if test ${bootpart} = 50; then
         setenv bootpart 2
         echo "OTAPulse: Slot A (partition 2)"
-    fi
-    if test ${bootpart} = 33; then
+    elif test ${bootpart} = 51; then
         setenv bootpart 3
         echo "OTAPulse: Slot B (partition 3)"
     fi
@@ -153,8 +156,13 @@ else
     setenv bootpart 2
 fi
 
+# Generic pre-kernel boot-count self-revert net (TODO-049). The build replaces this
+# marker line with the shared fragment. It sets ${recoveryargs} (used below) and may
+# revert ${bootpart}. Keep the line exactly as it is.
+@@OTAPULSE_BOOTCOUNT_NET@@
+
 # Build bootargs
-setenv bootargs console=${console} root=/dev/mmcblk${mmcdev}p${bootpart} rootwait rw
+setenv bootargs console=${console} root=/dev/mmcblk${mmcdev}p${bootpart} rootwait rw${recoveryargs}
 
 echo "OTAPulse: Booting /dev/mmcblk${mmcdev}p${bootpart}"
 
@@ -170,6 +178,15 @@ booti ${kernel_addr_r} - ${fdt_addr_r} || bootz ${kernel_addr_r} - ${fdt_addr_r}
 echo "OTAPulse: Boot failed!"
 reset
 ```
+
+The recipe only knows the boot scripts it lists in its `SRC_URI`. A new `boot-myboard.cmd` needs a bbappend that adds it, or the build silently uses `boot-generic.cmd`. Create `meta-your-layer/recipes-bsp/otapulse-boot-script/otapulse-boot-script_%.bbappend`:
+
+```bitbake
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+SRC_URI:append = " file://boot-myboard.cmd"
+```
+
+The slot comparison uses the values 50 and 51, exactly as the shipped `boot-generic.cmd` does (the decimal ASCII codes of `2` and `3`). Older versions of this guide compared 32 and 33, which the shipped scripts replaced after a bug on real boards.
 
 ### Step 5: Configure local.conf
 

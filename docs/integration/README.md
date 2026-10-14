@@ -14,7 +14,7 @@ Welcome to the OTA-Pulse integration documentation. This is the canonical entry 
 |----------|-------|-------------|--------|------------|
 | **NXP i.MX8** | [imx-integration.md](imx-integration.md) | U-Boot boot.scr | ✅ Tested | OTA-Pulse Team |
 | **NXP i.MX6/7** | [imx-integration.md](imx-integration.md) | U-Boot boot.scr | ⚠️ Supported | Community |
-| **Rockchip RK3588 / Radxa CM5** | [rockchip-integration.md](rockchip-integration.md) | U-Boot boot.scr + systemd-boot EFI ABA | ✅ Tested | OTA-Pulse Team |
+| **Rockchip RK3588 / Radxa CM5** | [rockchip-integration.md](rockchip-integration.md) | U-Boot extlinux (sysboot) + OTA-Pulse U-Boot boot-count script | ✅ Tested | OTA-Pulse Team |
 | **Rockchip RK3568/66** | [rockchip-integration.md](rockchip-integration.md) | U-Boot boot.scr | ⚠️ Supported | Community |
 | **Raspberry Pi 4/5** | [raspberrypi-integration.md](raspberrypi-integration.md) | config.txt / U-Boot | ⚠️ Supported | Community |
 | **STM32MP1** | [generic-arm-integration.md](generic-arm-integration.md) | U-Boot boot.scr | ⚠️ Template | Community |
@@ -37,6 +37,16 @@ Yocto/OpenEmbedded is the primary supported build system (this document). OTA-Pu
 | OpenWrt / Debian / Alpine / others | Planned | [Roadmap](../../ROADMAP.md) |
 
 The core OTA agent (`soc-ota-agent/`) is build-system agnostic and can be integrated with any Linux distribution.
+
+## Bootloader compatibility mode and `otapulse-convert`
+
+Everything below describes the default (native) mode, where OTA-Pulse switches the boot slot with its own boot scripts and state scripts.
+
+There is a second, opt-in mode in which your board's own bootloader (U-Boot or GRUB) owns the A/B slot switch and the rollback, and the agent drives it. Set `OTAPULSE_BOOT_MODE = "bootloader"` (see `meta-otapulse/conf/samples/local.conf.bootloader.sample`). Two QEMU targets, one with U-Boot (arm64) and one with GRUB and UEFI (x86-64), are qualified in this mode. **No physical board is qualified in it today.** Raspberry Pi 4 in this mode was built and partly probed but is not qualified, and the i.MX8MP FRDM was not attempted in it (it is proven in native mode).
+
+For a Debian or Raspberry Pi OS disk image, `otapulse-convert` can make an OTA-Pulse image without a Yocto build. A Debian 12 arm64 conversion boots under QEMU. It is not yet OTA qualified.
+
+Documentation: [Bootloader compatibility mode](https://docs.ota-pulse.com/device-integration/bootloader-compat/), [variables and build checks](https://docs.ota-pulse.com/device-integration/bootloader-compat-variables/), [qualify a board](https://docs.ota-pulse.com/device-integration/bootloader-compat-qualify/), [`otapulse-convert`](https://docs.ota-pulse.com/device-integration/otapulse-convert/).
 
 ## What You'll Need
 
@@ -105,18 +115,18 @@ Partition resolution supports both dynamic (`OTAPULSE_PARTITION_MODE = "dynamic"
 
 ### Step 1: Add the Layer
 
-Clone or copy the `meta-otapulse` layer to your Yocto layers directory:
+Clone the **whole** OTA-Pulse repository, not only the layer. The agent recipe builds `soc-ota-agent/` from the directory next to `meta-otapulse/`, so copying `meta-otapulse` alone breaks the build:
 
 ```bash
 cd /path/to/your/yocto/sources
-cp -r /path/to/OTA-Pulse/meta-otapulse .
+git clone https://github.com/binaryblack/OTA-Pulse.git ota-pulse
 ```
 
-Add the layer to your build:
+Add the layer to your build (`meta-oe` from `meta-openembedded` must also be in `bblayers.conf`):
 
 ```bash
 cd /path/to/your/yocto/build
-bitbake-layers add-layer ../sources/meta-otapulse
+bitbake-layers add-layer ../sources/ota-pulse/meta-otapulse
 ```
 
 ### Step 2: Configure Your Build
@@ -131,8 +141,8 @@ INHERIT += "otapulse"
 OTA_SERVER_URL = "https://your-ota-server.com"
 OTAPULSE_PROVISIONING_TOKEN = "your-provisioning-token"
 
-# Device Type (used for artifact compatibility)
-MENDER_DEVICE_TYPE = "${MACHINE}"
+# Device Type (used for artifact compatibility): the device type of the image is ${MACHINE}.
+# Create artifacts with the same value (-t <your MACHINE>).
 
 # Partition Mode
 OTAPULSE_PARTITION_MODE = "dynamic"  # or "static"
@@ -238,7 +248,7 @@ bitbake soc-monitoring-image
 ### 2. Create the Artifact
 
 ```bash
-mender-artifact write rootfs-image \
+otapulse-artifact write rootfs-image \
   -t your-device-type \
   -n "release-1.0.1" \
   -f tmp/deploy/images/your-machine/soc-monitoring-image-your-machine.ext4 \
@@ -252,7 +262,7 @@ Upload the artifact to your OTAPulse server and create a deployment targeting yo
 ## OTA Update Flow
 
 ```
-1. Build artifact    →  mender-artifact write rootfs-image ...
+1. Build artifact    →  otapulse-artifact write rootfs-image ...
 2. Upload to server  →  Web UI or API
 3. Deploy            →  Select devices, deploy
 4. Device downloads  →  Automatic (soc-ota-agent daemon)

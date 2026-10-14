@@ -2,6 +2,8 @@
 
 This guide covers OTA-Pulse integration for NXP i.MX processors including i.MX6, i.MX7, and i.MX8 families.
 
+> **Bootloader compatibility mode.** This guide describes native mode, which is the proven mode for the i.MX8MP FRDM. The opt-in bootloader compatibility mode (`OTAPULSE_BOOT_MODE = "bootloader"`, bootloader-owned A/B slots) has **not been attempted** on any i.MX board. Two QEMU targets are qualified in that mode and no physical board is. See the [integration README](README.md#bootloader-compatibility-mode-and-otapulse-convert).
+
 ## Supported Platforms
 
 | Platform | Tested Boards | Status |
@@ -164,7 +166,7 @@ soc-ctl status
 
 ```bash
 # On your build machine, create update artifact
-mender-artifact write rootfs-image \
+otapulse-artifact write rootfs-image \
     -f my-image-<MACHINE>.ext4 \
     -n "v1.2.0" \
     -t "<MACHINE>" \
