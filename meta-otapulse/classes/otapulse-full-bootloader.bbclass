@@ -218,7 +218,11 @@ IMAGE_CLASSES += "${@'otapulse-artifact' if d.getVar('OTAPULSE_GENERATE_ARTIFACT
 # ---- 6. kernel panic timeout through the bootloader command hook ---------------
 # Runs after the board support's setup. Escaped dollar: the shell that writes the
 # U-Boot header must not expand it (see TASK-S109-001: \${fdtcontroladdr}).
-MENDER_UBOOT_POST_SETUP_COMMANDS:prepend:mender-uboot = "setenv bootargs \${bootargs} panic=${OTAPULSE_PANIC_TIMEOUT_S}; "
+# The command line is ONE argument ("..."): an unquoted ${bootargs} is split into words by U-Boot's shell, and a command
+# with more than CONFIG_SYS_MAXARGS (16) arguments is refused, silently dropping panic=N. The Raspberry Pi firmware hands
+# U-Boot a 26-word command line, so the unquoted form lost the timeout there (TASK-S109-019, found on the bench board).
+# \\\" below becomes \" in the generated C header and " in the U-Boot environment.
+MENDER_UBOOT_POST_SETUP_COMMANDS:prepend:mender-uboot = "setenv bootargs \\\"\${bootargs} panic=${OTAPULSE_PANIC_TIMEOUT_S}\\\"; "
 
 # The kernel command line must end up with a positive panic= value. Returns the LAST
 # panic= value found in TEXT (the kernel honours the last one), or None.
@@ -307,6 +311,10 @@ python () {
         d.appendVarFlag('do_configure', 'prefuncs', ' otapulse_full_uboot_defconfig otapulse_full_check_uboot_config_early')
         d.appendVarFlag('do_configure', 'postfuncs', ' otapulse_full_uboot_cfg otapulse_full_check_uboot_config')
         d.appendVarFlag('do_compile', 'postfuncs', ' otapulse_full_check_uboot_env')
+    # TASK-S109-019: boards that boot through a boot script (Raspberry Pi): the boot script and
+    # cmdline.txt that the disk image really carries.
+    if bb.data.inherits_class('image', d) and d.getVar('OTAPULSE_BOOTLOADER') == 'uboot':
+        d.appendVarFlag('do_image_sdimg', 'postfuncs', ' otapulse_bl_bootfs_checks')
     # TASK-S109-012: GRUB debug options, and the state-script gate of the agent recipe.
     if d.getVar('PN') == 'grub-mender-grubenv' and d.getVar('OTAPULSE_BOOTLOADER') == 'grub':
         otapulse_full_check_grub_debug(d)
@@ -709,12 +717,27 @@ def otapulse_full_uboot_env_dict(text):
         env[k.strip()] = v
     return env
 
-def otapulse_full_uboot_statements(text, lookup):
+def otapulse_full_maxargs(config_text):
+    """CONFIG_SYS_MAXARGS of the U-Boot build, from the text of its .config or u-boot.cfg ("CONFIG_SYS_MAXARGS=16" or
+    "#define CONFIG_SYS_MAXARGS 16"); 16 (U-Boot's default) when the text does not say, or says something unusable."""
+    import re
+    m = re.search(r'^(?:CONFIG_SYS_MAXARGS=|#define\s+CONFIG_SYS_MAXARGS\s+)(\d+)\s*$', config_text or '', re.M)
+    if m and int(m.group(1)) >= 2:
+        return int(m.group(1))
+    return 16
+
+def otapulse_full_uboot_statements(text, lookup, maxargs=16):
     """Generator over the statements of a U-Boot shell script, each a list of words. Quotes and
     backslash escapes are honoured; ';' outside quotes ends a statement; $name / ${name} are
-    expanded through lookup() when the statement is read (so earlier statements have run)."""
+    expanded through lookup() when the statement is read (so earlier statements have run).
+    An UNQUOTED expansion is split into words like U-Boot's shell does, and a statement with more
+    than CONFIG_SYS_MAXARGS (MAXARGS, default 16, the command name counts) words is refused by U-Boot: it is returned as ['__too_many_args__']
+    (a no-op for the callers), so that for example 'setenv bootargs ${bootargs} panic=7' with a long
+    bootargs is seen to do nothing, exactly as it does on the board."""
     import re
     words, cur, have, quote = [], '', False, None
+    def emit(w):
+        return ['__too_many_args__'] if len(w) > maxargs else w
     i, n = 0, len(text)
     while i < n:
         c = text[i]
@@ -761,15 +784,25 @@ def otapulse_full_uboot_statements(text, lookup):
                     words.append(cur)
                     cur, have = '', False
                 if words:
-                    yield words
+                    yield emit(words)
                     words = []
                 i += 1 if c == ';' else 2
                 continue
         if c == '$':
             m = re.match(r'\$(?:\{([A-Za-z0-9_]+)\}|([A-Za-z_][A-Za-z0-9_]*))', text[i:])
             if m:
-                cur += lookup(m.group(1) or m.group(2))
-                have = True
+                val = lookup(m.group(1) or m.group(2))
+                if quote == '"':
+                    cur += val
+                    have = True
+                elif val:
+                    for k, fld in enumerate(re.split(r"\s+", val)):
+                        if k > 0 and have:
+                            words.append(cur)
+                            cur, have = '', False
+                        if fld:
+                            cur += fld
+                            have = True
                 i += m.end()
                 continue
         cur += c
@@ -778,17 +811,22 @@ def otapulse_full_uboot_statements(text, lookup):
     if have:
         words.append(cur)
     if words:
-        yield words
+        yield emit(words)
 
-def otapulse_full_uboot_boot_trace(env, entry):
+def otapulse_full_uboot_boot_trace(env, entry, fdt_bootargs=None, maxargs=16):
     """Runs the environment command ENTRY (for example 'bootcmd') the way U-Boot would and returns
     {'boots': [...], 'external': bool}: the kernel command line (bootargs) at EVERY boot command that
     the run reaches, and whether the flow leaves the environment (a boot script, a distro boot
     sequence, extlinux/PXE) so that the command line is not decided here. Conditions are not
     evaluated: every branch of an if runs, in order, so a branch that replaces the command line
-    shows up as its own entry and the result is the pessimistic one."""
+    shows up as its own entry and the result is the pessimistic one.
+    FDT_BOOTARGS (optional): the text the firmware puts into /chosen/bootargs (the Raspberry Pi
+    firmware builds it from cmdline.txt); "fdt get value bootargs /chosen bootargs" in a boot script
+    then loads it into bootargs, like U-Boot does."""
     boot_cmds = ('boot', 'bootd', 'bootm', 'bootz', 'booti', 'bootelf', 'bootvx', 'go')
-    external_cmds = ('source', 'sysboot', 'pxe', 'bootefi')
+    # 'bootflow' is U-Boot's standard boot (bootflow scan: boot.scr / extlinux found on the boot media);
+    # the Raspberry Pi U-Boot's bootcmd is exactly 'bootflow scan'.
+    external_cmds = ('source', 'sysboot', 'pxe', 'bootefi', 'bootflow')
     local = dict(env)
     state = {'bootargs': env.get('bootargs', ''), 'boots': [], 'external': False, 'steps': 0}
 
@@ -800,7 +838,7 @@ def otapulse_full_uboot_boot_trace(env, entry):
     def run(script, depth):
         if depth > 24 or state['steps'] > 5000:
             return
-        for words in otapulse_full_uboot_statements(script, lookup):
+        for words in otapulse_full_uboot_statements(script, lookup, maxargs):
             state['steps'] += 1
             while words and words[0] in ('then', 'else', 'do'):
                 words = words[1:]
@@ -824,6 +862,8 @@ def otapulse_full_uboot_boot_trace(env, entry):
                     local.pop(words[1], None)
                 else:
                     local[words[1]] = value
+            elif cmd == 'fdt' and words[1:5] == ['get', 'value', 'bootargs', '/chosen'] and fdt_bootargs is not None:
+                state['bootargs'] = fdt_bootargs
             elif cmd in boot_cmds:
                 state['boots'].append(state['bootargs'])
             elif cmd in external_cmds:
@@ -832,7 +872,7 @@ def otapulse_full_uboot_boot_trace(env, entry):
     run(env.get(entry, ''), 0)
     return {'boots': state['boots'], 'external': state['external']}
 
-def otapulse_full_uboot_env_problems(env):
+def otapulse_full_uboot_env_problems(env, maxargs=16):
     """Problems in the compiled-in U-Boot environment (name -> value), as [(OTAPULSE variable,
     message)]. In bootloader mode the board support always injects its boot-counter / rollback
     environment, so bootlimit, upgrade_available and altbootcmd are required for every board; an
@@ -843,7 +883,7 @@ def otapulse_full_uboot_env_problems(env):
     traces = {}
     for entry in ('bootcmd', 'altbootcmd'):
         if env.get(entry, '').strip():
-            traces[entry] = otapulse_full_uboot_boot_trace(env, entry)
+            traces[entry] = otapulse_full_uboot_boot_trace(env, entry, maxargs=maxargs)
     limit = otapulse_full_parse_number(env.get('bootlimit'))
     if limit is None or limit < 1:
         probs.append(('OTAPULSE_UBOOT_AUTO_CONFIGURE',
@@ -882,6 +922,132 @@ def otapulse_full_uboot_env_problems(env):
                 break
     return probs
 
+# ---- boot script (distro/standard boot boards, for example the Raspberry Pi) ----------------
+# A board whose U-Boot boots through a boot script (bootcmd = "bootflow scan" / "run distro_bootcmd")
+# decides its kernel command line there, not in the environment: the checks above can only trust
+# the setup commands. The finished boot partition holds the boot script (boot.scr) and the firmware's
+# command line (cmdline.txt); this reads them and runs the script the way U-Boot would.
+def otapulse_full_boot_script_text(data):
+    """Text of a U-Boot boot script. BYTES are either a legacy uImage of type "script" (64 byte header,
+    then two 32 bit words, then the script) or plain text (a boot.cmd). Comment lines are dropped
+    and every line ends a statement (';'), like the shell of U-Boot reads a script."""
+    import struct
+    if isinstance(data, str):
+        raw = data.encode('utf-8', 'replace')
+    else:
+        raw = data
+    if len(raw) >= 72 and struct.unpack('>I', raw[:4])[0] == 0x27051956:
+        size = struct.unpack('>I', raw[12:16])[0]
+        body = raw[64:64 + size]
+        # a script image starts with the (length, 0) table of its sub-images
+        raw = body[8:] if len(body) > 8 else b''
+    text = raw.decode('utf-8', 'replace').replace('\x00', '')
+    lines = []
+    for ln in text.splitlines():
+        t = ln.strip()
+        if not t or t.startswith('#'):
+            continue
+        lines.append(t)
+    return '; '.join(lines)
+
+def otapulse_full_boot_script_problems(script_data, env, cmdline_txt, maxargs=16):
+    """Problems of a board that boots through a boot script, as [(OTAPULSE variable, message)]:
+    the script must run the OTA-Pulse boot-slot setup, reach a boot command, and the kernel command
+    line it really hands over (the firmware's cmdline.txt, then the setup commands) must carry a
+    positive panic= value and a root device that the boot-slot setup chooses. ENV is the compiled-in
+    U-Boot environment (name -> value), CMDLINE_TXT the text of cmdline.txt."""
+    probs = []
+    script = otapulse_full_boot_script_text(script_data)
+    cmdline = ' '.join((cmdline_txt or '').split())
+    if not script:
+        return [('OTAPULSE_BOOT_MODE',
+                 "The boot script of the image (boot.scr) is empty or unreadable, so the kernel command line "
+                 "and the boot slot cannot be verified.")]
+    env2 = dict(env)
+    env2['__boot_script'] = script
+    tr = otapulse_full_uboot_boot_trace(env2, '__boot_script', fdt_bootargs=cmdline, maxargs=maxargs)
+    if 'mender_setup' not in script or 'run mender_setup' not in script.replace(';', ' ; '):
+        probs.append(('OTAPULSE_BOOT_MODE',
+                      "The image's boot script (boot.scr) does not run the OTA-Pulse boot-slot setup, so the "
+                      "bootloader never chooses the root file system from its boot-slot flag and a failed update "
+                      "is never rolled back. The boot script of the board support is replaced by one without it "
+                      "(the stock board script?). Keep the board support's boot script: "
+                      "OTAPULSE_BOOT_MODE = \"bootloader\" together with the layers of meta-otapulse-bsp."))
+        return probs
+    if not tr['boots']:
+        probs.append(('OTAPULSE_PANIC_TIMEOUT_S',
+                      "The image's boot script never reaches a boot command, so the kernel command line it "
+                      "passes (and its panic timeout) cannot be verified."))
+        return probs
+    for n, args in enumerate(tr['boots'], 1):
+        panic = otapulse_full_last_panic(args)
+        if panic is None or panic < 1:
+            probs.append(('OTAPULSE_PANIC_TIMEOUT_S',
+                          "The kernel command line that the image's boot script hands to the kernel (boot "
+                          "command %d) %s: %s. Bootloader mode requires a positive kernel panic timeout: a hung "
+                          "kernel would never reset and a failed update would never be rolled back. Keep "
+                          "OTAPULSE_PANIC_TIMEOUT_S set and do not replace the kernel command line in your "
+                          "boot script or in cmdline.txt."
+                          % (n, ('has panic=%d' % panic) if panic is not None else 'does not contain panic=', args.strip())))
+            break
+    # The root device must come from the boot-slot setup (a reference that is resolved while the
+    # script runs), never from a fixed root= in cmdline.txt: a fixed one ignores the A/B switch.
+    import re
+    fixed = re.findall(r'(?<![\w-])root=(/dev/\S+|PARTUUID=\S+|UUID=\S+|PARTLABEL=\S+)', cmdline)
+    if fixed and not re.search(r'(?<![\w-])root=\$\{?mender_kernel_root\}?', cmdline):
+        probs.append(('OTAPULSE_BOOT_MODE',
+                      "The firmware command line (cmdline.txt) has a fixed root=%s, so the bootloader cannot "
+                      "switch the root file system between the two update slots: an update would never take "
+                      "effect and a failed one would never be rolled back. In bootloader mode root= must come "
+                      "from the boot-slot setup (the board support's cmdline.txt does that)." % fixed[0]))
+    return probs
+
+def otapulse_full_rpi_firmware_bootargs():
+    """What the Raspberry Pi firmware (VideoCore) puts into /chosen/bootargs IN FRONT OF cmdline.txt before U-Boot sees
+    it (12 words, as observed on a Raspberry Pi 4; the MAC is a placeholder, only the word count matters). The boot script reads this with 'fdt get value bootargs', so a command
+    that appends to it is judged against the real, long command line, not against the short cmdline.txt alone."""
+    return ("coherent_pool=1M 8250.nr_uarts=1 snd_bcm2835.enable_headphones=0 cgroup_disable=memory "
+            "numa_policy=interleave snd_bcm2835.enable_hdmi=0 video=HDMI-A-1:640x480M@60D numa=fake=2 "
+            "system_heap.max_order=0 smsc95xx.macaddr=00:00:00:00:00:00 vc_mem.mem_base=0x3ec00000 "
+            "vc_mem.mem_size=0x40000000")
+
+python otapulse_bl_bootfs_checks() {
+    """After the disk image is built: the boot script and cmdline.txt that went into the boot partition
+    of a board that boots through a boot script (the Raspberry Pi), run the way U-Boot would."""
+    import os
+    w = os.path.join(d.getVar('WORKDIR'), 'bootfs')
+    script = os.path.join(w, 'boot.scr')
+    if not os.path.isfile(script):
+        bb.note("otapulse-full: no boot script in the boot partition (the boot command is compiled into U-Boot): "
+                "boot script checks skipped")
+        return
+    envf = os.path.join(d.getVar('DEPLOY_DIR_IMAGE'), 'u-boot-initial-env')
+    if not os.path.isfile(envf):
+        bb.fatal("OTAPULSE_PANIC_TIMEOUT_S: the compiled-in U-Boot environment (u-boot-initial-env) was not found "
+                 "in %s, so the boot script of the image cannot be verified." % d.getVar('DEPLOY_DIR_IMAGE'))
+    with open(envf, errors='replace') as f:
+        env = otapulse_full_uboot_env_dict(f.read())
+    cmdline = ''
+    cf = os.path.join(w, 'cmdline.txt')
+    if os.path.isfile(cf):
+        with open(cf, errors='replace') as f:
+            cmdline = f.read()
+    if os.path.isfile(os.path.join(w, 'config.txt')):
+        # a Raspberry Pi boot partition: the firmware prepends its own parameters to cmdline.txt
+        cmdline = otapulse_full_rpi_firmware_bootargs() + ' ' + cmdline
+    with open(script, 'rb') as f:
+        data = f.read()
+    # (CONFIG_SYS_MAXARGS is read from the U-Boot configuration where the build dir exists, see otapulse_full_check_uboot_env;
+    #  at image time only the default 16 is available)
+    probs = otapulse_full_boot_script_problems(data, env, cmdline)
+    if probs:
+        bb.fatal("%s: %s" % (probs[0][0], probs[0][1]))
+    tr = otapulse_full_uboot_boot_trace(dict(env, __boot_script=otapulse_full_boot_script_text(data)),
+                                        '__boot_script', fdt_bootargs=' '.join(cmdline.split()))
+    bb.note("otapulse-full: the image's boot script runs the boot-slot setup and hands the kernel panic=%s"
+            % otapulse_full_last_panic(tr['boots'][0]))
+}
+
 python otapulse_full_check_uboot_env() {
     """After do_compile: the compiled-in U-Boot environment (u-boot-initial-env) is the effective
     default environment of the finished bootloader."""
@@ -893,13 +1059,19 @@ python otapulse_full_check_uboot_env() {
         bb.fatal("OTAPULSE_PANIC_TIMEOUT_S: the compiled-in U-Boot environment (u-boot-initial-env) was not "
                  "generated under %s, so the kernel panic timeout U-Boot passes cannot be verified." % b)
     expected = (d.getVar('OTAPULSE_PANIC_TIMEOUT_S') or '').strip()
+    cfg_text = ''
+    for cand in sorted(glob.glob(os.path.join(b, '.config')) + glob.glob(os.path.join(b, '*', '.config')) +
+                       glob.glob(os.path.join(b, 'u-boot.cfg')) + glob.glob(os.path.join(b, '*', 'u-boot.cfg'))):
+        with open(cand, errors='replace') as f:
+            cfg_text += f.read() + '\n'
+    maxargs = otapulse_full_maxargs(cfg_text)
     for path in paths:
         with open(path, errors='replace') as f:
             env = otapulse_full_uboot_env_dict(f.read())
-        probs = otapulse_full_uboot_env_problems(env)
+        probs = otapulse_full_uboot_env_problems(env, maxargs)
         if probs:
             bb.fatal("%s: %s" % (probs[0][0], probs[0][1]))
-        tr = otapulse_full_uboot_boot_trace(env, 'bootcmd')
+        tr = otapulse_full_uboot_boot_trace(env, 'bootcmd', maxargs=maxargs)
         if tr['external']:
             bb.note("otapulse-full: this board boots through a boot script; the kernel command line is decided "
                     "there, only the setup-commands panic timeout is verified (%s)" % path)

@@ -1,0 +1,41 @@
+altbootcmd=run mender_altbootcmd; run bootcmd
+arch=arm
+baudrate=115200
+board=rpi
+board_name=rpi
+boot_targets=mmc usb pxe dhcp
+bootcmd=bootflow scan
+bootcount=0
+bootdelay=2
+bootlimit=1
+cpu=armv8
+dhcpuboot=usb start; dhcp u-boot.uimg; bootm
+fdt_addr_r=0x02600000
+fdt_high=ffffffffffffffff
+initrd_high=ffffffffffffffff
+kernel_addr_r=0x00080000
+loadaddr=0x1000000
+mender_altbootcmd=if test ${mender_boot_part} = 2; then setenv mender_boot_part 3; setenv mender_boot_part_hex 3; else setenv mender_boot_part 2; setenv mender_boot_part_hex 2; fi; setenv upgrade_available 0; saveenv; run mender_setup
+mender_boot_kernel_type=booti
+mender_boot_part=2
+mender_boot_part_hex=2
+mender_check_saveenv_canary=1
+mender_dtb_name=overlay_map.dtb
+mender_kernel_name=Image
+mender_post_setup_commands=setenv bootargs "${bootargs} panic=7"; 
+mender_pre_setup_commands=
+mender_setup=if test "${mender_saveenv_canary}" != "1"; then setenv mender_saveenv_canary 1; saveenv; fi; if test "${mender_pre_setup_commands}" != ""; then run mender_pre_setup_commands; fi; if test "${mender_systemd_machine_id}" != ""; then setenv bootargs "systemd.machine_id=${mender_systemd_machine_id} ${bootargs}"; fi; setenv mender_kernel_root /dev/mmcblk0p${mender_boot_part}; if test ${mender_boot_part} = 2; then setenv mender_boot_part_name /dev/mmcblk0p2; else setenv mender_boot_part_name /dev/mmcblk0p3; fi; setenv mender_kernel_root_name ${mender_boot_part_name}; setenv mender_uboot_root mmc 0:${mender_boot_part_hex}; setenv mender_uboot_root_name ${mender_boot_part_name}; setenv expand_bootargs "setenv bootargs \\"${bootargs}\\""; run expand_bootargs; setenv expand_bootargs; if test "${mender_post_setup_commands}" != ""; then run mender_post_setup_commands; fi
+mender_try_to_recover=if test ${upgrade_available} = 1; then reset; fi
+mender_uboot_boot=mmc 0:1
+mender_uboot_dev=0
+mender_uboot_if=mmc
+preboot=pci enum; usb start;
+pxefile_addr_r=0x02500000
+ramdisk_addr_r=0x02700000
+scriptaddr=0x02400000
+soc=bcm283x
+stderr=serial,vidconsole
+stdin=serial,usbkbd
+stdout=serial,vidconsole
+upgrade_available=0
+vendor=raspberrypi

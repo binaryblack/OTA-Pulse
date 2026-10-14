@@ -578,6 +578,7 @@ def test_dotconfig_ubi_only_checks_bootcount(ns):
 
 
 ORANGE_ENV = (HERE / "data" / "u-boot-initial-env.orange-pi-zero2w").read_text()
+RPI_ENV = (HERE / "data" / "u-boot-initial-env.raspberrypi4-64-bl").read_text()
 
 
 def _boots(ns, env, entry="bootcmd"):
@@ -1056,3 +1057,275 @@ def test_native_mode_is_untouched():
     sanity = (CLASSES / "otapulse-sanity.bbclass").read_text()
     code = "\n".join(l for l in sanity.splitlines() if not l.lstrip().startswith("#"))
     assert "otapulse_full" not in code and "OTAPULSE_UBOOT" not in code and "OTAPULSE_BOOT_MODE" not in code
+
+
+# ---- TASK-S109-019: boards that boot through a boot script (Raspberry Pi 4, "bootflow scan") ----
+
+# the board support's boot script after the recipe's substitutions (rpi-u-boot-scr + the OTA-Pulse bbappend)
+RPI_BOOT_CMD = """fdt addr ${fdt_addr} && fdt get value bootargs /chosen bootargs
+run mender_setup
+mmc dev ${mender_uboot_dev}
+load ${mender_uboot_root} ${kernel_addr_r} /boot/Image
+booti ${kernel_addr_r} - ${fdt_addr}
+run mender_try_to_recover
+"""
+# the stock meta-raspberrypi script that a bootloader-mode image gets when the board support's own is not used
+RPI_STOCK_CMD = """fdt addr ${fdt_addr} && fdt get value bootargs /chosen bootargs
+fatload mmc 0:1 ${kernel_addr_r} Image
+if test ! -e mmc 0:1 uboot.env; then saveenv; fi;
+booti ${kernel_addr_r} - ${fdt_addr}
+"""
+RPI_CMDLINE_OK = "dwc_otg.lpm_enable=0 console=serial0,115200 root=${mender_kernel_root} rootfstype=ext4 rootwait net.ifnames=0\n"
+RPI_CMDLINE_FIXED = "dwc_otg.lpm_enable=0 console=serial0,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait net.ifnames=0\n"
+
+
+def _script_image(text: str) -> bytes:
+    """A legacy uImage of type script, as mkimage -T script writes it."""
+    import struct
+    body = text.encode()
+    data = struct.pack(">II", len(body), 0) + body
+    hdr = struct.pack(">IIIIIIIBBBB32s", 0x27051956, 0, 0, len(data), 0, 0, 0, 5, 2, 6, 0, b"Boot script")
+    return hdr + data
+
+
+def _rpi_env(ns, panic=7):
+    env = ns["otapulse_full_uboot_env_dict"](RPI_ENV)
+    env["mender_post_setup_commands"] = "setenv bootargs ${bootargs} panic=%d; " % panic
+    return env
+
+
+def test_rpi_bootcmd_bootflow_scan_is_an_external_flow(ns):
+    """The Pi's U-Boot boots with "bootflow scan" (standard boot): it leaves the environment, so the compiled-in
+    environment check must not claim "never reaches a boot command" (found building raspberrypi4-64-bl)."""
+    env = ns["otapulse_full_uboot_env_dict"](RPI_ENV)
+    assert env["bootcmd"] == "bootflow scan"
+    tr = ns["otapulse_full_uboot_boot_trace"](env, "bootcmd")
+    assert tr["external"] is True and tr["boots"] == []
+    assert ns["otapulse_full_uboot_env_problems"](env) == []
+
+
+def test_rpi_env_check_wrapper_passes_and_notes_the_boot_script(ns, tmp_path):
+    (tmp_path / "u-boot-initial-env").write_text(RPI_ENV)
+    ns["otapulse_full_check_uboot_env"](FakeD(B=str(tmp_path), OTAPULSE_PANIC_TIMEOUT_S="7"))
+    assert any("boots through a boot script" in n for n in ns["_bb"].notes)
+
+
+def test_boot_script_text_decoding(ns):
+    txt = ns["otapulse_full_boot_script_text"]
+    got = txt(_script_image(RPI_BOOT_CMD))
+    assert got.startswith("fdt addr ${fdt_addr} && fdt get value bootargs /chosen bootargs; run mender_setup;")
+    assert got.endswith("run mender_try_to_recover")
+    assert txt(RPI_BOOT_CMD) == got                       # plain boot.cmd text
+    assert txt("# a comment\n\nbooti a\n") == "booti a"
+    assert txt(b"") == ""
+
+
+def test_boot_script_good_rpi_image(ns):
+    probs = ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), _rpi_env(ns), RPI_CMDLINE_OK)
+    assert probs == []
+
+
+def test_boot_script_effective_command_line_has_panic_and_the_slot_root(ns):
+    env = _rpi_env(ns, panic=7)
+    env["__boot_script"] = ns["otapulse_full_boot_script_text"](RPI_BOOT_CMD)
+    tr = ns["otapulse_full_uboot_boot_trace"](env, "__boot_script", fdt_bootargs=" ".join(RPI_CMDLINE_OK.split()))
+    assert len(tr["boots"]) == 1
+    args = tr["boots"][0]
+    assert ns["otapulse_full_last_panic"](args) == 7
+    assert "root=/dev/mmcblk0p2" in args            # ${mender_kernel_root} resolved by the boot-slot setup
+    assert "${" not in args
+
+
+def test_boot_script_stock_script_without_slot_setup_is_refused(ns):
+    """The stock meta-raspberrypi script loads Image from the FAT partition and never runs the boot-slot setup: no
+    slot choice, no panic=, no rollback. This is what the image got before the OTA-Pulse boot script was wired."""
+    probs = ns["otapulse_full_boot_script_problems"](_script_image(RPI_STOCK_CMD), _rpi_env(ns), RPI_CMDLINE_OK)
+    assert probs and probs[0][0] == "OTAPULSE_BOOT_MODE" and "boot-slot setup" in probs[0][1]
+    _msg_ok(probs[0][1])
+
+
+@pytest.mark.parametrize("post", [
+    "",                                            # nothing sets panic= at all
+    "setenv bootargs ${bootargs} panic=0; ",
+    "setenv bootargs quiet; ",                      # replaces the command line, panic= lost
+])
+def test_boot_script_panic_dropped_is_refused(ns, post):
+    env = _rpi_env(ns)
+    env["mender_post_setup_commands"] = post
+    probs = ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), env, RPI_CMDLINE_OK)
+    assert probs and probs[0][0] == "OTAPULSE_PANIC_TIMEOUT_S" and "panic" in probs[0][1]
+    _msg_ok(probs[0][1])
+
+
+def test_boot_script_panic_from_cmdline_txt_counts(ns):
+    env = _rpi_env(ns)
+    env["mender_post_setup_commands"] = ""
+    cmd = RPI_CMDLINE_OK.strip() + " panic=9\n"
+    assert ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), env, cmd) == []
+
+
+def test_boot_script_fixed_root_in_cmdline_is_refused(ns):
+    probs = ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), _rpi_env(ns), RPI_CMDLINE_FIXED)
+    assert probs and probs[0][0] == "OTAPULSE_BOOT_MODE" and "fixed root=/dev/mmcblk0p2" in probs[0][1]
+    _msg_ok(probs[0][1])
+
+
+def test_boot_script_without_a_boot_command_and_empty_script(ns):
+    probs = ns["otapulse_full_boot_script_problems"]("run mender_setup\n", _rpi_env(ns), RPI_CMDLINE_OK)
+    assert probs and probs[0][0] == "OTAPULSE_PANIC_TIMEOUT_S" and "never reaches a boot command" in probs[0][1]
+    probs = ns["otapulse_full_boot_script_problems"](b"", _rpi_env(ns), RPI_CMDLINE_OK)
+    assert probs and probs[0][0] == "OTAPULSE_BOOT_MODE"
+
+
+def _bootfs(tmp_path, script=RPI_BOOT_CMD, cmdline=RPI_CMDLINE_OK, env=None):
+    w = tmp_path / "work"
+    (w / "bootfs").mkdir(parents=True)
+    dep = tmp_path / "deploy"
+    dep.mkdir()
+    if script is not None:
+        (w / "bootfs" / "boot.scr").write_bytes(_script_image(script))
+    if cmdline is not None:
+        (w / "bootfs" / "cmdline.txt").write_text(cmdline)
+    (dep / "u-boot-initial-env").write_text(env if env is not None else RPI_ENV.replace("panic=7", "panic=7"))
+    return FakeD(WORKDIR=str(w), DEPLOY_DIR_IMAGE=str(dep))
+
+
+def test_bootfs_wrapper_good_and_bad(ns, tmp_path):
+    ns["otapulse_bl_bootfs_checks"](_bootfs(tmp_path))
+    assert any("runs the boot-slot setup and hands the kernel panic=7" in n for n in ns["_bb"].notes)
+    with pytest.raises(BBFatal, match="OTAPULSE_BOOT_MODE"):
+        ns["otapulse_bl_bootfs_checks"](_bootfs(tmp_path / "b", script=RPI_STOCK_CMD))
+    with pytest.raises(BBFatal, match="fixed root="):
+        ns["otapulse_bl_bootfs_checks"](_bootfs(tmp_path / "c", cmdline=RPI_CMDLINE_FIXED))
+    with pytest.raises(BBFatal, match="OTAPULSE_PANIC_TIMEOUT_S"):
+        ns["otapulse_bl_bootfs_checks"](_bootfs(tmp_path / "d", env=RPI_ENV.replace("panic=7", "panic=0")))
+
+
+def test_bootfs_wrapper_skips_boards_without_a_boot_script(ns, tmp_path):
+    ns["otapulse_bl_bootfs_checks"](_bootfs(tmp_path, script=None))
+    assert any("boot script checks skipped" in n for n in ns["_bb"].notes)
+
+
+def test_bootfs_check_is_hooked_to_the_sd_image_only_in_u_boot_mode():
+    assert "d.appendVarFlag('do_image_sdimg', 'postfuncs', ' otapulse_bl_bootfs_checks')" in BL
+    hook = BL[BL.index("TASK-S109-019: boards that boot through a boot script"):]
+    hook = hook[:hook.index("TASK-S109-012: GRUB debug options")]
+    assert "inherits_class('image', d)" in hook and "OTAPULSE_BOOTLOADER') == 'uboot'" in hook
+
+
+# ---- TASK-S109-019 (found on the bench RPi4): a long kernel command line and U-Boot's argument limit ----
+
+# what the Raspberry Pi firmware really puts into /chosen/bootargs (26 words), taken from the bench board
+RPI_FW_BOOTARGS = (
+    "coherent_pool=1M 8250.nr_uarts=1 snd_bcm2835.enable_headphones=0 cgroup_disable=memory numa_policy=interleave "
+    "snd_bcm2835.enable_hdmi=0 video=HDMI-A-1:640x480M@60D numa=fake=2 system_heap.max_order=0 "
+    "smsc95xx.macaddr=00:00:00:00:00:00 vc_mem.mem_base=0x3ec00000 vc_mem.mem_size=0x40000000  dwc_otg.lpm_enable=0 "
+    "console=ttyAMA0,115200 rootfstype=ext4 rootwait root=${mender_kernel_root}  net.ifnames=0 ")
+
+
+def test_unquoted_expansion_is_split_into_words_and_a_long_command_is_refused(ns):
+    stm = ns["otapulse_full_uboot_statements"]
+    env = {"b": " ".join("w%d" % i for i in range(20)), "short": "x y"}
+    got = list(stm("echo ${short} z; setenv bootargs ${b} panic=7; setenv bootargs \"${b} panic=7\"", lambda n: env.get(n, "")))
+    assert got[0] == ["echo", "x", "y", "z"]          # an unquoted expansion is split
+    assert got[1] == ["__too_many_args__"]            # 2 + 20 + 1 words: refused by U-Boot (CONFIG_SYS_MAXARGS = 16)
+    assert got[2][:2] == ["setenv", "bootargs"] and len(got[2]) == 3   # quoted: ONE argument, always accepted
+    assert got[2][2].endswith(" panic=7") and got[2][2].count(" ") == 20
+    # an empty unquoted expansion makes no word, an empty quoted one makes an empty word
+    assert list(stm("a ${e} b ", lambda n: "")) == [["a", "b"]]
+    assert list(stm('a "${e}" b', lambda n: "")) == [["a", "", "b"]]
+
+
+def test_unquoted_post_setup_command_loses_panic_on_the_pi_but_the_quoted_one_keeps_it(ns):
+    """The bench board's kernel command line had no panic=7 although the setup commands carried it: the unquoted
+    'setenv bootargs ${bootargs} panic=7' has 28 arguments after expansion and U-Boot refuses it. The check must
+    see what the board saw, and the shipped (quoted) form must pass."""
+    env = _rpi_env(ns)                                   # post commands are the old, unquoted form
+    fw = " ".join(RPI_FW_BOOTARGS.split())
+    probs = ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), env, fw)
+    assert probs and probs[0][0] == "OTAPULSE_PANIC_TIMEOUT_S" and "does not contain panic=" in probs[0][1]
+    _msg_ok(probs[0][1])
+    env["mender_post_setup_commands"] = 'setenv bootargs "${bootargs} panic=7"; '
+    assert ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), env, fw) == []
+    env["mender_post_setup_commands"] = 'setenv bootargs "${bootargs} panic=0"; '
+    probs = ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), env, fw)
+    assert probs and "panic=0" in probs[0][1]
+
+
+def test_the_shipped_post_setup_command_is_quoted():
+    """The class assignment (and the generated C header it ends up in) must carry the quoted form."""
+    m = re.search(r'^MENDER_UBOOT_POST_SETUP_COMMANDS:prepend:mender-uboot = "(.*)"$', BL, re.M)
+    assert m, "assignment not found"
+    val = m.group(1)
+    assert val.startswith('setenv bootargs \\\\\\"\\${bootargs} panic=${OTAPULSE_PANIC_TIMEOUT_S}\\\\\\"')
+    # simulate the shell that writes the header ("\\${" -> "${", "\\\\\\"" -> "\\\"") and the C compiler
+    import subprocess
+    shell = 'OTAPULSE_PANIC_TIMEOUT_S=7; X="%s"; printf "%%s" "$X"' % val.replace("${OTAPULSE_PANIC_TIMEOUT_S}", "7")
+    c_text = subprocess.run(["bash", "-c", shell], capture_output=True, text=True).stdout
+    assert c_text == 'setenv bootargs \\"${bootargs} panic=7\\"; '
+    env_text = c_text.encode().decode("unicode_escape")   # what the C string literal contains
+    assert env_text == 'setenv bootargs "${bootargs} panic=7"; '
+
+
+def test_bootfs_wrapper_judges_a_pi_against_the_firmware_command_line(ns, tmp_path):
+    """Found on the bench board: cmdline.txt alone is short (7 words); the firmware prepends 12 more, which is what the
+    boot script really appends to. A boot partition with config.txt (the Pi firmware) is checked against that."""
+    # the stored test env is the old unquoted shape or the new one; normalise both explicitly
+    quoted = re.sub(r"^mender_post_setup_commands=.*$", 'mender_post_setup_commands=setenv bootargs "${bootargs} panic=7"; ',
+                    RPI_ENV, flags=re.M)
+    unquoted = re.sub(r"^mender_post_setup_commands=.*$", "mender_post_setup_commands=setenv bootargs ${bootargs} panic=7; ",
+                      RPI_ENV, flags=re.M)
+    d = _bootfs(tmp_path / "q", env=quoted)
+    (Path(d.getVar("WORKDIR")) / "bootfs" / "config.txt").write_text("enable_uart=1\n")
+    ns["otapulse_bl_bootfs_checks"](d)
+    d = _bootfs(tmp_path / "u", env=unquoted)
+    (Path(d.getVar("WORKDIR")) / "bootfs" / "config.txt").write_text("enable_uart=1\n")
+    with pytest.raises(BBFatal, match="OTAPULSE_PANIC_TIMEOUT_S.*does not contain panic="):
+        ns["otapulse_bl_bootfs_checks"](d)
+    # without config.txt (no Pi firmware) the short command line alone is judged, like before
+    d = _bootfs(tmp_path / "n", env=unquoted)
+    ns["otapulse_bl_bootfs_checks"](d)
+
+
+def test_maxargs_is_read_from_the_uboot_configuration_with_a_default_of_16(ns):
+    f = ns["otapulse_full_maxargs"]
+    assert f("") == 16 and f(None) == 16
+    assert f("CONFIG_FOO=y\nCONFIG_SYS_MAXARGS=64\nCONFIG_BAR=1\n") == 64
+    assert f("/* x */\n#define CONFIG_SYS_MAXARGS 32\n") == 32
+    assert f("# CONFIG_SYS_MAXARGS is not set\n") == 16
+    assert f("CONFIG_SYS_MAXARGS=1\n") == 16          # unusable value: default
+    assert f("CONFIG_SYS_MAXARGS=abc\n") == 16
+
+
+def test_a_larger_maxargs_lets_the_unquoted_form_work_and_a_smaller_one_breaks_more(ns):
+    stm = ns["otapulse_full_uboot_statements"]
+    env = {"b": " ".join("w%d" % i for i in range(20))}
+    cmd = "setenv bootargs ${b} panic=7"
+    assert list(stm(cmd, lambda n: env.get(n, "")))[0] == ["__too_many_args__"]            # default 16
+    assert list(stm(cmd, lambda n: env.get(n, ""), 64))[0][:2] == ["setenv", "bootargs"]    # a U-Boot built with 64
+    assert list(stm("a b c d", lambda n: "", 3))[0] == ["__too_many_args__"]
+    # the 26-word Pi command line: refused with 16, accepted by a U-Boot built with a larger limit
+    fw = " ".join(RPI_FW_BOOTARGS.split())
+    envp = _rpi_env(ns)
+    envp["mender_post_setup_commands"] = "setenv bootargs ${bootargs} panic=7; "
+    bad = ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), envp, fw)
+    ok = ns["otapulse_full_boot_script_problems"](_script_image(RPI_BOOT_CMD), envp, fw, 64)
+    assert bad and not ok
+
+
+def test_env_check_wrapper_reads_maxargs_from_the_build_dir(ns, tmp_path):
+    env = RPI_ENV
+    env = re.sub(r"^mender_post_setup_commands=.*$", "mender_post_setup_commands=setenv bootargs ${bootargs} panic=7; ",
+                 env, flags=re.M)
+    (tmp_path / "u-boot-initial-env").write_text(env)
+    (tmp_path / ".config").write_text("CONFIG_SYS_MAXARGS=64\n")
+    ns["otapulse_full_check_uboot_env"](FakeD(B=str(tmp_path), OTAPULSE_PANIC_TIMEOUT_S="7"))   # must not raise
+    assert any("boots through a boot script" in n for n in ns["_bb"].notes)
+
+
+def test_the_shipped_firmware_bootargs_carry_no_board_specific_mac(ns):
+    fw = ns["otapulse_full_rpi_firmware_bootargs"]()
+    assert "DC:A6:32" not in fw.upper() and "smsc95xx.macaddr=00:00:00:00:00:00" in fw
+    assert len(fw.split()) == 12
+    assert "DC:A6:32" not in BL.upper()
+
