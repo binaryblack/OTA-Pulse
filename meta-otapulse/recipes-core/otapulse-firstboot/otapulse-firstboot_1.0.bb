@@ -159,6 +159,7 @@ SRC_URI:append:otapulse-bootloader = " \
     file://otapulse-data-seed \
     file://otapulse-data-seed.service \
     file://10-otapulse-provision-data.conf \
+    file://10-otapulse-bl-machine-id.conf \
     file://otapulse-bl-guard \
     file://otapulse-bl-boot-deadline.service \
     file://otapulse-bl-boot-deadline.timer \
@@ -204,6 +205,7 @@ FILES:${PN}:append:otapulse-bootloader = " \
     ${bindir}/otapulse-data-seed \
     ${systemd_system_unitdir}/otapulse-data-seed.service \
     ${systemd_system_unitdir}/otapulse-auto-provision.service.d \
+    ${systemd_system_unitdir}/otapulse-machine-id.service.d \
     ${bindir}/otapulse-bl-guard \
     ${systemd_system_unitdir}/otapulse-bl-boot-deadline.service \
     ${systemd_system_unitdir}/otapulse-bl-boot-deadline.timer \
@@ -230,6 +232,12 @@ do_install:append:otapulse-bootloader() {
              otapulse-bl-seed-failure.service otapulse-bl-clock-wait.service; do
         install -m 0644 ${WORKDIR}/$u ${D}${systemd_system_unitdir}/$u
     done
+
+    # TASK-S109-018: restore the persistent machine-id into the transient /etc/machine-id systemd
+    # bind-mounts on the first boot of a freshly written slot (see the drop-in).
+    install -d ${D}${systemd_system_unitdir}/otapulse-machine-id.service.d
+    install -m 0644 ${WORKDIR}/10-otapulse-bl-machine-id.conf \
+        ${D}${systemd_system_unitdir}/otapulse-machine-id.service.d/10-otapulse-bl-machine-id.conf
 
     # OTAPULSE_PROVISIONING_MODE = "manual": the token is read from /data (see the drop-in).
     if [ "${OTAPULSE_PROVISIONING_MODE}" = "manual" ]; then
