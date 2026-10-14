@@ -1,0 +1,5 @@
+# socmond core dump handling: deliver core dumps to the socmond handler.
+# suid_dumpable is set to 0 (safe) first so that the kernel accepts the piped core_pattern.
+fs.suid_dumpable=0
+kernel.core_pattern=|/usr/bin/socmond-core-handler %p %u %g %s %t %c %h %e
+kernel.core_pipe_limit=4

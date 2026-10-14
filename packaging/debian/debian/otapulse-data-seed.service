@@ -1,0 +1,21 @@
+[Unit]
+Description=OTA-Pulse persistent data seeding
+Documentation=man:soc-ota-agent(1)
+# Seeds /data/otapulse/device_type from /etc/otapulse/device_type and verifies an existing one; it
+# does not partition, format, mount or resize anything and never touches /data/u-boot (see the
+# script header). It refuses to seed onto the root file system: /data must be a mount point, as on
+# the images these packages are installed into.
+RequiresMountsFor=/data
+After=data.mount
+Before=soc-ota-agent.service socmond.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/otapulse/otapulse-data-seed
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

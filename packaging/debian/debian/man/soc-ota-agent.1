@@ -1,0 +1,67 @@
+.TH SOC-OTA-AGENT 1 "October 2026" "OTA-Pulse" "OTA-Pulse Manual"
+.SH NAME
+soc-ota-agent, otapulse \- OTA-Pulse device update agent
+.SH SYNOPSIS
+.B soc-ota-agent
+[\fIglobal options\fR] \fIcommand\fR [\fIcommand options\fR]
+.br
+.B otapulse
+(same program, alternative name)
+.SH DESCRIPTION
+The agent runs on the device. In daemon mode it polls the OTA-Pulse backend for deployments, downloads
+and installs signed root file system artifacts into the inactive A/B slot, reports status and inventory,
+and commits the update once the new slot has booted and passed its health checks, or reports the failure
+after a rollback.
+.PP
+The package configures the agent for \fBbootloader compatibility mode\fR (\fBBootEnvMode\fR is
+\fBbootloader\fR in \fI/etc/otapulse/otapulse.conf\fR): the bootloader integration of the board (U-Boot or
+GRUB) owns the boot-slot flag, the boot counter and the rollback. The agent only writes the
+bootloader environment through its tools (\fBfw_setenv\fR, or the GRUB environment tools of the image). It
+never switches the slot by itself and never falls back to a file based boot environment. If the bootloader
+environment cannot be read, the agent refuses to run and logs the reason.
+.PP
+\fBotapulse-data-seed.service\fR runs before the agent. It copies \fI/etc/otapulse/device_type\fR to
+\fI/data/otapulse/device_type\fR on the first start and verifies it on every later start. If the data
+partition carries a different device type, the service fails and the agent does not start. The service also
+refuses to run when \fI/data\fR is not a mount point.
+.SH COMMANDS
+.TP
+.B daemon
+Run the update daemon. This is what the systemd unit \fBsoc-ota-agent.service\fR starts.
+.TP
+.B show-artifact
+Print the name of the installed artifact.
+.TP
+.B show-provides
+Print the provides data of the installed artifact.
+.TP
+.B commit
+Commit an installed update.
+.TP
+.B rollback
+Roll back an installed update that has not been committed.
+.PP
+Run \fBsoc-ota-agent --help\fR for the complete list of commands and options of the installed version.
+.SH FILES
+.TP
+.I /etc/otapulse/otapulse.conf
+Configuration (JSON). Contains no credentials as shipped. \fBServerURL\fR, \fBRootfsPartA\fR and
+\fBRootfsPartB\fR have to be set for the image.
+.TP
+.I /etc/otapulse/boot_mode
+Contains the word \fBbootloader\fR. The update state scripts read it and do nothing in this mode.
+.TP
+.I /etc/otapulse/device_type, /var/lib/otapulse/device_type
+Device type that artifacts are checked against.
+.TP
+.I /data/otapulse/otapulse.conf
+Credentials written by \fBsoc-ota-provision\fR(1). Loaded as a fallback configuration.
+.TP
+.I /usr/share/otapulse/state-scripts/
+State scripts that are embedded into artifacts.
+.TP
+.I /etc/soc-monitoring/signing-keys/active/
+Public keys used to verify artifact signatures. Artifact verification is required.
+.SH SEE ALSO
+.BR soc-ota-provision (1),
+.BR socmond (1)

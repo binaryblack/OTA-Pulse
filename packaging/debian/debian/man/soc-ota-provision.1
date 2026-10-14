@@ -1,0 +1,27 @@
+.TH SOC-OTA-PROVISION 1 "October 2026" "OTA-Pulse" "OTA-Pulse Manual"
+.SH NAME
+soc-ota-provision \- register a device with the OTA-Pulse backend
+.SH SYNOPSIS
+.B soc-ota-provision
+.BI \-\-server " URL"
+.BI \-\-token " TOKEN"
+[\fB\-\-device\-id\fR \fIID\fR] [\fB\-\-force\fR]
+.SH DESCRIPTION
+Registers the device with a provisioning token, receives the per-device API key and stores it, together
+with the device identity, in \fI/data/otapulse/otapulse.conf\fR (mode 0600). The running agent is restarted
+to pick the credentials up. The credentials live on the data partition so that they survive A/B updates.
+.SH OPTIONS
+.TP
+.BI \-\-server " URL"
+Backend URL.
+.TP
+.BI \-\-token " TOKEN"
+Provisioning token issued by the backend.
+.TP
+.BI \-\-device\-id " ID"
+Device identifier. Defaults to the MAC address of the first Ethernet interface, then to the machine id.
+.TP
+.B \-\-force
+Provision again even if the device is already provisioned.
+.SH SEE ALSO
+.BR soc-ota-agent (1)

@@ -1,0 +1,4 @@
+# soc-ota-agent runtime and persistent state directories.
+d /var/lib/otapulse 0755 root root -
+d /data/otapulse    0700 root root -
+d /data/ota         0755 root root -

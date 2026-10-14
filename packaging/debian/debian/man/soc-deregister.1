@@ -1,0 +1,16 @@
+.TH SOC-DEREGISTER 1 "October 2026" "OTA-Pulse" "OTA-Pulse Manual"
+.SH NAME
+soc-deregister \- deregister this device from the OTA-Pulse backend
+.SH SYNOPSIS
+.B soc-deregister
+[\fB\-\-force\fR]
+.SH DESCRIPTION
+Notifies the backend that the device is removed and deletes the local credentials. The device registers
+again at the next start if a provisioning token is still present. Needs root.
+.SH OPTIONS
+.TP
+.B \-\-force
+Do not ask for confirmation.
+.SH SEE ALSO
+.BR soc-ctl (1),
+.BR socmond (1)

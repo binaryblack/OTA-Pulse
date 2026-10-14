@@ -1,0 +1,131 @@
+#!/usr/bin/make -f
+# OTA-Pulse Debian packages (TASK-S109-024): soc-ota-agent (Go + cgo) and socmond (shell).
+# Built by ota-pulse/scripts/build-debs.sh inside the pinned builder container, offline.
+# Inputs (staged by that script next to debian/): agent/ (Go source + vendor/), upstream/ (state scripts,
+# provisioning helper, socmond scripts and units taken from the same git revision), OTAPULSE_AGENT_VERSION.
+
+include /usr/share/dpkg/architecture.mk
+include /usr/share/dpkg/pkg-info.mk
+
+# Reproducible: no build path, no VCS stamp, no host cache, no network.
+export GOOS := linux
+export GOFLAGS := -mod=vendor -trimpath -buildvcs=false
+export GOTOOLCHAIN := local
+export GOPROXY := off
+export GOCACHE := /tmp/otapulse-gocache
+export GOPATH := /tmp/otapulse-gopath
+export CGO_ENABLED := 1
+export GO111MODULE := on
+
+ifeq ($(DEB_HOST_ARCH),amd64)
+export GOARCH := amd64
+else ifeq ($(DEB_HOST_ARCH),arm64)
+export GOARCH := arm64
+else ifeq ($(DEB_HOST_ARCH),armhf)
+export GOARCH := arm
+export GOARM := 7
+else
+$(error unsupported architecture $(DEB_HOST_ARCH))
+endif
+
+export CC := $(DEB_HOST_GNU_TYPE)-gcc
+export PKG_CONFIG := $(DEB_HOST_GNU_TYPE)-pkg-config
+
+# Hardening flags from dpkg-buildflags (relro, bindnow, fortify, ...) go to the C compiler and the
+# external linker; the agent itself is a position independent executable.
+export DEB_BUILD_MAINT_OPTIONS := hardening=+all
+CFLAGS_GO := $(shell dpkg-buildflags --get CFLAGS) -Wno-implicit-fallthrough -Wno-stringop-overflow
+LDFLAGS_GO := $(shell dpkg-buildflags --get LDFLAGS)
+export CGO_CFLAGS := $(CFLAGS_GO)
+export CGO_LDFLAGS := $(LDFLAGS_GO)
+
+AGENT_VERSION := $(shell cat OTAPULSE_AGENT_VERSION 2>/dev/null)
+UP := $(CURDIR)/upstream
+
+%:
+	dh $@
+
+override_dh_auto_clean:
+	rm -rf otapulse
+
+override_dh_auto_build:
+	test -n "$(AGENT_VERSION)" || { echo "OTAPULSE_AGENT_VERSION missing"; exit 1; }
+	test -f agent/vendor/modules.txt || { echo "agent/vendor missing"; exit 1; }
+	cd agent && go build -buildmode=pie \
+	  -ldflags "-X github.com/binaryblack/OTA-Pulse/conf.Version=$(AGENT_VERSION) -s -w -linkmode=external -extldflags '$(LDFLAGS_GO)'" \
+	  -o ../otapulse .
+
+override_dh_auto_test:
+	@true
+
+# The binary is already stripped by the Go linker (-s -w); dh_strip would only rewrite it.
+override_dh_strip:
+	@true
+
+override_dh_dwz:
+	@true
+
+# The units are installed by override_dh_auto_install; dh_installsystemd then adds the enable/start/
+# restart/stop snippets for every unit it finds in the package trees. No SysV init scripts exist.
+override_dh_installinit:
+	@true
+
+# dh_fixperms resets every non-executable file to 0644; the agent configuration and the socmond configuration
+# may later hold a token, so they ship 0600.
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0600 $(CURDIR)/debian/soc-ota-agent/etc/otapulse/otapulse.conf $(CURDIR)/debian/socmond/etc/socmond/config.json
+
+override_dh_auto_install:
+	# ---- soc-ota-agent --------------------------------------------------------------------------
+	install -D -m 0755 otapulse $(CURDIR)/debian/soc-ota-agent/usr/bin/soc-ota-agent
+	ln -s soc-ota-agent $(CURDIR)/debian/soc-ota-agent/usr/bin/otapulse
+	install -D -m 0755 upstream/agent/soc-ota-provision $(CURDIR)/debian/soc-ota-agent/usr/bin/soc-ota-provision
+	install -D -m 0755 upstream/agent/otapulse-data-seed $(CURDIR)/debian/soc-ota-agent/usr/lib/otapulse/otapulse-data-seed
+	install -D -m 0644 debian/otapulse-data-seed.service $(CURDIR)/debian/soc-ota-agent/lib/systemd/system/otapulse-data-seed.service
+	install -D -m 0600 debian/otapulse.conf $(CURDIR)/debian/soc-ota-agent/etc/otapulse/otapulse.conf
+	install -D -m 0644 debian/boot_mode $(CURDIR)/debian/soc-ota-agent/etc/otapulse/boot_mode
+	for s in ArtifactReboot_Enter_01 ArtifactRollbackReboot_Enter_01 ArtifactCommit_Enter_01; do \
+	  install -D -m 0755 upstream/agent/$$s $(CURDIR)/debian/soc-ota-agent/usr/share/otapulse/state-scripts/$$s; done
+	install -D -m 0755 agent/support/otapulse-device-identity $(CURDIR)/debian/soc-ota-agent/usr/share/otapulse/identity/otapulse-device-identity
+	for s in bootloader-integration hostinfo network os provides rootfs-type update-modules; do \
+	  install -D -m 0755 agent/support/otapulse-inventory-$$s $(CURDIR)/debian/soc-ota-agent/usr/share/otapulse/inventory/otapulse-inventory-$$s; done
+	# The inventory helper that asks the client for its provides data must call the installed agent name.
+	sed -i 's|/usr/bin/mender show-provides|/usr/bin/soc-ota-agent show-provides|' \
+	  $(CURDIR)/debian/soc-ota-agent/usr/share/otapulse/inventory/otapulse-inventory-provides
+	! grep -q '/usr/bin/mender' $(CURDIR)/debian/soc-ota-agent/usr/share/otapulse/inventory/otapulse-inventory-provides
+	grep -q '/usr/bin/soc-ota-agent show-provides' $(CURDIR)/debian/soc-ota-agent/usr/share/otapulse/inventory/otapulse-inventory-provides
+	install -D -m 0644 debian/soc-ota-agent.service $(CURDIR)/debian/soc-ota-agent/lib/systemd/system/soc-ota-agent.service
+	install -d -m 0755 $(CURDIR)/debian/soc-ota-agent/etc/soc-monitoring/signing-keys/active
+	install -D -m 0644 upstream/NOTICE $(CURDIR)/debian/soc-ota-agent/usr/share/doc/soc-ota-agent/NOTICE
+	install -D -m 0644 agent/third_party_licenses.csv $(CURDIR)/debian/soc-ota-agent/usr/share/doc/soc-ota-agent/third_party_licenses.csv
+	cp -R --no-preserve=ownership agent/third_party_licenses $(CURDIR)/debian/soc-ota-agent/usr/share/doc/soc-ota-agent/third_party_licenses
+	find $(CURDIR)/debian/soc-ota-agent/usr/share/doc/soc-ota-agent -type d -exec chmod 0755 {} +
+	find $(CURDIR)/debian/soc-ota-agent/usr/share/doc/soc-ota-agent -type f -exec chmod 0644 {} +
+	# ---- socmond --------------------------------------------------------------------------------
+	install -D -m 0755 upstream/socmond/socmond $(CURDIR)/debian/socmond/usr/bin/socmond
+	install -D -m 0755 upstream/socmond/socmond-watchdog $(CURDIR)/debian/socmond/usr/bin/socmond-watchdog
+	install -D -m 0755 upstream/socmond/core-handler.sh $(CURDIR)/debian/socmond/usr/bin/socmond-core-handler
+	install -D -m 0755 upstream/socmond/soc-ctl $(CURDIR)/debian/socmond/usr/bin/soc-ctl
+	install -D -m 0755 upstream/socmond/soc-deregister $(CURDIR)/debian/socmond/usr/bin/soc-deregister
+	install -D -m 0600 upstream/socmond/config.json $(CURDIR)/debian/socmond/etc/socmond/config.json
+	# The shared default points at the development LAN backend; a customer package must not.
+	grep -q '"base_url": "http://192.168.0.123:8000"' $(CURDIR)/debian/socmond/etc/socmond/config.json
+	sed -i 's|"base_url": "http://192.168.0.123:8000"|"base_url": "https://ota.example.com"|' $(CURDIR)/debian/socmond/etc/socmond/config.json
+	grep -q '"base_url": "https://ota.example.com"' $(CURDIR)/debian/socmond/etc/socmond/config.json
+	install -D -m 0644 upstream/socmond/custom_metrics.conf.example $(CURDIR)/debian/socmond/usr/share/doc/socmond/examples/custom_metrics.conf.example
+	install -D -m 0644 debian/socmond.sysctl $(CURDIR)/debian/socmond/usr/lib/sysctl.d/90-socmond-coredump.conf
+	install -D -m 0644 upstream/NOTICE $(CURDIR)/debian/socmond/usr/share/doc/socmond/NOTICE
+	# socmond-watchdog finds the daemon with `pidof socmond`. On Debian the daemon is a /bin/sh script, which
+	# procps/sysvinit pidof only finds with -x; without it the watchdog sees the daemon as dead and reboots the
+	# machine. BusyBox pidof (the Yocto images) accepts -x as well.
+	grep -q 'pidof socmond >/dev/null 2>&1' $(CURDIR)/debian/socmond/usr/bin/socmond-watchdog
+	sed -i 's|pidof socmond >/dev/null 2>&1|pidof -x socmond >/dev/null 2>\&1|' $(CURDIR)/debian/socmond/usr/bin/socmond-watchdog
+	grep -q 'pidof -x socmond >/dev/null 2>&1' $(CURDIR)/debian/socmond/usr/bin/socmond-watchdog
+	# soc-ctl, soc-deregister and soc-ota-provision use bash features (echo -e, $$EUID, read -n, ${var:o:n});
+	# on Debian /bin/sh is dash, so they run under bash. The daemon scripts are POSIX and stay as they are.
+	for f in debian/socmond/usr/bin/soc-ctl debian/socmond/usr/bin/soc-deregister debian/soc-ota-agent/usr/bin/soc-ota-provision; do \
+	  test "$$(head -1 $$f)" = '#!/bin/sh' || { echo "unexpected shebang in $$f"; exit 1; }; \
+	  sed -i '1s|.*|#!/bin/bash|' $$f; done
+	install -D -m 0644 upstream/socmond/socmond.service $(CURDIR)/debian/socmond/lib/systemd/system/socmond.service
+	install -D -m 0644 upstream/socmond/socmond-watchdog.service $(CURDIR)/debian/socmond/lib/systemd/system/socmond-watchdog.service

@@ -1,0 +1,4 @@
+# The socmond configuration is a conffile that an operator may extend with a provisioning token
+# (auth.provisioning_token); soc-ctl rewrites it with mode 0600 for the same reason. The shipped template
+# contains no credential.
+socmond: non-standard-file-perm 0600 != 0644 [etc/socmond/config.json]

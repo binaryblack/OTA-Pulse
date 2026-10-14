@@ -1,0 +1,56 @@
+Source: otapulse-agent
+Section: admin
+Priority: optional
+Maintainer: OTA-Pulse Project <support@ota-pulse.com>
+Rules-Requires-Root: no
+Standards-Version: 4.6.2
+Homepage: https://github.com/binaryblack/OTA-Pulse
+Build-Depends: debhelper-compat (= 13),
+               libglib2.0-dev,
+               liblzma-dev,
+               libssl-dev,
+               pkg-config
+
+Package: soc-ota-agent
+Architecture: arm64 armhf amd64
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+         ca-certificates,
+         curl,
+         jq,
+         systemd
+Recommends: libubootenv-tool
+Description: OTA-Pulse device update agent (bootloader compatibility mode)
+ The OTA-Pulse agent polls the OTA-Pulse backend for firmware deployments,
+ installs signed A/B root filesystem updates, reports status and inventory,
+ and commits or rolls back an update based on the health of the new slot.
+ .
+ This package is configured for bootloader compatibility mode: the board's
+ own bootloader integration (U-Boot or GRUB) owns the boot-slot flag, boot
+ counting and rollback. The agent never switches slots itself in this mode
+ and refuses to run (fail closed) when it cannot read the bootloader
+ environment.
+ .
+ The package ships the agent, its systemd unit, the configuration template,
+ the inventory and identity scripts, the update state scripts that are
+ embedded into OTA artifacts, and a provisioning helper.
+ .
+ It does not contain a bootloader, partition layout or board support; those
+ come from the image the package is installed into.
+
+Package: socmond
+Architecture: all
+Depends: ${misc:Depends},
+         ca-certificates,
+         curl,
+         jq,
+         systemd
+Description: OTA-Pulse device monitoring daemon
+ socmond collects device telemetry (CPU, memory, disk, network, temperature),
+ captures crash dumps and reboot reasons, and uploads them to the OTA-Pulse
+ backend. It registers itself with a provisioning token and then
+ authenticates with its own per-device API key.
+ .
+ The package ships the daemon, its watchdog, the core dump handler and the
+ command line tools soc-ctl and soc-deregister, together with their systemd
+ units. The default configuration contains no credentials.

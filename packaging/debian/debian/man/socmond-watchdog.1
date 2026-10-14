@@ -1,0 +1,12 @@
+.TH SOCMOND-WATCHDOG 1 "October 2026" "OTA-Pulse" "OTA-Pulse Manual"
+.SH NAME
+socmond-watchdog \- health watchdog of the OTA-Pulse monitoring daemon
+.SH SYNOPSIS
+.B socmond-watchdog
+[\fB\-\-config\fR \fIFILE\fR] [\fB\-\-help\fR]
+.SH DESCRIPTION
+Monitors the health of the system and of the monitoring daemon and triggers a reboot on failure. It is
+started by \fBsocmond-watchdog.service\fR and reads the \fIwatchdog\fR section of
+\fI/etc/socmond/config.json\fR.
+.SH SEE ALSO
+.BR socmond (1)

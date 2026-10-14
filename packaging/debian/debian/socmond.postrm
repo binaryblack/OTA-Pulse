@@ -1,0 +1,14 @@
+#!/bin/sh
+# postrm for socmond.
+# /var/lib/socmond holds the device's API key and identity; it is removed on purge only.
+set -e
+
+case "$1" in
+    purge)
+        rm -rf /var/lib/socmond /var/log/socmond
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,5 @@
+debian/man/socmond.1
+debian/man/socmond-watchdog.1
+debian/man/socmond-core-handler.1
+debian/man/soc-ctl.1
+debian/man/soc-deregister.1

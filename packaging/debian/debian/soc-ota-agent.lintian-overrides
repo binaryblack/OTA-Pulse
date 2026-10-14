@@ -1,0 +1,4 @@
+# The agent configuration is a conffile that an operator may extend with a tenant token or API key
+# (TenantToken, SoCAPIKey). The Yocto images ship it as 0600 for that reason, and so does this
+# package; the shipped template itself contains no credential.
+soc-ota-agent: non-standard-file-perm 0600 != 0644 [etc/otapulse/otapulse.conf]

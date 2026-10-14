@@ -1,0 +1,13 @@
+.TH SOCMOND-CORE-HANDLER 1 "October 2026" "OTA-Pulse" "OTA-Pulse Manual"
+.SH NAME
+socmond-core-handler \- core dump handler of the OTA-Pulse monitoring daemon
+.SH SYNOPSIS
+.B socmond-core-handler
+.I pid uid gid signal time limit host executable
+.SH DESCRIPTION
+Called by the kernel through \fBkernel.core_pattern\fR (see \fI/usr/lib/sysctl.d/90-socmond-coredump.conf\fR),
+not by users. It stores the core dump in \fI/var/lib/socmond/coredumps\fR, limited in size, so that
+\fBsocmond\fR(1) can upload it.
+.SH SEE ALSO
+.BR socmond (1),
+.BR core (5)

@@ -1,0 +1,47 @@
+.TH SOC-CTL 1 "October 2026" "OTA-Pulse" "OTA-Pulse Manual"
+.SH NAME
+soc-ctl \- control the OTA-Pulse monitoring daemon
+.SH SYNOPSIS
+.B soc-ctl
+.I command
+[\fIarguments\fR]
+.SH COMMANDS
+.TP
+.B status
+Show the registration and service state.
+.TP
+.BI "config server " URL
+Set the backend URL.
+.TP
+.BI "config token " TOKEN
+Store the provisioning token (mode 0600).
+.TP
+.BI "config apikey " KEY
+Store a device API key directly.
+.TP
+.BI "config deviceid " ID
+Set the device identifier.
+.TP
+.B provision
+Register the device with the stored provisioning token.
+.TP
+.B register
+Register the device.
+.TP
+.B deregister
+Deregister the device (see \fBsoc-deregister\fR(1)).
+.TP
+.B restart
+Restart the monitoring daemon.
+.TP
+.B test
+Test the connection to the backend.
+.TP
+.BR logs " [" \-f "|" \fIlines\fR "]"
+Show or follow the daemon log.
+.TP
+.B help
+Show the built-in help.
+.SH SEE ALSO
+.BR socmond (1),
+.BR soc-deregister (1)

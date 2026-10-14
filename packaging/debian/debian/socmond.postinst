@@ -1,0 +1,34 @@
+#!/bin/sh
+# postinst for socmond.
+# Credentials: the package ships no provisioning token. Place the token (one line, mode 0600) in
+# /etc/socmond/provisioning_token, or set auth.provisioning_token in /etc/socmond/config.json.
+#
+# First installation only, OTAPULSE_SERVER_URL in the environment of the installing process pre-seeds
+# server.base_url of /etc/socmond/config.json (plain characters only). Credentials are never taken from the
+# environment.
+set -e
+
+CONF=/etc/socmond/config.json
+
+case "$1" in
+    configure)
+        if [ -z "$2" ] && [ -f "$CONF" ] && [ -n "${OTAPULSE_SERVER_URL:-}" ]; then
+            case "$OTAPULSE_SERVER_URL" in
+                *[!A-Za-z0-9._:/@+=%,~-]*)
+                    echo "socmond: ignoring OTAPULSE_SERVER_URL: value contains characters that are not allowed" >&2 ;;
+                *)
+                    sed -i "s|^\\( *\"base_url\": *\\)\"[^\"]*\"|\\1\"$OTAPULSE_SERVER_URL\"|" "$CONF" ;;
+            esac
+        fi
+        if [ -d /run/systemd/system ]; then
+            # Route core dumps to the socmond handler right away (otherwise only after the next boot).
+            if [ -x /lib/systemd/systemd-sysctl ]; then
+                /lib/systemd/systemd-sysctl /usr/lib/sysctl.d/90-socmond-coredump.conf || true
+            fi
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

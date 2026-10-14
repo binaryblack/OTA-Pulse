@@ -1,0 +1,58 @@
+#!/bin/sh
+# postinst for soc-ota-agent.
+#
+# First installation only (no previous version), the environment of the installing process may
+# pre-seed the non-secret, per-image settings of /etc/otapulse/otapulse.conf, so that an image
+# builder does not have to edit the file afterwards:
+#   OTAPULSE_SERVER_URL        backend URL (ServerURL)
+#   OTAPULSE_ROOTFS_PART_A     root file system device of slot A (RootfsPartA)
+#   OTAPULSE_ROOTFS_PART_B     root file system device of slot B (RootfsPartB)
+#   OTAPULSE_DEVICE_TYPE       device type the artifacts are checked against; written to
+#                              /etc/otapulse/device_type and /var/lib/otapulse/device_type
+# Credentials are never taken from the environment. Provision the device with soc-ota-provision.
+# Later upgrades never touch these settings: the file is a conffile and dpkg keeps local changes.
+set -e
+
+CONF=/etc/otapulse/otapulse.conf
+
+# Only plain characters are accepted: the value ends up in a sed expression and in a JSON string.
+otapulse_safe() {
+    case "$2" in
+        "") return 1 ;;
+        *[!A-Za-z0-9._:/@+=%,~-]*)
+            echo "soc-ota-agent: ignoring $1: value contains characters that are not allowed" >&2
+            return 1 ;;
+    esac
+    return 0
+}
+
+otapulse_set_json() {
+    # $1 JSON key, $2 value, $3 environment variable name (for messages)
+    otapulse_safe "$3" "$2" || return 0
+    sed -i "s|^\\( *\"$1\": *\\)\"[^\"]*\"|\\1\"$2\"|" "$CONF"
+}
+
+case "$1" in
+    configure)
+        if [ -z "$2" ] && [ -f "$CONF" ]; then
+            [ -z "${OTAPULSE_SERVER_URL:-}" ] || otapulse_set_json ServerURL "$OTAPULSE_SERVER_URL" OTAPULSE_SERVER_URL
+            [ -z "${OTAPULSE_ROOTFS_PART_A:-}" ] || otapulse_set_json RootfsPartA "$OTAPULSE_ROOTFS_PART_A" OTAPULSE_ROOTFS_PART_A
+            [ -z "${OTAPULSE_ROOTFS_PART_B:-}" ] || otapulse_set_json RootfsPartB "$OTAPULSE_ROOTFS_PART_B" OTAPULSE_ROOTFS_PART_B
+            if [ -n "${OTAPULSE_DEVICE_TYPE:-}" ] && otapulse_safe OTAPULSE_DEVICE_TYPE "$OTAPULSE_DEVICE_TYPE"; then
+                mkdir -p /var/lib/otapulse
+                if [ ! -e /etc/otapulse/device_type ]; then
+                    printf 'device_type=%s\n' "$OTAPULSE_DEVICE_TYPE" > /etc/otapulse/device_type
+                    chmod 0444 /etc/otapulse/device_type
+                fi
+                if [ ! -e /var/lib/otapulse/device_type ]; then
+                    printf 'device_type=%s\n' "$OTAPULSE_DEVICE_TYPE" > /var/lib/otapulse/device_type
+                    chmod 0444 /var/lib/otapulse/device_type
+                fi
+            fi
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

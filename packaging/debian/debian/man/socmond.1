@@ -1,0 +1,35 @@
+.TH SOCMOND 1 "October 2026" "OTA-Pulse" "OTA-Pulse Manual"
+.SH NAME
+socmond \- OTA-Pulse device monitoring daemon
+.SH SYNOPSIS
+.B socmond
+[\fB\-\-config\fR \fIFILE\fR] [\fB\-\-version\fR] [\fB\-\-help\fR]
+.SH DESCRIPTION
+Collects device metrics (CPU, memory, disk, network, temperature), captures crash dumps and the reason of the
+last reboot, and uploads them to the backend. It is started by \fBsocmond.service\fR.
+.PP
+On the first start it registers with the provisioning token and stores the per-device API key in
+\fI/var/lib/socmond/api_key\fR. The token is read from \fIauth.provisioning_token\fR in
+\fI/etc/socmond/config.json\fR or, if that is empty, from \fI/etc/socmond/provisioning_token\fR.
+.SH OPTIONS
+.TP
+.BI \-\-config " FILE"
+Use another configuration file.
+.TP
+.B \-\-version
+Print the version and exit.
+.SH FILES
+.TP
+.I /etc/socmond/config.json
+Configuration. Contains no credentials as shipped.
+.TP
+.I /etc/socmond/provisioning_token
+Optional provisioning token (mode 0600).
+.TP
+.I /var/lib/socmond
+Persistent state: API key, buffered metrics, core dumps.
+.SH SEE ALSO
+.BR soc-ctl (1),
+.BR soc-deregister (1),
+.BR socmond-watchdog (1),
+.BR socmond-core-handler (1)

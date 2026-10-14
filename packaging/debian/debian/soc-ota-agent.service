@@ -1,0 +1,57 @@
+[Unit]
+Description=OTA-Pulse device update agent
+Documentation=man:soc-ota-agent(1) https://github.com/binaryblack/OTA-Pulse
+# Bootloader compatibility mode: the bootloader environment (U-Boot env or GRUB grubenv) owns the
+# boot-slot flag and rollback. /etc/fw_env.config of such images points into the data partition,
+# so the agent must not start before /data is available. RequiresMountsFor= adds the ordering and
+# the requirement only when /data is a separate mount; on a layout without one it falls back to the
+# root file system and the unit still starts.
+RequiresMountsFor=/data
+# otapulse-data-seed.service seeds /data/otapulse/device_type from /etc/otapulse/device_type and verifies
+# it. Requires=, not Wants=: when the check fails (the data partition carries a different device type)
+# the agent must not start, rather than accept artifacts for other hardware.
+Requires=otapulse-data-seed.service
+After=otapulse-data-seed.service
+# The first TLS call to the backend can race a cold or wrong clock on a board without a working RTC
+# (certificate "not yet valid"). time-sync.target is reached once the clock is synchronised or the
+# bounded wait of systemd-time-wait-sync.service has elapsed. Wants=, never Requires=: a timed-out
+# wait must not stop the agent from starting.
+After=network-online.target systemd-resolved.service time-sync.target
+Wants=network-online.target systemd-time-wait-sync.service
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=/bin/sh -c 'test -f /etc/otapulse/otapulse.conf'
+ExecStart=/usr/bin/soc-ota-agent daemon
+Restart=on-failure
+RestartSec=30
+# Updates of multi-GB images can take 30+ minutes; the agent has its own network timeouts.
+WatchdogSec=0
+
+# A zero RLIMIT_CORE makes the kernel skip a piped core_pattern entirely; socmond's core handler
+# exists to capture crashes of this process. GOTRACEBACK=crash makes the Go runtime re-raise fatal
+# signals so that a core dump is really produced.
+LimitCORE=infinity
+Environment=GOTRACEBACK=crash
+
+# The agent runs as root and writes the boot environment and the boot partition, so the file system
+# is deliberately not mounted read-only for it. ReadWritePaths= entries with a leading "-" are
+# ignored when the path does not exist (a missing path would fail the namespace setup).
+ProtectSystem=false
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=no
+ReadWritePaths=-/var/lib/otapulse
+ReadWritePaths=-/etc/otapulse
+ReadWritePaths=-/data
+ReadWritePaths=-/data/ota
+ReadWritePaths=-/data/otapulse
+
+Environment="PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+# Credentials and the device identity live on the persistent data partition so that they survive
+# A/B root file system updates.
+Environment="OTAPULSE_DATASTORE_DIR=/data/otapulse"
+
+[Install]
+WantedBy=multi-user.target

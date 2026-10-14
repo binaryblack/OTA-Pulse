@@ -1,0 +1,10 @@
+#!/bin/sh
+# postrm for soc-ota-agent.
+# The device identity, the credentials and the boot environment live on the persistent data
+# partition (/data) and in the bootloader environment. They belong to the device, not to the package,
+# and are never removed here, not even on purge.
+set -e
+
+#DEBHELPER#
+
+exit 0

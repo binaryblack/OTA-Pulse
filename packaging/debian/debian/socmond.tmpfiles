@@ -1,0 +1,8 @@
+# socmond runtime, log and state directories.
+d /run/socmond              0755 root root -
+d /var/log/socmond          0755 root root -
+d /var/lib/socmond          0755 root root -
+d /var/lib/socmond/ota      0755 root root -
+d /var/lib/socmond/coredumps 0755 root root -
+d /var/lib/socmond/metrics  0755 root root -
+d /data/ota                 0755 root root -
