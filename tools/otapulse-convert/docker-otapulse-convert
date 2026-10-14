@@ -1,0 +1,64 @@
+#!/bin/sh
+#
+# Copyright 2019 Northern.tech AS
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+# Run otapulse-convert in its container. Build the container first with ./docker-build.
+#
+#   OTAPULSE_ARTIFACT_NAME=release-1 ./docker-otapulse-convert --disk-image input/image.img \
+#       --config configs/<your configuration>
+
+set -e
+
+OTAPULSE_CONVERT_VERSION="$(cat VERSION)"
+
+IMAGE_NAME=${IMAGE_NAME:-"otapulse/otapulse-convert:${OTAPULSE_CONVERT_VERSION}"}
+ASSETS_DIRECTORY=${ASSETS_DIRECTORY:-"$(pwd)/assets"}
+CONFIGS_DIRECTORY=${CONFIGS_DIRECTORY:-"$(pwd)/configs"}
+DEPLOY_DIRECTORY=${DEPLOY_DIRECTORY:-"$(pwd)/deploy"}
+INPUT_DIRECTORY=${INPUT_DIRECTORY:-"$(pwd)/input"}
+LOGS_DIRECTORY=${LOGS_DIRECTORY:-"$(pwd)/logs"}
+WORK_DIRECTORY=${WORK_DIRECTORY:-"$(pwd)/work"}
+
+mkdir -p "$DEPLOY_DIRECTORY"
+mkdir -p "$LOGS_DIRECTORY"
+
+# Create a unique log file so we can run multiple containers in parallel
+LOG_FILE="convert.log.$(date +%s)-$$"
+
+echo "using log file at: ${LOGS_DIRECTORY}/${LOG_FILE}"
+
+set +e
+docker run \
+  --rm \
+  -v "$ASSETS_DIRECTORY":/otapulse-convert/assets \
+  -v "$CONFIGS_DIRECTORY":/otapulse-convert/configs \
+  -v "$INPUT_DIRECTORY":/otapulse-convert/input \
+  -v "$LOGS_DIRECTORY":/otapulse-convert/logs \
+  -v "$DEPLOY_DIRECTORY":/otapulse-convert/deploy \
+  -v "$WORK_DIRECTORY":/otapulse-convert/work \
+  --privileged=true \
+  --cap-add=SYS_MODULE \
+  -v /dev:/dev \
+  -v /lib/modules:/lib/modules:ro \
+  --env OTAPULSE_ARTIFACT_NAME="${OTAPULSE_ARTIFACT_NAME}" \
+  --env OTAPULSE_CONVERT_LOG_FILE=logs/"${LOG_FILE}" \
+  --env OTAPULSE_CONVERT_VERSION="${OTAPULSE_CONVERT_VERSION}" \
+  "$IMAGE_NAME" "$@"
+
+exit_code=$?
+
+echo "Log file available at: ${LOGS_DIRECTORY}/${LOG_FILE}"
+
+exit ${exit_code}

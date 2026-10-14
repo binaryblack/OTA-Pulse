@@ -1,0 +1,20 @@
+Hand written, applies after the generated rename. Upstream keeps empty placeholder directories with files
+that the repository's own ignore rules (logs/, and a work/.gitignore that ignores everything including itself)
+would silently leave out of a commit; a vendored tree that differs from what is committed fails
+mender-sync.sh --verify on a fresh clone. The build script creates these directories.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/assets/.gitkeep b/assets/.gitkeep
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/logs/.gitkeep b/logs/.gitkeep
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/work/.gitignore b/work/.gitignore
+deleted file mode 100644
+index 72e8ffc..0000000
+--- a/work/.gitignore
++++ /dev/null
+@@ -1 +0,0 @@
+-*

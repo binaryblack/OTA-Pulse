@@ -1,0 +1,52 @@
+Hand written, applies after the generated rename. The data partition growth service of the converted
+image needs parted and sgdisk, which a minimal input image may not have: they are installed from the
+image's own distribution (deb_install_distro_packages).
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/modules/deb.sh b/modules/deb.sh
+index 81cfe62..cd3a0b4 100644
+--- a/modules/deb.sh
++++ b/modules/deb.sh
+@@ -186,6 +186,25 @@ function deb_get_and_install_input_package() {
+     deb_install_packages "work/rootfs/" "${packages[@]}"
+ }
+ 
++#  Install packages of the image's own distribution (tools that the image needs at run time and
++#  that the input image may not have, for example the partition tools of the data partition growth).
++#  The chroot must be set up (deb_prepare).
++#  $@ - package names
++function deb_install_distro_packages() {
++    if [[ $# -lt 1 ]]; then
++        log_fatal "deb_install_distro_packages() requires at least 1 argument"
++    fi
++    local -r image_root="$(pwd)/work/rootfs"
++    if [ ! -e "${image_root}/var/cache/apt/pkgcache.bin" ]; then
++        # Do not leave a package cache behind that the input image did not have.
++        mkdir -p "${image_root}/var/cache/apt"
++        touch "${image_root}/var/cache/apt/otapulse-convert.remove-apt-cache"
++    fi
++    log_info "Installing from the distribution: $*"
++    run_in_chroot_and_log_cmd "work/rootfs/" "env DEBIAN_FRONTEND=noninteractive apt-get update"
++    run_in_chroot_and_log_cmd "work/rootfs/" "env DEBIAN_FRONTEND=noninteractive apt-get install --assume-yes --no-install-recommends $*"
++}
++
+ function deb_cleanup() {
+     local -r dest_dir="$(pwd)/${1}"
+     if [[ $deb_chroot_set_up -eq 0 ]]; then
+diff --git a/otapulse-convert-modify b/otapulse-convert-modify
+index ba9c2b9..c3f8fc3 100755
+--- a/otapulse-convert-modify
++++ b/otapulse-convert-modify
+@@ -258,6 +258,11 @@ if [ "${OTAPULSE_INSTALL_INPUT_PACKAGES}" = "y" ]; then
+     deb_get_and_install_input_package ${OTAPULSE_INSTALL_INPUT_PACKAGES_PATH}
+ fi
+ 
++# The data partition is grown on the first boot with parted and sgdisk.
++if [ "${OTAPULSE_DATA_PART_GROWFS}" == "y" ]; then
++    deb_install_distro_packages parted gdisk
++fi
++
+ # Done with package installations.
+ deb_cleanup work/rootfs
+ 

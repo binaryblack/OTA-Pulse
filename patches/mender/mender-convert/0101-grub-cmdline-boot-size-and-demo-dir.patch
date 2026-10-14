@@ -1,0 +1,88 @@
+Hand written, applies after the generated rename (0100) and uses the final names.
+The image's own GRUB gets the extra kernel arguments (console) of OTAPULSE_GRUB_KERNEL_BOOT_ARGS plus
+panic=N as a drop-in; the Debian arm64 target sets the boot partition size and the serial console;
+the empty demo overlay directory placeholder goes.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/debian_arm64_uefi_config b/configs/debian_arm64_uefi_config
+index 49d0aa2..0ec5bb0 100644
+--- a/configs/debian_arm64_uefi_config
++++ b/configs/debian_arm64_uefi_config
+@@ -39,5 +39,8 @@ OTAPULSE_SPARSE_IMAGE="y"
+ OTAPULSE_GRUB_EFI_INTEGRATION=y
+ OTAPULSE_GRUB_D_INTEGRATION=y
+ 
+-# Packages (soc-ota-agent, socmond) come from input/packages. A file system resize tool and the
+-# kernel tools of the image are already there.
++# The boot partition of the input image is 127 MiB
++OTAPULSE_BOOT_PART_SIZE_MB="128"
++
++# Kernel console: the serial port of the QEMU "virt" machine, then the screen
++OTAPULSE_GRUB_KERNEL_BOOT_ARGS="console=tty0 console=ttyAMA0,115200n8"
+diff --git a/configs/otapulse_grub_config b/configs/otapulse_grub_config
+index dfd00be..2427122 100644
+--- a/configs/otapulse_grub_config
++++ b/configs/otapulse_grub_config
+@@ -13,10 +13,9 @@ OTAPULSE_GRUB_D_INTEGRATION=auto
+ # Version of the GRUB EFI binary of the assets (standalone mode only).
+ GRUB_VERSION=2.12
+ 
+-# Extra Linux kernel arguments for standalone mode, for example the content of /proc/cmdline of a
+-# known good system. Ignored when the GRUB integration is used (set the arguments in
+-# /etc/default/grub of the image instead). The panic timeout (OTAPULSE_PANIC_TIMEOUT_S) is added
+-# when the arguments do not carry one.
++# Extra Linux kernel arguments, for example a console. With the GRUB integration of the image's own
++# GRUB they are added to its command line (GRUB_CMDLINE_LINUX); in standalone mode they replace the
++# default arguments. The panic timeout (OTAPULSE_PANIC_TIMEOUT_S) is always added last.
+ OTAPULSE_GRUB_KERNEL_BOOT_ARGS=""
+ 
+ # Names of the Linux kernel image and the initial ram disk in /boot. The tool detects them; only
+diff --git a/modules/grub.sh b/modules/grub.sh
+index f200cd9..b0c9cc5 100644
+--- a/modules/grub.sh
++++ b/modules/grub.sh
+@@ -82,11 +82,7 @@ EOF
+ #
+ #
+ function grub_install_grub_d_config() {
+-    if [ -n "${OTAPULSE_GRUB_KERNEL_BOOT_ARGS}" ]; then
+-        log_warn "OTAPULSE_GRUB_KERNEL_BOOT_ARGS is ignored when OTAPULSE_GRUB_D_INTEGRATION is enabled. Set it in the GRUB configuration instead."
+-    fi
+-
+-    grub_install_panic_dropin
++    grub_install_cmdline_dropin
+ 
+     # When using grub.d integration, /boot/efi must point to the boot partition,
+     # and /boot/grub must point to grub-mender-grubenv on the boot partition.
+@@ -120,15 +116,20 @@ function grub_install_grub_d_config() {
+     )
+ }
+ 
+-# grub_install_panic_dropin
++# grub_install_cmdline_dropin
+ #
+-# Kernel panic timeout for the GRUB integration: a drop-in for the image's own GRUB configuration
+-# (read by update-grub), so that every menu entry it generates carries panic=N.
+-function grub_install_panic_dropin() {
++# Kernel command line for the GRUB integration: a drop-in for the image's own GRUB configuration
++# (read by update-grub), so that every menu entry it generates carries OTAPULSE_GRUB_KERNEL_BOOT_ARGS
++# and, last, panic=N.
++function grub_install_cmdline_dropin() {
++    local extra="${OTAPULSE_GRUB_KERNEL_BOOT_ARGS}"
++    if [[ ! "${extra}" =~ ^[A-Za-z0-9._:,=/@+%\ -]*$ ]]; then
++        log_fatal "OTAPULSE_GRUB_KERNEL_BOOT_ARGS contains characters that are not allowed."
++    fi
+     run_and_log_cmd "sudo mkdir -p work/rootfs/etc/default/grub.d"
+-    printf 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+${GRUB_CMDLINE_LINUX} }panic=%s"\n' \
+-        "${OTAPULSE_PANIC_TIMEOUT_S}" > work/otapulse-panic.cfg
+-    run_and_log_cmd "sudo install -m 644 work/otapulse-panic.cfg work/rootfs/etc/default/grub.d/90-otapulse-panic.cfg"
++    printf 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+${GRUB_CMDLINE_LINUX} }%spanic=%s"\n' \
++        "${extra:+${extra} }" "${OTAPULSE_PANIC_TIMEOUT_S}" > work/otapulse-cmdline.cfg
++    run_and_log_cmd "sudo install -m 644 work/otapulse-cmdline.cfg work/rootfs/etc/default/grub.d/90-otapulse-cmdline.cfg"
+ }
+ 
+ function grub_install_in_chroot() {
+diff --git a/input/rootfs_overlay_demo/.gitkeep b/input/rootfs_overlay_demo/.gitkeep
+deleted file mode 100644
+index e69de29..0000000

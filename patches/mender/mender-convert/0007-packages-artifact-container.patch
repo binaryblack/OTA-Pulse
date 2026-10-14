@@ -1,0 +1,800 @@
+Packages: .deb selection by architecture, the OTAPULSE_* environment of the package installation.
+Artifacts: the bootstrap artifact and the rootfs artifact are written with otapulse-artifact as .otapulse
+files, the rootfs artifact embeds the state scripts of the soc-ota-agent package and can be signed. The
+upstream test configuration output is gone. Container: no download of an upstream artifact tool or of a
+parallel compressor from a git host; bin/otapulse-artifact comes from the build context. Version file.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/Dockerfile b/Dockerfile
+index cbb79b8..fcb451f 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,21 +1,4 @@
+-# Cross-compile pxz (Parallel LZMA compression) in separate image
+-FROM --platform=$BUILDPLATFORM debian:13 AS build
+-ARG TARGETARCH
+-RUN dpkg --add-architecture ${TARGETARCH} && \
+-    apt-get update && \
+-    env DEBIAN_FRONTEND=noninteractive apt-get install --assume-yes \
+-    build-essential \
+-    gcc-aarch64-linux-gnu \
+-    git \
+-    liblzma-dev:${TARGETARCH}
+-RUN git clone https://github.com/jnovy/pxz.git /root/pxz
+-WORKDIR /root/pxz
+-RUN if [ "$TARGETARCH" = "arm64" ]; then CC=aarch64-linux-gnu-gcc; else CC=cc; fi; env CC=$CC make
+-
+ FROM ubuntu:24.04
+-ARG TARGETARCH
+-ARG MENDER_ARTIFACT_VERSION
+-RUN if [ "$MENDER_ARTIFACT_VERSION" = "" ]; then echo "MENDER_ARTIFACT_VERSION must be set!" 1>&2; exit 1; fi
+ 
+ RUN apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install --assume-yes \
+     sudo \
+@@ -38,11 +21,10 @@ RUN apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install --assum
+     pigz \
+ # mkfs.vfat (required for boot partition)
+     dosfstools \
+-# to download Mender binaries
++# to download assets and to be able to reach the package repositories of the image
+     wget \
+-# to be able to connect to Mender repo servers
+     ca-certificates \
+-# to compile mender-grub-env
++# to build the bootloader environment scripts
+     make \
+ # to get rid of 'sh: 1: udevadm: not found' errors triggered by parted
+     udev \
+@@ -50,8 +32,9 @@ RUN apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install --assum
+     bmap-tools \
+ # to regenerate the U-Boot boot.scr on platforms that need customization
+     u-boot-tools \
+-# needed to run pxz
+-    libgomp1  \
++# libraries of the artifact tool
++    libssl3t64 \
++    liblzma5 \
+ # artifact compression
+     zip  \
+     unzip \
+@@ -66,15 +49,13 @@ RUN apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install --assum
+     binfmt-support \
+     qemu-user-static
+ 
+-COPY --from=build /root/pxz/pxz /usr/bin/pxz
+-
+ # allow us to keep original PATH variables when sudoing
+ RUN echo "Defaults        secure_path=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH\"" > /etc/sudoers.d/secure_path_override
+ RUN chmod 0440 /etc/sudoers.d/secure_path_override
+ 
+-RUN deb_filename=mender-artifact_${MENDER_ARTIFACT_VERSION}-1%2Bubuntu%2Bnoble_${TARGETARCH}.deb && \
+-    wget "https://downloads.mender.io/repos/workstation-tools/pool/main/m/mender-artifact/${deb_filename}" \
+-    --output-document=/mender-artifact.deb && apt -y --fix-broken install /mender-artifact.deb && rm /mender-artifact.deb
++# The artifact tool, built by scripts/build-otapulse-artifact.sh and placed into the build context
++COPY bin/otapulse-artifact /usr/local/bin/otapulse-artifact
++RUN chmod 0755 /usr/local/bin/otapulse-artifact && otapulse-artifact --version
+ 
+ WORKDIR /
+ 
+@@ -85,8 +66,7 @@ RUN mkdir -p /mender-convert/input
+ RUN mkdir -p /mender-convert/deploy
+ RUN mkdir -p /mender-convert/logs
+ 
+-# It was discovered by accident that the Gitlab CI tends to give the clones full write permissions
+-# for everyone. But instead of fixing it in the CI build file, let's just fix it everywhere.
++# Nobody but the owner may write to the tool.
+ RUN chmod -R go-w /mender-convert
+ 
+ VOLUME ["/mender-convert/configs"]
+diff --git a/VERSION b/VERSION
+new file mode 100644
+index 0000000..7e9d61f
+--- /dev/null
++++ b/VERSION
+@@ -0,0 +1 @@
++5.3.0-op1
+diff --git a/docker-build b/docker-build
+index 33d1080..5f8abee 100755
+--- a/docker-build
++++ b/docker-build
+@@ -13,23 +13,19 @@
+ #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ #  See the License for the specific language governing permissions and
+ #  limitations under the License.
++#
++# Build the container image of otapulse-convert from this directory. The directory must hold
++# bin/otapulse-artifact (the build script puts it there).
+ 
+ set -e
+ 
+-GIT_PROVIDED_TAG_NAME="$(git describe --exact HEAD 2>/dev/null || \
+-    git for-each-ref "refs/heads/*" --format '%(refname:short)' --points-at HEAD 2>/dev/null | head -n1)"
+-
+-if [ -z "$IMAGE_NAME" -a -z "$GIT_PROVIDED_TAG_NAME" ]; then
+-  echo "Could not deduce mendersoftware/mender-convert container version from currently checked out commit. Using latest." 1>&2
+-fi
+-
+-IMAGE_NAME=${IMAGE_NAME:-"mendersoftware/mender-convert${GIT_PROVIDED_TAG_NAME:+:$GIT_PROVIDED_TAG_NAME}"}
++OTAPULSE_CONVERT_VERSION="$(cat VERSION)"
++IMAGE_NAME=${IMAGE_NAME:-"otapulse/otapulse-convert:${OTAPULSE_CONVERT_VERSION}"}
+ 
+-MENDER_ARTIFACT_VERSION=$(sed -n '/MENDER_ARTIFACT_VERSION:/{n;s/.*value: "\(.*\)".*/\1/p;}' .gitlab-ci.yml)
+-if [ -z "$MENDER_ARTIFACT_VERSION" ]; then
+-  echo "Could not parse  MENDER_ARTIFACT_VERSION from .gitlab-ci.yml" 1>&2
++if [ ! -x bin/otapulse-artifact ]; then
++  echo "bin/otapulse-artifact is missing: this tool was not built completely." 1>&2
+   exit 1
+ fi
+ 
+-echo "Building ${IMAGE_NAME} for local development" 1>&2
+-docker build -t "${IMAGE_NAME}" --build-arg MENDER_ARTIFACT_VERSION="${MENDER_ARTIFACT_VERSION}" .
++echo "Building ${IMAGE_NAME}" 1>&2
++docker build -t "${IMAGE_NAME}" .
+diff --git a/docker-mender-convert b/docker-mender-convert
+index cee880a..e52a9dc 100755
+--- a/docker-mender-convert
++++ b/docker-mender-convert
+@@ -13,24 +13,23 @@
+ #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ #  See the License for the specific language governing permissions and
+ #  limitations under the License.
++#
++# Run otapulse-convert in its container. Build the container first with ./docker-build.
++#
++#   OTAPULSE_ARTIFACT_NAME=release-1 ./docker-otapulse-convert --disk-image input/image.img \
++#       --config configs/<your configuration>
+ 
+ set -e
+ 
+-GIT_TAG_OR_BRANCH_NAME="$(git describe --exact HEAD 2>/dev/null || \
+-    git for-each-ref "refs/heads/*" --format '%(refname:short)' --points-at HEAD 2>/dev/null | head -n1)"
+-
+-if [ -z "$IMAGE_NAME" -a -z "$GIT_TAG_OR_BRANCH_NAME" ]; then
+-  echo "Could not deduce mendersoftware/mender-convert container version from currently checked out commit. Using latest." 1>&2
+-fi
++OTAPULSE_CONVERT_VERSION="$(cat VERSION)"
+ 
+-IMAGE_NAME=${IMAGE_NAME:-"mendersoftware/mender-convert${GIT_TAG_OR_BRANCH_NAME:+:$GIT_TAG_OR_BRANCH_NAME}"}
++IMAGE_NAME=${IMAGE_NAME:-"otapulse/otapulse-convert:${OTAPULSE_CONVERT_VERSION}"}
+ ASSETS_DIRECTORY=${ASSETS_DIRECTORY:-"$(pwd)/assets"}
+ CONFIGS_DIRECTORY=${CONFIGS_DIRECTORY:-"$(pwd)/configs"}
+ DEPLOY_DIRECTORY=${DEPLOY_DIRECTORY:-"$(pwd)/deploy"}
+ INPUT_DIRECTORY=${INPUT_DIRECTORY:-"$(pwd)/input"}
+ LOGS_DIRECTORY=${LOGS_DIRECTORY:-"$(pwd)/logs"}
+ WORK_DIRECTORY=${WORK_DIRECTORY:-"$(pwd)/work"}
+-MENDER_CONVERT_VERSION="$(git describe --tags --dirty --exact-match 2> /dev/null || git rev-parse --short HEAD)"
+ 
+ mkdir -p "$DEPLOY_DIRECTORY"
+ mkdir -p "$LOGS_DIRECTORY"
+@@ -43,19 +42,19 @@ echo "using log file at: ${LOGS_DIRECTORY}/${LOG_FILE}"
+ set +e
+ docker run \
+   --rm \
+-  -v "$ASSETS_DIRECTORY":/mender-convert/assets \
+-  -v "$CONFIGS_DIRECTORY":/mender-convert/configs \
+-  -v "$INPUT_DIRECTORY":/mender-convert/input \
+-  -v "$LOGS_DIRECTORY":/mender-convert/logs \
+-  -v "$DEPLOY_DIRECTORY":/mender-convert/deploy \
+-  -v "$WORK_DIRECTORY":/mender-convert/work \
++  -v "$ASSETS_DIRECTORY":/otapulse-convert/assets \
++  -v "$CONFIGS_DIRECTORY":/otapulse-convert/configs \
++  -v "$INPUT_DIRECTORY":/otapulse-convert/input \
++  -v "$LOGS_DIRECTORY":/otapulse-convert/logs \
++  -v "$DEPLOY_DIRECTORY":/otapulse-convert/deploy \
++  -v "$WORK_DIRECTORY":/otapulse-convert/work \
+   --privileged=true \
+   --cap-add=SYS_MODULE \
+   -v /dev:/dev \
+   -v /lib/modules:/lib/modules:ro \
+-  --env MENDER_ARTIFACT_NAME="${MENDER_ARTIFACT_NAME}" \
+-  --env MENDER_CONVERT_LOG_FILE=logs/"${LOG_FILE}" \
+-  --env MENDER_CONVERT_VERSION=${MENDER_CONVERT_VERSION} \
++  --env OTAPULSE_ARTIFACT_NAME="${OTAPULSE_ARTIFACT_NAME}" \
++  --env OTAPULSE_CONVERT_LOG_FILE=logs/"${LOG_FILE}" \
++  --env OTAPULSE_CONVERT_VERSION="${OTAPULSE_CONVERT_VERSION}" \
+   "$IMAGE_NAME" "$@"
+ 
+ exit_code=$?
+diff --git a/mender-convert b/mender-convert
+index 9997c01..8455a80 100755
+--- a/mender-convert
++++ b/mender-convert
+@@ -17,7 +17,6 @@
+ source modules/bootstrap.sh
+ source modules/cliparser.sh
+ source modules/decompressinput.sh
+-source modules/testscfg.sh
+ 
+ export MENDER_CONVERT_LOG_FILE=$(pwd)/${MENDER_CONVERT_LOG_FILE:-logs/convert.log}
+ touch ${MENDER_CONVERT_LOG_FILE}
+@@ -34,34 +33,45 @@ declare disk_image=""         # Needed in parse_cli_options, and is passed to de
+ declare -a overlays=()        # [Dummy] Needed in parse_cli_options, not here
+ declare -a configs=()         # [Dummy] Needed in parse_cli_options, not here
+ MENDER_ARTIFACT_NAME="${MENDER_ARTIFACT_NAME:-}"     # Required env variable
+-MENDER_CONVERT_VERSION="${MENDER_CONVERT_VERSION:-}" # Required env variable
++OTAPULSE_CONVERT_VERSION="${OTAPULSE_CONVERT_VERSION:-$(cat VERSION 2>/dev/null || true)}"
+ ###############################################################################
+ 
+ function show_help() {
+     cat << EOF
+-mender-convert
++otapulse-convert
+ 
+-A tool that takes an existing embedded image (Debian, Ubuntu, Raspbian, etc)
+-and converts it to a Mender image by restructuring partition table and adding
+-necessary files.
++A tool that takes an existing disk image (Debian, Raspberry Pi OS, ...) and converts it
++to an OTA-Pulse image: it restructures the partition table into a boot partition, two root
++file system partitions (A and B) and a data partition, sets up the bootloader (GRUB or U-Boot)
++for A/B updates with boot counting and automatic revert, installs the OTA-Pulse agent
++(soc-ota-agent) and the monitoring daemon (socmond), and writes an OTA-Pulse artifact
++(.otapulse) of the root file system.
+ 
+-Usage: $0 COMMAND [options]
++Usage: $0 [options]
+ 
+ Options:
+-  -d, --disk-image            - Path to disk image to convert (Debian, Raspbian,
+-                                Ubuntu, etc)
+-  -o, --overlay               - Path to root filesystem overlay directory, you
+-                                are able to provide this option multiple times
+-  -c, --config                - Path to configuration file, you are able to
+-                                provide this option multiple times
++  -d, --disk-image            - Path to the disk image to convert (Debian, Raspberry Pi OS,
++                                ...). Required.
++  -o, --overlay               - Path to a root filesystem overlay directory, you are able
++                                to provide this option multiple times
++  -c, --config                - Path to a configuration file, you are able to provide this
++                                option multiple times
+   -v, --version               - output version information and exit
+   -h, --help                  - display this help and exit
+ 
++The name of the update is given in the environment:
++
++  OTAPULSE_ARTIFACT_NAME="release-1" $0 --disk-image input/image.img --config configs/...
++
++The OTA-Pulse packages (soc-ota-agent and socmond .deb files) are read from input/packages.
++The configuration options are documented in configs/otapulse_convert_config. The converted image
++and the artifact are written to the deploy directory.
++
+ EOF
+ }
+ 
+ function show_version() {
+-    echo "Version: ${MENDER_CONVERT_VERSION}"
++    echo "otapulse-convert ${OTAPULSE_CONVERT_VERSION:-unknown}"
+ }
+ 
+ function trap_exit() {
+@@ -103,17 +113,16 @@ if [ "${mender_convert_dir}" != "${PWD}" ]; then
+ fi
+ 
+ if [ -z "${MENDER_ARTIFACT_NAME}" ]; then
+-    echo "Sorry, it seems that you have not defined MENDER_ARTIFACT_NAME"
++    echo "Sorry, it seems that you have not defined OTAPULSE_ARTIFACT_NAME"
+     echo "You can do this with the following command:"
+     echo ""
+-    echo -e "\tMENDER_ARTIFACT_NAME=\"release-1\" ./mender-convert"
++    echo -e "\tOTAPULSE_ARTIFACT_NAME=\"release-1\" ./otapulse-convert"
+     exit 1
+ fi
+ 
+ trap trap_term INT TERM
+ trap trap_exit EXIT
+ 
+-testscfg_init
+ 
+ parse_cli_options "$@"
+ 
+diff --git a/mender-convert-modify b/mender-convert-modify
+index 0a916db..8a22065 100755
+--- a/mender-convert-modify
++++ b/mender-convert-modify
+@@ -56,7 +56,6 @@ source modules/bootstrap.sh
+ source modules/disk.sh
+ source modules/probe.sh
+ source modules/deb.sh
+-source modules/testscfg.sh
+ source modules/grub.sh
+ source modules/support.sh
+ 
+@@ -89,6 +88,12 @@ done
+ # pathnames and avoid splitting those into multiple parameters.
+ source modules/config.sh $(printf "%q " "${configs[@]}")
+ 
++# The URL ends up in a configuration file and in a shell command of the package installation, so
++# only plain URL characters are accepted (the soc-ota-agent package applies the same rule).
++if ! [[ "${OTAPULSE_SERVER_URL}" =~ ^[A-Za-z0-9._:/@+=%,~-]*$ ]]; then
++    log_fatal "OTAPULSE_SERVER_URL contains characters that are not allowed (letters, digits and ._:/@+=%,~- only)."
++fi
++
+ if ! [[ "${OTAPULSE_PANIC_TIMEOUT_S}" =~ ^[1-9][0-9]*$ ]]; then
+     log_fatal "OTAPULSE_PANIC_TIMEOUT_S must be a positive number of seconds (got \"${OTAPULSE_PANIC_TIMEOUT_S}\"). Bootloader compatibility mode needs a kernel panic timeout: a kernel that panics without one stops forever and a failed update is never reverted."
+ fi
+diff --git a/mender-convert-package b/mender-convert-package
+index 86f3c84..4127d5f 100755
+--- a/mender-convert-package
++++ b/mender-convert-package
+@@ -21,6 +21,55 @@ function platform_package() {
+ }
+ PLATFORM_PACKAGE_HOOKS=(platform_package)
+ 
++# Write the OTA-Pulse artifact (the .otapulse file) of the converted root file system. This function
++# is defined here so that a configuration file passed with '--config' can replace it.
++#
++#  $1 - device type(s), space separated
++#  $2 - artifact name
++#  $3 - base name of the output files
++#
++# The state scripts of the soc-ota-agent package are embedded: an update runs the scripts that
++# come with the ARTIFACT, never the ones of the installed image.
++function otapulse_create_artifact() {
++    local -r device_types="${1}"
++    local -r artifact_name="${2}"
++    local -r image_name="${3}"
++    local -a device_type_args=()
++    local -a script_args=()
++    local -a key_args=()
++    local device_type script
++
++    for device_type in ${device_types}; do
++        device_type_args+=(--device-type "${device_type}")
++    done
++    for script in work/rootfs/usr/share/otapulse/state-scripts/*; do
++        [ -f "${script}" ] && script_args+=(--script "${script}")
++    done
++    if [ "${#script_args[@]}" -eq 0 ]; then
++        log_fatal "No state scripts found in /usr/share/otapulse/state-scripts of the image: the soc-ota-agent package is missing."
++    fi
++    if [ -n "${OTAPULSE_ARTIFACT_SIGNING_KEY}" ]; then
++        [ -f "${OTAPULSE_ARTIFACT_SIGNING_KEY}" ] || log_fatal "OTAPULSE_ARTIFACT_SIGNING_KEY: file not found: ${OTAPULSE_ARTIFACT_SIGNING_KEY}"
++        key_args=(--key "${OTAPULSE_ARTIFACT_SIGNING_KEY}")
++    else
++        log_warn "OTAPULSE_ARTIFACT_SIGNING_KEY is not set: the artifact is not signed and an agent that requires signed artifacts will refuse it"
++    fi
++
++    otapulse_artifact=deploy/${image_name}.otapulse
++    log_info "Writing the OTA-Pulse artifact to: ${otapulse_artifact}"
++    log_info "This can take up to 20 minutes depending on which compression method is used"
++
++    run_and_log_cmd "otapulse-artifact write rootfs-image \
++      --compression ${OTAPULSE_ARTIFACT_COMPRESSION} \
++      --no-progress \
++      --file work/rootfs.img \
++      --output-path ${otapulse_artifact} \
++      --artifact-name ${artifact_name} \
++      ${device_type_args[*]} \
++      ${script_args[*]} \
++      ${key_args[*]:-}"
++}
++
+ function trap_exit() {
+     echo "mender-convert-package has finished. Cleaning up..."
+     sudo umount -f work/boot > /dev/null 2>&1 || true
+@@ -38,8 +87,6 @@ echo "Running $(basename $0): $@"
+ 
+ source modules/bootstrap.sh
+ source modules/disk.sh
+-source modules/testscfg.sh
+-source modules/versioncmp.sh
+ 
+ # The mender_convert_config is always used and provides all the defaults
+ declare -a configs=("configs/mender_convert_config")
+@@ -144,7 +191,7 @@ rootfs_part_sectors=$(((${disk_image_total_sectors} - ${data_part_sectors} - \
+ # Make sure rootfs size is aligned to MENDER_PARTITION_ALIGNMENT
+ rootfs_part_sectors=$(disk_align_sectors ${rootfs_part_sectors} ${MENDER_PARTITION_ALIGNMENT})
+ 
+-device_type=$(cat work/rootfs/data/mender/device_type | sed 's/[^=]*=//')
++device_type=$(cat work/rootfs/data/otapulse/device_type | sed 's/[^=]*=//')
+ 
+ # Get the name from the input disk_image
+ temp_img_name=$(basename "$disk_image")
+@@ -156,7 +203,7 @@ if [ -z "${DEPLOY_IMAGE_NAME}" ]; then
+     image_name="${temp_img_name%.*}"
+ 
+     # Add device types to the filename and replaces whitespace with + to seperate device types.
+-    image_name="${image_name}-$(sed 's| |+|g' <<< $device_type)-mender"
++    image_name="${image_name}-$(sed 's| |+|g' <<< $device_type)-otapulse"
+ else
+     # User has choosen custom filename in config file
+     image_name=$DEPLOY_IMAGE_NAME
+@@ -212,15 +259,6 @@ else
+     log_fatal "Could not determine root file-system type. Aborting..."
+ fi
+ 
+-if [[ "${MENDER_CLIENT_INSTALL}" == y ]]; then
+-    # If the client version is less than 3.4, then log a warning
+-    if ! minimum_required_version "3.4.0" "${MENDER_CLIENT_VERSION}"; then
+-        log_warn "You are now installing a Mender client which does not support the "
+-        log_warn "bootstrap Artifact present in the image. This means that updates will not "
+-        log_warn "work, and your image is impossible to update"
+-    fi
+-fi
+-
+ disk_create_file_system_from_folder "work/rootfs/" "work/rootfs.img" \
+     "${rootfs_image_sectors}" "${image_fs_type}"
+ 
+@@ -231,23 +269,20 @@ run_and_log_cmd "cp --sparse=always work/rootfs.img deploy/${image_name}.${image
+ # the data image
+ log_info "Installing the bootstrap Artifact"
+ rootfs_img_checksum=$(sha256sum work/rootfs.img | cut -d ' ' -f1)
+-run_and_log_cmd "mender-artifact write bootstrap-artifact \
++run_and_log_cmd "otapulse-artifact write bootstrap-artifact \
+                     --artifact-name "${MENDER_ARTIFACT_NAME}" \
+                     --no-progress \
+-                    --compatible-types "${device_type}" \
++                    --device-type "${device_type}" \
+                     --provides rootfs-image.version:"${MENDER_ARTIFACT_NAME}" \
+                     --provides rootfs-image.checksum:${rootfs_img_checksum} \
+                     --clears-provides 'rootfs-image.*' \
+-                    --output-path work/data/mender/bootstrap.mender"
++                    --output-path work/data/otapulse/bootstrap.otapulse"
+ 
+ disk_create_file_system_from_folder "work/data/" "work/data.img" \
+     "${data_part_sectors}" "${image_fs_type}"
+ run_and_log_cmd "rm -rf work/data"
+ 
+-if [ "${MENDER_CLIENT_INSTALL}" != "y" ]; then
+-    log_warn "Generating Artifact with no Mender client in it; not suitable for deployment"
+-fi
+-mender_create_artifact "${device_type}" "${MENDER_ARTIFACT_NAME}" "${image_name}"
++otapulse_create_artifact "${device_type}" "${MENDER_ARTIFACT_NAME}" "${image_name}"
+ 
+ log_info "Creating Mender compatible disk-image"
+ 
+@@ -381,7 +416,7 @@ case "${MENDER_COMPRESS_DISK_IMAGE}" in
+         ;;
+     lzma)
+         log_info "Compressing ${img_path}.xz"
+-        run_and_log_cmd "pxz --best --force ${img_path}"
++        run_and_log_cmd "xz -T0 -9 --force ${img_path}"
+         ;;
+     zstd)
+         log_info "Compressing ${img_path}.zst"
+@@ -396,62 +431,3 @@ case "${MENDER_COMPRESS_DISK_IMAGE}" in
+ esac
+ 
+ log_info "Conversion has completed! \o/"
+-
+-##################### Create configuration file for tests ######################
+-
+-mender_features="mender-convert"
+-
+-if [ -z "${MENDER_BOOT_PART_MOUNT_LOCATION:-}" ]; then
+-    if [ "${MENDER_GRUB_EFI_INTEGRATION}" == "y" ]; then
+-        MENDER_BOOT_PART_MOUNT_LOCATION="/boot/efi"
+-    else
+-        MENDER_BOOT_PART_MOUNT_LOCATION="/uboot"
+-    fi
+-fi
+-
+-if [ "${MENDER_GRUB_EFI_INTEGRATION}" == "y" ]; then
+-    # This is the name of the MENDER_FEATURES in Yocto
+-    bootloader_feature="mender-grub"
+-else
+-    # This is the name of the MENDER_FEATURES in Yocto
+-    bootloader_feature="mender-uboot"
+-fi
+-mender_features="${mender_features} ${bootloader_feature}"
+-
+-if [ "${MENDER_CLIENT_INSTALL}" = "y" ]; then
+-    mender_features="${mender_features} mender-client-install"
+-fi
+-
+-testscfg_add "MENDER_BOOT_PART" "${boot_part_device}"
+-testscfg_add "MENDER_ROOTFS_PART_A" "${root_part_a_device}"
+-testscfg_add "MENDER_ROOTFS_PART_B" "${root_part_b_device}"
+-testscfg_add "MENDER_DATA_PART" "${data_part_device}"
+-testscfg_add "MENDER_BOOT_PART_MOUNT_LOCATION" "${MENDER_BOOT_PART_MOUNT_LOCATION}"
+-testscfg_add "MENDER_BOOT_PART_SIZE_MB" "$(disk_sectors_to_mb ${boot_part_sectors})"
+-testscfg_add "MENDER_DATA_PART_SIZE_MB" "${MENDER_DATA_PART_SIZE_MB}"
+-testscfg_add "MENDER_DEVICE_TYPE" "${device_type}"
+-testscfg_add "MENDER_PARTITIONING_OVERHEAD_KB" "$(((${overhead_sectors} * 512) / 1024))"
+-testscfg_add "MENDER_PARTITION_ALIGNMENT" "${MENDER_PARTITION_ALIGNMENT}"
+-testscfg_add "MENDER_STORAGE_TOTAL_SIZE_MB" "${MENDER_STORAGE_TOTAL_SIZE_MB}"
+-testscfg_add "MENDER_UBOOT_ENV_STORAGE_DEVICE_OFFSET" "12582912"
+-testscfg_add "MENDER_ARTIFACT_NAME" "${MENDER_ARTIFACT_NAME}"
+-testscfg_add "MENDER_FEATURES" "${mender_features}"
+-testscfg_add "DEPLOY_DIR_IMAGE" "${PWD}/deploy"
+-testscfg_add "MENDER_MACHINE" "${device_type}"
+-testscfg_add "MENDER_GRUB_D_INTEGRATION" "${MENDER_GRUB_D_INTEGRATION}"
+-
+-# Outputting device base only relevant for some configurations
+-if [ "${MENDER_ENABLE_PARTUUID}" != "y" ]; then
+-    testscfg_add "MENDER_STORAGE_DEVICE_BASE" "${MENDER_STORAGE_DEVICE_BASE}"
+-fi
+-
+-# Something that the tests expect to be defined (originally from Yocto)
+-if [ "$MENDER_GRUB_EFI_INTEGRATION" = "y" ]; then
+-    testscfg_add "IMAGE_FSTYPES" "${image_fs_type} mender uefiimg"
+-else
+-    testscfg_add "IMAGE_FSTYPES" "${image_fs_type} mender sdimg"
+-fi
+-testscfg_add "ARTIFACTIMG_FSTYPE" "${image_fs_type}"
+-
+-# Save configuration file for tests
+-testscfg_save deploy/${image_name}.cfg
+diff --git a/modules/deb.sh b/modules/deb.sh
+index 9c64d06..6349f59 100644
+--- a/modules/deb.sh
++++ b/modules/deb.sh
+@@ -36,9 +36,7 @@ function deb_install_packages() {
+         deb_packages+=("$(pwd)/${pkg}")
+     done
+ 
+-    (   
+-        # Mender postinstall script uses this variable.
+-        export DEVICE_TYPE="${MENDER_DEVICE_TYPE}"
++    (
+         # This may be called from a larger script that manages the chroot
+         # setup/teardown by using deb_prepare/cleanup or from a place where the
+         # chroot is supposed to be set up and torn down for a single package
+@@ -68,10 +66,15 @@ function deb_install_packages_in_chroot() {
+     done
+ 
+     local ret=0
++    # The soc-ota-agent package reads these on its first installation and writes them into
++    # /etc/otapulse/otapulse.conf (empty ones are ignored).
+     local dpkg_output
+     dpkg_output=$(run_in_chroot_and_log_cmd_with_output_noexit "$dest_dir" "env \
+         DEBIAN_FRONTEND=noninteractive \
+-        DEVICE_TYPE=${MENDER_DEVICE_TYPE} \
++        OTAPULSE_SERVER_URL=${OTAPULSE_SERVER_URL} \
++        OTAPULSE_ROOTFS_PART_A=${root_part_a_device} \
++        OTAPULSE_ROOTFS_PART_B=${root_part_b_device} \
++        OTAPULSE_DEVICE_TYPE=${OTAPULSE_DEVICE_TYPE} \
+         dpkg --install ${tmp_packages[*]}") || ret=$?
+ 
+     # Clean up copied packages
+@@ -108,7 +111,10 @@ function deb_install_packages_in_chroot() {
+             # satisfied. Then we need to run apt afterwards to remedy the problem.
+             run_in_chroot_and_log_cmd "$dest_dir" "env \
+                 DEBIAN_FRONTEND=noninteractive \
+-                DEVICE_TYPE=${MENDER_DEVICE_TYPE} \
++                OTAPULSE_SERVER_URL=${OTAPULSE_SERVER_URL} \
++                OTAPULSE_ROOTFS_PART_A=${root_part_a_device} \
++                OTAPULSE_ROOTFS_PART_B=${root_part_b_device} \
++                OTAPULSE_DEVICE_TYPE=${OTAPULSE_DEVICE_TYPE} \
+                 apt --fix-broken --assume-yes install"
+ 
+             # Verify that all packages were installed. If we install input packages with dependencies not available in the APT repositories,
+@@ -137,99 +143,6 @@ function deb_prepare() {
+     local -r root_dir="${1}"
+ 
+     chroot_setup "$root_dir" && deb_chroot_set_up=1
+-    if [[ -f "${root_dir}/etc/apt/sources.list.d/mender.list" ]]; then
+-        cp -a "${root_dir}/etc/apt/sources.list.d/mender.list"{,.orig}
+-    fi
+-    if [[ -f "${root_dir}/etc/apt/trusted.gpg.d/mender.asc" ]]; then
+-        cp -a "${root_dir}/etc/apt/trusted.gpg.d/mender.asc"{,.orig}
+-    fi
+-}
+-
+-#  Make sure the given variant (stable/experimental) of the APT repository is
+-#  enabled.
+-#  $1 - Repository variant ("stable" (default) or "experimental")
+-function deb_ensure_repo_enabled() {
+-    local variant="stable"
+-    if [[ $# -eq 1 ]]; then
+-        variant="$1"
+-    fi
+-
+-    if ! [[ -f "work/rootfs/etc/apt/trusted.gpg.d/mender.asc" ]]; then
+-        mkdir -p "work/rootfs/etc/apt/trusted.gpg.d/"
+-        wget --quiet -O "work/rootfs/etc/apt/trusted.gpg.d/mender.asc" "$MENDER_APT_KEY_URL"
+-    fi
+-    if ! gpg --quiet --show-keys --with-fingerprint --with-colons "work/rootfs/etc/apt/trusted.gpg.d/mender.asc" \
+-                                                                                                         | grep -qE "fpr:+$MENDER_APT_KEY_FP:"; then
+-        log_fatal "APT key fingerprint mismatch, cannot continue"
+-    fi
+-
+-    local deb_arch=$(probe_debian_arch_name)
+-    local deb_distro=$(probe_debian_distro_name)
+-    local deb_codename=$(probe_debian_distro_codename)
+-    local -r list_file="work/rootfs/etc/apt/sources.list.d/mender.list"
+-    touch "$list_file"
+-    if ! grep -qF "$MENDER_APT_REPO_URL $deb_distro/$deb_codename/$variant" "$list_file"; then
+-        echo "deb [arch=${deb_arch}] $MENDER_APT_REPO_URL $deb_distro/$deb_codename/$variant main" >> "$list_file"
+-        run_in_chroot_and_log_cmd "work/rootfs/" "apt-get update"
+-        if [[ $? != 0 ]]; then
+-            log_fatal "Failed to fetch repository metadata, cannot continue"
+-        fi
+-    fi
+-}
+-
+-#  Get the exact package (as name=version) for the given spec from the APT repository
+-#  $1 - Package name
+-#  $2 - Package version
+-function deb_get_repo_package() {
+-    if [[ $# -ne 2 ]]; then
+-        log_fatal "$FUNCNAME requires 2 arguments"
+-    fi
+-    local -r pkg_name="$1"
+-    local -r pkg_ver="$2"
+-
+-    local ver_filter
+-    local variant_filter="stable"
+-    if [[ "$pkg_ver" = "latest" ]]; then
+-        ver_filter='.*'
+-    elif [[ "$pkg_ver" = "master" ]] || [[ "$pkg_ver" = "main" ]]; then
+-        ver_filter='.*'
+-        variant_filter="experimental"
+-    else
+-        # particular version like "5", "5.1" or even "5.2.1", we need to replace
+-        # all the '.' with '\.' to convert the version into an equivalent
+-        # regular expression and make sure that an incomplete version like "5"
+-        # or "5.1" only matches compatible versions, i.e. having dot after the
+-        # specified version prefix.
+-        if [[ "${pkg_ver}" =~ ^[0-9](\.[0-9])?$ ]]; then
+-            ver_filter="${pkg_ver//\./\\.}\."
+-        else
+-            ver_filter="${pkg_ver//\./\\.}"
+-        fi
+-    fi
+-
+-    # `apt-cache madison` output is something like this:
+-    # mender-client4 | 5.0.2-1+debian+bookworm | https://downloads.mender.io/repos/device-components debian/bookworm/stable/main arm64 Packages
+-    # mender-client4 | 5.0.1-1+debian+bookworm | https://downloads.mender.io/repos/device-components debian/bookworm/stable/main arm64 Packages
+-    # mender-client4 | 4.0.7-1+debian+bookworm | https://downloads.mender.io/repos/device-components debian/bookworm/stable/main arm64 Packages
+-    local -r chosen_ver=$(
+-        run_in_chroot_and_log_cmd_with_output "work/rootfs/" "apt-cache madison $pkg_name" \
+-                                                                               | grep -F "$MENDER_APT_REPO_URL" | grep -F "$variant_filter" | cut -d\| -f2 | grep " *$ver_filter" | tr -d ' ' \
+-                                                                                                                     | sort -rV | head -n1
+-    )
+-    if [[ -z "$chosen_ver" ]]; then
+-        log_fatal "Cannot choose exact version for package $pkg_name $pkg_ver from the APT repository"
+-    fi
+-    log_debug "Selected $pkg_name=$chosen_ver"
+-    echo "$pkg_name=$chosen_ver"
+-}
+-
+-#  Install the given packages from the APT repository
+-#  $1 - Packages to install (space-separated name[=version] values)
+-function deb_install_repo_packages() {
+-    run_in_chroot_and_log_cmd "work/rootfs/" "env \
+-        DEBIAN_FRONTEND=noninteractive \
+-        DEVICE_TYPE=${MENDER_DEVICE_TYPE} \
+-        apt --assume-yes --fix-broken --no-remove install $1"
+ }
+ 
+ #  Install binary files of a deb package into work/deb-packages from a local directory
+@@ -241,14 +154,32 @@ function deb_get_and_install_input_package() {
+     fi
+ 
+     local -r package_path="$1"
+-    local -a packages=("${package_path}"/*.deb)
++    local -a all_packages=("${package_path}"/*.deb)
+ 
+     # Check if we have any packages
+-    if [[ ! -e "${packages[0]}" ]]; then
++    if [[ ! -e "${all_packages[0]}" ]]; then
+         log_warn "No .deb packages found in ${package_path}"
+         return
+     fi
+ 
++    # Only the packages for the architecture of the image (and architecture independent ones)
++    # are installed, so one directory can hold the packages of all architectures.
++    local -r image_arch="$(probe_debian_arch_name)"
++    local -a packages=()
++    local pkg pkg_arch
++    for pkg in "${all_packages[@]}"; do
++        pkg_arch="$(dpkg-deb -f "$pkg" Architecture)"
++        if [[ "$pkg_arch" == "$image_arch" || "$pkg_arch" == "all" ]]; then
++            packages+=("$pkg")
++        else
++            log_info "Skipping $(basename "$pkg"): architecture $pkg_arch, the image is $image_arch"
++        fi
++    done
++    if [[ ${#packages[@]} -eq 0 ]]; then
++        log_warn "No .deb package for the architecture ${image_arch} in ${package_path}"
++        return
++    fi
++
+     log_info "Installing ${#packages[@]} package(s) from ${package_path}"
+ 
+     # Install all packages at once - dpkg handles dependencies automatically
+@@ -267,12 +198,4 @@ function deb_cleanup() {
+     if [ -e "$dest_dir/var/cache/apt/mender-convert.remove-apt-cache" ]; then
+         rm -rf "$dest_dir/var/cache/apt"
+     fi
+-    rm -f "${dest_dir}/etc/apt/sources.list.d/mender.list"
+-    if [[ -f "${dest_dir}/etc/apt/sources.list.d/mender.list.orig" ]]; then
+-        mv "${dest_dir}/etc/apt/sources.list.d/mender.list"{.orig,}
+-    fi
+-    rm -f "${dest_dir}/etc/apt/trusted.gpg.d/mender.asc"
+-    if [[ -f "${dest_dir}/etc/apt/trusted.gpg.d/mender.asc.orig" ]]; then
+-        mv "${dest_dir}/etc/apt/trusted.gpg.d/mender.asc"{.orig,}
+-    fi
+ }
+diff --git a/modules/testscfg.sh b/modules/testscfg.sh
+deleted file mode 100644
+index 771ace3..0000000
+--- a/modules/testscfg.sh
++++ /dev/null
+@@ -1,46 +0,0 @@
+-# Copyright 2022 Northern.tech AS
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License");
+-#    you may not use this file except in compliance with the License.
+-#    You may obtain a copy of the License at
+-#
+-#        http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS,
+-#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-#    See the License for the specific language governing permissions and
+-#    limitations under the License.
+-
+-# Init tests configuration file
+-#
+-function testscfg_init()  {
+-    rm -f work/testscfg.tmp
+-    touch work/testscfg.tmp
+-}
+-
+-# Add key/value to tests configuration file
+-#
+-#  $1 - key
+-#  $2 - value
+-#
+-function testscfg_add()  {
+-    if [[ $# -ne 2 ]]; then
+-        log_fatal "testscfg_add() requires 2 arguments"
+-    fi
+-    local -r key="${1}"
+-    local -r value="${2}"
+-    echo "${key}=\"${value}\"" >> work/testscfg.tmp
+-}
+-
+-# Save tests configuration file into the given location
+-#
+-#  $1 - Filename
+-#
+-function testscfg_save()  {
+-    if [[ $# -ne 1 ]]; then
+-        log_fatal "testscfg_save() requires 1 argument"
+-    fi
+-    local -r filename="${1}"
+-    cp work/testscfg.tmp ${filename}
+-}
+diff --git a/modules/versioncmp.sh b/modules/versioncmp.sh
+deleted file mode 100644
+index d35b432..0000000
+--- a/modules/versioncmp.sh
++++ /dev/null
+@@ -1,33 +0,0 @@
+-# Copyright 2022 Northern.tech AS
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License");
+-#    you may not use this file except in compliance with the License.
+-#    You may obtain a copy of the License at
+-#
+-#        http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS,
+-#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-#    See the License for the specific language governing permissions and
+-#    limitations under the License.
+-
+-source modules/log.sh
+-source modules/probe.sh
+-
+-# Compare the version of a string to a given minimum version requirement
+-#
+-# NOTE: Also works for 'master', in that sort does sort it correctly by accident.
+-#       The same goes for all other branches/names, which are not semver.
+-#
+-#  $1 - Minimum required version
+-#  $2 - Version string
+-#
+-# @return - bool
+-#
+-function minimum_required_version()  {
+-    if [[ $# -ne 2 ]]; then
+-        log_fatal "minimum_required_version() requires two parameters"
+-    fi
+-    [[ "$1" == "$(printf "$1\n$2" | sort --version-sort | head --lines 1)" ]]
+-}

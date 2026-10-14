@@ -1,0 +1,737 @@
+Replace the default configuration with the OTA-Pulse one. No upstream OTA client, its add-ons or its
+package repository are configured or downloaded. New options: OTAPULSE_SERVER_URL,
+OTAPULSE_PANIC_TIMEOUT_S (bootloader revert needs a kernel that resets on panic),
+OTAPULSE_MACHINE_ID_PERSIST, OTAPULSE_SOCMOND_WATCHDOG, OTAPULSE_ARTIFACT_SIGNING_KEY,
+OTAPULSE_ASSETS_BASE_URL, OTAPULSE_GRUBENV_DIR. The GRUB options lose the download addresses.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/mender_convert_config b/configs/mender_convert_config
+deleted file mode 100644
+index 880b6eb..0000000
+--- a/configs/mender_convert_config
++++ /dev/null
+@@ -1,406 +0,0 @@
+-# This is the default configuration used by mender-convert. You can override
+-# any option specified here by providing your own configuration file using the
+-# '--config' argument.
+-#
+-# NOTE! This file will always be sourced.
+-
+-# Compress generated disk image
+-#
+-# This is useful when you have large disk images, compressing them
+-# makes it easier to transfer them between e.g an build server and a local
+-# machine, and obviously saves space.
+-#
+-# Possible values are:
+-# 'none' - No compression
+-# 'gzip' - Compress with gzip
+-# 'lzma' - Compress with xz (LZMA)
+-# 'zstd' - Compress with zstd
+-MENDER_COMPRESS_DISK_IMAGE=gzip
+-
+-# Compression algorithm for Mender Artifact
+-#
+-# Supported values are: lzma, gzip (default), none
+-#
+-# LZMA will produce a smaller Mender Artifact (2-3x) but will significantly
+-# increase time spent generating the Mender Artifact (10x)
+-MENDER_ARTIFACT_COMPRESSION="gzip"
+-
+-# Enable Mender systemd server
+-#
+-# You want this enabled if you want the Mender client to operate in managed mode
+-# and connect to a server. If you are not interested connecting to a server
+-# and will only be running standalone mode updates, then you can safely disable
+-# this.
+-MENDER_ENABLE_SYSTEMD=y
+-
+-# Set the fstab options for mounting the boot partition
+-MENDER_BOOT_PART_FSTAB_OPTS="defaults,sync"
+-
+-# Custom mkfs options for creating the rootfs partition
+-MENDER_ROOT_PART_MKFS_OPTS=""
+-
+-# Set the fstab options for mounting the root partition
+-MENDER_ROOT_PART_FSTAB_OPTS="defaults"
+-
+-# Set to 0 to disable fsck; recommended for read-only rootfs
+-MENDER_ROOT_PART_FS_PASSNO="1"
+-
+-# Set the fstab options for mounting the data partition
+-MENDER_DATA_PART_FSTAB_OPTS="defaults"
+-
+-# Custom mkfs options for creating the data partition
+-MENDER_DATA_PART_MKFS_OPTS=""
+-
+-# The file system will be grown to occupy the full block device. If the file
+-# system is already at maximum size, no action will be performed.
+-#
+-# This feature is utilizing x−systemd.growfs and will only work on systemd 242
+-# and newer and nothing will be done if an older systemd version is used.
+-MENDER_DATA_PART_GROWFS=y
+-
+-# The name of the image or update that will be built. This is what the device
+-# will report that it is running, and different updates must have different
+-# names.
+-#
+-# This variable must be defined or the build will fail, but you should not
+-# set it in a configuration file and instead it should be an input to the
+-# mender-convert tool, e.g
+-#
+-#  MENDER_ARTIFACT_NAME="release-1" ./mender-convert
+-#
+-#MENDER_ARTIFACT_NAME=""
+-
+-# A string that defines the type of device this image will be installed on and
+-# this value is used for compatibility checks between Mender Artifact and
+-# what the device is reporting.
+-#
+-# You can define multiple types by providing a space separated string of device
+-# types.
+-#
+-# It defaults to the content of '/etc/hostname', which is extracted from the
+-# input disk image
+-MENDER_DEVICE_TYPE=""
+-
+-# A string that defines the filenames of the deployed files.This is optional.
+-# If no DEPLOY_IMAGE_NAME is defined the filenames will be a combination off
+-# the date and the names of all DEVICE_TYPES.
+-# These will be seperated with a +.
+-DEPLOY_IMAGE_NAME=""
+-
+-# The partition scheme to use for the converted image.
+-# To override set this to "gpt" or "dos" (the scheme names used by fdisk and partx).
+-# By default mender-convert will use the partition scheme from the input image.
+-MENDER_PARTITION_SCHEME=""
+-
+-# Total size of the physical storage medium that mender partitioned images
+-# will be written to, expressed in MiB. The size of rootfs partition will be
+-# calculated automatically by subtracting the sizes of boot
+-# (see MENDER_BOOT_PART_SIZE_MB) and data partitions
+-# (see MENDER_DATA_PART_SIZE_MB).
+-#
+-MENDER_STORAGE_TOTAL_SIZE_MB="8192"
+-
+-# The size of the boot partition in the generated .biosimg, .sdimg or .uefiimg
+-# file.
+-MENDER_BOOT_PART_SIZE_MB="40"
+-
+-# The size of the persistent data partition in the generated .biosimg, .sdimg
+-# or .uefiimg file.
+-#
+-# You rarely need to increase this number as this partition will be expanded
+-# on first boot to occupy the renaming free blocks on the physical storage.
+-MENDER_DATA_PART_SIZE_MB="128"
+-
+-# Alignment of partitions used when building partitioned images, expressed in
+-# bytes
+-#
+-# Default is 8MB
+-MENDER_PARTITION_ALIGNMENT="8388608"
+-
+-# Install Mender client
+-#
+-MENDER_CLIENT_INSTALL="y"
+-
+-# Mender client version
+-#
+-# This is used to fetch the correct binaries
+-#
+-# Valid values are "auto" (default), "latest", "master" or a specific version
+-# If set to "auto", install the latest version available for the given
+-# distribution.
+-MENDER_CLIENT_VERSION="auto"
+-
+-# Mender flash version
+-#
+-# This is used to fetch the correct binaries
+-#
+-# Valid values are "latest" (default), "master" or a specific version
+-MENDER_FLASH_VERSION="latest"
+-
+-# Install Mender Connect addon
+-#
+-MENDER_ADDON_CONNECT_INSTALL="n"
+-
+-# Mender Connect addon version
+-#
+-# Valid values are "latest" (default), "master" or a specific version
+-MENDER_ADDON_CONNECT_VERSION="latest"
+-
+-# Install Mender Configure addon
+-#
+-MENDER_ADDON_CONFIGURE_INSTALL="n"
+-
+-# Mender Configure addon version
+-#
+-# Valid values are "latest" (default), "master" or a specific version
+-MENDER_ADDON_CONFIGURE_VERSION="latest"
+-
+-# Install docker-compose Update Module
+-#
+-MENDER_DOCKER_COMPOSE_INSTALL="n"
+-
+-# docker-compose Update Module version
+-#
+-# Valid values are "latest" (default), "main" or a specific version
+-MENDER_DOCKER_COMPOSE_VERSION="latest"
+-
+-# Install arbitrary debian packages by placing them in
+-# MENDER_INSTALL_INPUT_PACKAGES_PATH.
+-#
+-# Directory containing deb packages to be installed in the image
+-#
+-MENDER_INSTALL_INPUT_PACKAGES_PATH="input/deb"
+-
+-# Install deb packages located in MENDER_INSTALL_INPUT_PACKAGES_PATH
+-#
+-MENDER_INSTALL_INPUT_PACKAGES="n"
+-
+-# Install Mender-setup
+-# If set to "auto" then it is installed if Mender client 4.0 or later is
+-# installed. Otherwise it is not installed, but the same functionality is built
+-# into Mender client 3.x and earlier.
+-#
+-MENDER_SETUP_INSTALL="auto"
+-
+-# Mender-setup version
+-#
+-# Valid values are "latest" (default), "master" or a specific version
+-MENDER_SETUP_VERSION="latest"
+-
+-# Install Mender-snapshot
+-# If set to "auto" then it is installed if Mender client 4.0 or later is
+-# installed. Otherwise it is not installed, but the same functionality is built
+-# into Mender client 3.x and earlier.
+-#
+-MENDER_SNAPSHOT_INSTALL="auto"
+-
+-# Mender-snapshot version
+-#
+-# Valid values are "latest" (default), "master" or a specific version
+-MENDER_SNAPSHOT_VERSION="latest"
+-
+-# Install Mender-client-version-inventory-script
+-# If set to "auto" then it is not explicitly installed; Mender client 5.1.0 or later
+-# recommends this package and hence it will be implicitly installed if no other
+-# incompatible software is selected
+-# If set to "y" it is explicitly installed; any incompatibility with other package will
+-# then result in an error
+-# Setting it to "n" has no effect
+-# The recommended option is "y"
+-MENDER_CLIENT_VERSION_INVENTORY_SCRIPT_INSTALL="y"
+-
+-# Mender-client-version-inventory-script version
+-#
+-# Valid values are "latest" (default), "master" or a specific version
+-MENDER_CLIENT_VERSION_INVENTORY_SCRIPT_VERSION="latest"
+-
+-# Mender sparse image file generation
+-#
+-# By default, mender-convert writes the entire image. When enabled, mender-convert attempts
+-# to avoid allocating empty spaces within the image. This can result in the created image
+-# using less space on the storage medium while maintaining the expected size.
+-# However, some tools may not handle sparse files correctly.
+-MENDER_SPARSE_IMAGE="n"
+-
+-# File storage, containing binary files, do not modify this unless you know
+-# what you are doing.
+-MENDER_STORAGE_URL="https://downloads.mender.io"
+-
+-# Mender APT repo url, containing binary files, do not modify this unless you know
+-# what you are doing.
+-MENDER_APT_REPO_URL="${MENDER_STORAGE_URL}/repos/device-components"
+-
+-# URL of the Mender APT repo GPG key for signature verification.
+-MENDER_APT_KEY_URL="https://downloads.mender.io/repos/debian/gpg"
+-
+-# Fingerprint of the APT repo GPG key.
+-MENDER_APT_KEY_FP="E6C857345575F9218396566224072B80A1B29B00"
+-
+-# Mender GitHub organization URL prefix
+-MENDER_GITHUB_ORG="https://github.com/mendersoftware"
+-
+-# Device file corresponding to the root filesystem partitions, without number.
+-MENDER_STORAGE_DEVICE_BASE=/dev/mmcblk0p
+-
+-# Partition number of boot partition
+-MENDER_BOOT_PART_NUMBER="1"
+-
+-# Include root filesystem B in the image
+-MENDER_ROOTFS_PART_B_INCLUDE="y"
+-
+-# Partition number of root filesystem A
+-MENDER_ROOTFS_PART_A_NUMBER="2"
+-
+-# Partition number of root filesystem B
+-MENDER_ROOTFS_PART_B_NUMBER="3"
+-
+-# Partition number of persistent data partition
+-MENDER_DATA_PART_NUMBER="4"
+-
+-# Use partition uuids rather than device and partition numbers
+-MENDER_ENABLE_PARTUUID="n"
+-
+-# Partition used as the boot partition.
+-MENDER_BOOT_PART=""
+-
+-# Path to mount the boot partition in the root filesystem
+-#
+-# In order to access the boot partition from the running system,
+-# it needs to be mounted to a defined directory location.
+-# By default, this is
+-# - /boot/efi: for GRUB-EFI based integrations
+-# - /uboot: for all other integrations
+-#
+-# The value of this variable overrides all defaults.
+-# Example:
+-#   MENDER_BOOT_PART_MOUNT_LOCATION="/boot/firmware"
+-#
+-#MENDER_BOOT_PART_MOUNT_LOCATION=""
+-
+-# Partition used as the first (A) rootfs partition.
+-MENDER_ROOTFS_PART_A=""
+-
+-# Partition used as the first (B) rootfs partition.
+-MENDER_ROOTFS_PART_B=""
+-
+-# Partition used as the persistent data partition.
+-MENDER_DATA_PART=""
+-
+-# Basename of DTB that should be loaded by the bootloader.
+-MENDER_DTB_NAME=kernel.dtb
+-
+-# Generate bmap index files
+-#
+-#    https://github.com/intel/bmap-tools
+-MENDER_USE_BMAP="n"
+-
+-# Copy the boot gap, which is the area from sector 1 until first parition,
+-# this is done because some images might contain the bootloader embedded here
+-# and we need to copy the bootloader to the output image.
+-#
+-# In most cases you would like this enabled.
+-MENDER_COPY_BOOT_GAP="y"
+-
+-# The size of each of the two rootfs filesystems, in KiB. If this is 0,
+-# mender-convert will use the size of the filesystem content as a basis. If the
+-# value is -1, mender-convert will use the maximum size that will fit inside the
+-# created partition. The size is further modified by IMAGE_ROOTFS_EXTRA_SPACE
+-# and IMAGE_OVERHEAD_FACTOR.
+-#
+-# This variable directly mirrors the variable from the Yocto Project, which is
+-# why it is missing a "MENDER_" prefix.
+-IMAGE_ROOTFS_SIZE="0"
+-
+-# The amount of extra free space requested on the rootfs, in KiB. This is added
+-# to the value of IMAGE_ROOTFS_SIZE. The size is further modified by
+-# IMAGE_OVERHEAD_FACTOR.
+-#
+-# Note that due to reserved space for the root user on the filesystem, "df" may
+-# report a significantly lower number than requested. A more accurate number can
+-# be fetched using for example "dumpe2fs" and looking for the "Free blocks"
+-# field, but even this value is usually going to be lower than requested due to
+-# meta data on the filesystem.
+-#
+-# This variable directly mirrors the variable from the Yocto Project, which is
+-# why it is missing a "MENDER_" prefix.
+-IMAGE_ROOTFS_EXTRA_SPACE="0"
+-
+-# This factor is multiplied by the used space value for the generated rootfs,
+-# and if the result is larger than IMAGE_ROOTFS_SIZE + IMAGE_ROOTFS_EXTRA_SPACE,
+-# it will be used as the size of the rootfs instead of the other two variables.
+-#
+-# The actual free space will usually be lower than requested. See comment for
+-# IMAGE_ROOTFS_EXTRA_SPACE.
+-#
+-# This variable directly mirrors the variable from the Yocto Project, which is
+-# why it is missing a "MENDER_" prefix.
+-IMAGE_OVERHEAD_FACTOR="1.5"
+-
+-# Extra space to add to the rootfs mounted at work/rootfs.
+-#
+-# From truncate man-page: The argument is an integer and optional unit (example: 10K is 10*1024).
+-# Units are K,M,G,T,P,E,Z,Y  (powers  of 1024) or KB,MB,... (powers of 1000).
+-# Binary prefixes can be used, too: KiB=K, MiB=M, and so on.
+-#
+-# Note: This does NOT directly affect the final image size. The final rootfs image
+-# size is calculated separately based on actual disk usage plus
+-# IMAGE_ROOTFS_EXTRA_SPACE and IMAGE_OVERHEAD_FACTOR.
+-#
+-# Set to empty string to disable expansion (default).
+-MENDER_EXPAND_WORK_ROOTFS=""
+-
+-MENDER_CLIENT_DATA_DIR_SERVICE_URL="https://raw.githubusercontent.com/mendersoftware/\
+-meta-mender/ab9c1e65abf73cde1065e2a4c2005cfe61ee6e3d/meta-mender-core/recipes-mender/mender-client/files/mender-data-dir.service"
+-
+-source configs/mender_grub_config
+-source configs/systemd_common_config
+-
+-# Include mender-binary-delta update-module provides in generated artifacts
+-#
+-# When set to "y", each artifact produced by mender-convert will declare:
+-#
+-#   rootfs-image.update-module.mender-binary-delta.mender_update_module:mender-binary-delta
+-#   rootfs-image.update-module.mender-binary-delta.version:<artifact-name>
+-#
+-# These provides are required for the Mender server to generate and serve
+-# binary delta updates (using mender-binary-delta) against this artifact as
+-# the base. Without them the server has no record that the device supports
+-# delta updates from this rootfs version and will fall back to full updates.
+-#
+-# Set to "y" if your devices have mender-binary-delta installed.
+-# Leave as "n" (default) for standard full-image updates only.
+-MENDER_DELTA_PROVIDES="n"
+-
+-# Function to create Mender Artifact
+-#
+-# This function is defined here, to allow it to be overridden which can be
+-# achieved by providing this function in a custom configuration file which will
+-# take precedence of this one.
+-#
+-# You might want to override this to e.g provide state-scripts or providing
+-# a private key to sign your artifact.
+-mender_create_artifact() {
+-    local -r device_types="${1}"
+-    local -r artifact_name="${2}"
+-    local -r image_name="${3}"
+-    local -r all_device_types="$(for device_type in $device_types; do echo " --compatible-types $device_type"; done)"
+-
+-    mender_artifact=deploy/${image_name}.mender
+-    log_info "Writing Mender artifact to: ${mender_artifact}"
+-    log_info "This can take up to 20 minutes depending on which compression method is used"
+-
+-    local delta_provides_arg=""
+-    if [ "${MENDER_DELTA_PROVIDES}" = "y" ]; then
+-        delta_provides_arg="--provides rootfs-image.update-module.mender-binary-delta.mender_update_module:mender-binary-delta \
+-      --provides rootfs-image.update-module.mender-binary-delta.version:${artifact_name}"
+-        log_info "MENDER_DELTA_PROVIDES=y: declaring mender-binary-delta provides in artifact"
+-    fi
+-
+-    run_and_log_cmd "mender-artifact --compression ${MENDER_ARTIFACT_COMPRESSION} \
+-      write rootfs-image \
+-      --file work/rootfs.img \
+-      --output-path ${mender_artifact} \
+-      --artifact-name ${artifact_name} \
+-      ${all_device_types} \
+-      ${delta_provides_arg}"
+-}
+diff --git a/configs/mender_grub_config b/configs/mender_grub_config
+deleted file mode 100644
+index 0f1e4ce..0000000
+--- a/configs/mender_grub_config
++++ /dev/null
+@@ -1,50 +0,0 @@
+-# Use UEFI -> GRUB boot-loader integration
+-#
+-# On ARM, U-boot is used as UEFI (EFI) provider
+-#
+-# Only disable this if you know what you are doing
+-MENDER_GRUB_EFI_INTEGRATION=y
+-
+-# Integrate with /etc/grub.d boot scripts.
+-#
+-# This has no effect unless MENDER_GRUB_EFI_INTEGRATION is enabled. Default is
+-# auto, in which case it will be detected. This is only supported for x86_64
+-# platforms at the moment.
+-MENDER_GRUB_D_INTEGRATION=auto
+-
+-# Version of GRUB to use. Note that there needs to be a precompiled version
+-# available at the MENDER_STORAGE_URL download source.
+-GRUB_VERSION=2.12
+-
+-# Specific Linux kernel boot arguments
+-#
+-# Typically you would read the content of /proc/cmdline on a "golden image"
+-# add the appropriate arguments here.
+-#
+-# This will override the defaults set by by grub-mender-grubenv, if not an
+-# empty string
+-MENDER_GRUB_KERNEL_BOOT_ARGS=""
+-
+-# grub-mender-grubenv is the Mender integration for the GRUB bootloader
+-MENDER_GRUBENV_VERSION="d7c3ec217e281727f56c3651799f805637cb2cda"
+-MENDER_GRUBENV_URL="${MENDER_GITHUB_ORG}/grub-mender-grubenv/archive/${MENDER_GRUBENV_VERSION}.tar.gz"
+-
+-# Type of kernel (bzImage or zImage)
+-#
+-# mender-convert will try to determine this value on its own, only set this
+-# if was not possible to auto-detect
+-MENDER_GRUB_KERNEL_IMAGETYPE=""
+-
+-# Type of initrd image
+-#
+-# mender-convert will try to determine this value on its own, only set this
+-# if was not possible to auto-detect
+-MENDER_GRUB_INITRD_IMAGETYPE=""
+-
+-MENDER_GRUB_BINARY_STORAGE_URL="${MENDER_STORAGE_URL}/grub-mender-grubenv/grub-efi/${GRUB_VERSION}-grub-mender-grubenv-${MENDER_GRUBENV_VERSION}"
+-
+-# Ignore broken UEFI support in certain U-Boot versions (see MEN-2404)
+-MENDER_IGNORE_UBOOT_BROKEN_UEFI="0"
+-
+-# Ignore missing EFI stub on ARM (see MEN-2404)
+-MENDER_IGNORE_MISSING_EFI_STUB="0"
+diff --git a/configs/otapulse_convert_config b/configs/otapulse_convert_config
+new file mode 100644
+index 0000000..9cfe1b1
+--- /dev/null
++++ b/configs/otapulse_convert_config
+@@ -0,0 +1,218 @@
++# Default configuration of otapulse-convert. Override any option by passing your own
++# configuration file with '--config'. Options are plain shell variable assignments; every
++# option has the prefix OTAPULSE_ (the variables IMAGE_ROOTFS_SIZE, IMAGE_ROOTFS_EXTRA_SPACE and
++# IMAGE_OVERHEAD_FACTOR are the exceptions: they mirror the Yocto Project names).
++#
++# NOTE! This file is always sourced first.
++
++# ---------------------------------------------------------------------------------------------
++# Output
++# ---------------------------------------------------------------------------------------------
++
++# Compress the generated disk image.
++#
++# Possible values:
++# 'none' - No compression
++# 'gzip' - Compress with gzip
++# 'lzma' - Compress with xz (LZMA)
++# 'zstd' - Compress with zstd
++OTAPULSE_COMPRESS_DISK_IMAGE=gzip
++
++# Compression of the OTA-Pulse artifact (the .otapulse file).
++#
++# Supported values: lzma, gzip (default), none
++#
++# LZMA produces a smaller artifact (2-3x) but takes about 10 times longer to write.
++OTAPULSE_ARTIFACT_COMPRESSION="gzip"
++
++# The name of the image or update. The device reports this as the running software version, and
++# different updates must have different names.
++#
++# This variable must be defined or the conversion fails. Do not put it into a configuration
++# file; pass it to the tool instead, for example
++#
++#  OTAPULSE_ARTIFACT_NAME="release-1" ./docker-otapulse-convert ...
++#
++#OTAPULSE_ARTIFACT_NAME=""
++
++# The device type of the image. The OTA-Pulse agent only installs an artifact whose device type
++# list contains this value. Several types can be given as a space separated string.
++#
++# Defaults to the content of '/etc/hostname' of the input image.
++OTAPULSE_DEVICE_TYPE=""
++
++# Base name of the generated files. When empty, the name is derived from the input image file
++# name and the device type.
++DEPLOY_IMAGE_NAME=""
++
++# Private key (PEM, RSA) used to sign the generated artifact and the bootstrap artifact. The
++# path is as seen by the tool (inside the container: below /otapulse-convert/input). The agent
++# of a production image only installs signed artifacts, so set this for anything that is
++# deployed. Empty: the artifact is not signed.
++OTAPULSE_ARTIFACT_SIGNING_KEY=""
++
++# ---------------------------------------------------------------------------------------------
++# Device configuration
++# ---------------------------------------------------------------------------------------------
++
++# URL of the OTA-Pulse server the agent and the monitoring daemon talk to. It is written into
++# the configuration of the installed packages on the first installation. Empty: keep the
++# placeholder of the packages and edit /etc/otapulse/otapulse.conf and /etc/socmond/config.json
++# on the device (or on the finished image) afterwards. Plain URL characters only.
++OTAPULSE_SERVER_URL=""
++
++# Kernel panic timeout in seconds, added to the kernel command line as panic=N.
++#
++# In bootloader compatibility mode the bootloader counts the boots of a freshly installed update
++# and reverts it when it keeps failing. A kernel that panics without a timeout stops forever, the
++# bootloader never gets another turn and a bad update is never reverted. The conversion fails
++# if this is not a positive number.
++OTAPULSE_PANIC_TIMEOUT_S="10"
++
++# Keep the machine-id on the data partition across updates (y/n).
++#
++# The root file system is replaced by every update. Without this, the monitoring daemon would
++# see a new machine-id after each update and register the device again under a new identity.
++OTAPULSE_MACHINE_ID_PERSIST="y"
++
++# Enable the monitoring watchdog service (socmond-watchdog) of the installed packages (y/n).
++#
++# The watchdog reboots the device when the monitoring daemon dies and forces a reboot when the
++# free memory or the free space of the root file system drops below 5 percent. That suits a
++# dedicated appliance; on a general purpose system it can reboot a machine that is merely full.
++# It is therefore disabled by default and can be enabled here.
++OTAPULSE_SOCMOND_WATCHDOG="n"
++
++# ---------------------------------------------------------------------------------------------
++# Packages
++# ---------------------------------------------------------------------------------------------
++
++# Install the OTA-Pulse packages (soc-ota-agent, socmond) and any other .deb files found in
++# OTAPULSE_INSTALL_INPUT_PACKAGES_PATH into the image. Only packages for the architecture of the
++# image (and architecture independent ones) are installed; dependencies are fetched from the
++# package repositories configured in the image. The conversion fails when the directory holds no
++# soc-ota-agent package for the image architecture.
++OTAPULSE_INSTALL_INPUT_PACKAGES="y"
++
++# Directory holding the .deb files, relative to the tool (inside the container: the 'input'
++# volume).
++OTAPULSE_INSTALL_INPUT_PACKAGES_PATH="input/packages"
++
++# ---------------------------------------------------------------------------------------------
++# Partitioning
++# ---------------------------------------------------------------------------------------------
++
++# The partition scheme of the converted image: "gpt" or "dos". By default the scheme of the input
++# image is used.
++OTAPULSE_PARTITION_SCHEME=""
++
++# Total size of the storage medium the image will be written to, in MiB. The size of the two root
++# file system partitions is calculated by subtracting the boot and data partitions.
++OTAPULSE_STORAGE_TOTAL_SIZE_MB="8192"
++
++# Size of the boot partition, in MiB.
++OTAPULSE_BOOT_PART_SIZE_MB="40"
++
++# Size of the persistent data partition in the generated image, in MiB. It is grown to the end of
++# the storage medium on the first boot.
++OTAPULSE_DATA_PART_SIZE_MB="128"
++
++# Alignment of the partitions, in bytes. Default is 8 MiB.
++OTAPULSE_PARTITION_ALIGNMENT="8388608"
++
++# Grow the data partition and its file system to the end of the storage medium on the first boot
++# (needs systemd 242 or newer).
++OTAPULSE_DATA_PART_GROWFS=y
++
++# fstab options of the boot partition
++OTAPULSE_BOOT_PART_FSTAB_OPTS="defaults,sync"
++
++# Extra mkfs options for the root file system partitions
++OTAPULSE_ROOT_PART_MKFS_OPTS=""
++
++# fstab options of the root file system partition
++OTAPULSE_ROOT_PART_FSTAB_OPTS="defaults"
++
++# fsck pass number of the root file system; 0 disables fsck (recommended for a read-only root)
++OTAPULSE_ROOT_PART_FS_PASSNO="1"
++
++# fstab options of the data partition
++OTAPULSE_DATA_PART_FSTAB_OPTS="defaults"
++
++# Extra mkfs options for the data partition
++OTAPULSE_DATA_PART_MKFS_OPTS=""
++
++# Device file of the storage the image runs from, without the partition number. This is what the
++# partition numbers below are appended to, in the bootloader, the fstab and the agent
++# configuration.
++OTAPULSE_STORAGE_DEVICE_BASE=/dev/mmcblk0p
++
++# Partition numbers of the converted image
++OTAPULSE_BOOT_PART_NUMBER="1"
++OTAPULSE_ROOTFS_PART_A_NUMBER="2"
++OTAPULSE_ROOTFS_PART_B_NUMBER="3"
++OTAPULSE_DATA_PART_NUMBER="4"
++
++# Write the second root file system partition (B) with the same content as A (y), or leave it
++# empty (n).
++OTAPULSE_ROOTFS_PART_B_INCLUDE="y"
++
++# Use partition UUIDs (/dev/disk/by-partuuid/...) instead of device names and partition numbers.
++# Needs the four variables below.
++OTAPULSE_ENABLE_PARTUUID="n"
++OTAPULSE_BOOT_PART=""
++OTAPULSE_ROOTFS_PART_A=""
++OTAPULSE_ROOTFS_PART_B=""
++OTAPULSE_DATA_PART=""
++
++# Where the boot partition is mounted in the root file system. Defaults to /boot/efi for GRUB
++# EFI images and /uboot otherwise.
++#OTAPULSE_BOOT_PART_MOUNT_LOCATION=""
++
++# Basename of the device tree blob the bootloader loads.
++OTAPULSE_DTB_NAME=kernel.dtb
++
++# Generate a block map file next to the image (needs bmap-tools)
++OTAPULSE_USE_BMAP="n"
++
++# Copy the area between the partition table and the first partition. Some images keep the
++# bootloader there. In most cases this should stay enabled.
++OTAPULSE_COPY_BOOT_GAP="y"
++
++# Write sparse image files: empty areas of the image are not allocated. Some tools handle sparse
++# files badly.
++OTAPULSE_SPARSE_IMAGE="n"
++
++# Size of each root file system, in KiB. 0: use the size of the content. -1: use the largest size
++# that fits the partition. Modified by IMAGE_ROOTFS_EXTRA_SPACE and IMAGE_OVERHEAD_FACTOR.
++IMAGE_ROOTFS_SIZE="0"
++
++# Extra free space on the root file system, in KiB, added to IMAGE_ROOTFS_SIZE. Note that "df"
++# reports less because of the blocks reserved for the root user.
++IMAGE_ROOTFS_EXTRA_SPACE="0"
++
++# The used space of the root file system is multiplied by this factor. If the result is larger
++# than IMAGE_ROOTFS_SIZE + IMAGE_ROOTFS_EXTRA_SPACE it is used as the size instead.
++IMAGE_OVERHEAD_FACTOR="1.5"
++
++# Extra space for the root file system while it is being modified (installing packages needs
++# temporary room). This does not change the size of the final image. Units as in truncate(1),
++# for example 512M. Empty: do not expand.
++OTAPULSE_EXPAND_WORK_ROOTFS=""
++
++# ---------------------------------------------------------------------------------------------
++# Bootloader assets
++# ---------------------------------------------------------------------------------------------
++
++# Some targets need prebuilt bootloader files (U-Boot for the Raspberry Pi, a standalone GRUB EFI
++# binary). They are never taken from a fixed address: every file is looked up by name in the
++# 'assets' directory, or, when OTAPULSE_ASSETS_BASE_URL is set, downloaded from there, and in
++# both cases its sha256 must match configs/assets.sha256. A missing or modified file stops the
++# conversion.
++OTAPULSE_ASSETS_BASE_URL=""
++
++# The bootloader environment scripts (GRUB) are part of the tool: directory with the files.
++OTAPULSE_GRUBENV_DIR="bootloader/grubenv"
++
++source configs/otapulse_grub_config
++source configs/systemd_common_config
+diff --git a/configs/otapulse_grub_config b/configs/otapulse_grub_config
+new file mode 100644
+index 0000000..dfd00be
+--- /dev/null
++++ b/configs/otapulse_grub_config
+@@ -0,0 +1,31 @@
++# GRUB / UEFI boot loader integration of otapulse-convert.
++#
++# Use the UEFI -> GRUB boot loader integration. On ARM, U-Boot is used as the UEFI provider.
++#
++# Only disable this if you know what you are doing (U-Boot targets do, see the board configs).
++OTAPULSE_GRUB_EFI_INTEGRATION=y
++
++# Integrate with the /etc/grub.d boot scripts of the image's own GRUB. "auto" detects whether the
++# image has a GRUB installation with an EFI system partition; "y" and "n" force it. With "n" a
++# standalone GRUB EFI binary is installed from the assets (see OTAPULSE_ASSETS_BASE_URL).
++OTAPULSE_GRUB_D_INTEGRATION=auto
++
++# Version of the GRUB EFI binary of the assets (standalone mode only).
++GRUB_VERSION=2.12
++
++# Extra Linux kernel arguments for standalone mode, for example the content of /proc/cmdline of a
++# known good system. Ignored when the GRUB integration is used (set the arguments in
++# /etc/default/grub of the image instead). The panic timeout (OTAPULSE_PANIC_TIMEOUT_S) is added
++# when the arguments do not carry one.
++OTAPULSE_GRUB_KERNEL_BOOT_ARGS=""
++
++# Names of the Linux kernel image and the initial ram disk in /boot. The tool detects them; only
++# set these if that fails.
++OTAPULSE_GRUB_KERNEL_IMAGETYPE=""
++OTAPULSE_GRUB_INITRD_IMAGETYPE=""
++
++# Ignore broken UEFI support in certain U-Boot versions (2018.09 - 2019.07)
++OTAPULSE_IGNORE_UBOOT_BROKEN_UEFI="0"
++
++# Ignore a kernel without an EFI stub on ARM
++OTAPULSE_IGNORE_MISSING_EFI_STUB="0"

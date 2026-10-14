@@ -89,6 +89,11 @@ USED_PATHS=(
     meta-otapulse/recipes-core/soc-ota-agent/files
     meta-otapulse/recipes-core/socmond/files
     meta-otapulse/recipes-core/otapulse-firstboot/files/otapulse-data-seed
+    meta-otapulse/recipes-core/otapulse-firstboot/files/otapulse-bl-guard
+    meta-otapulse/recipes-core/otapulse-firstboot/files/otapulse-bl-boot-deadline.service
+    meta-otapulse/recipes-core/otapulse-firstboot/files/otapulse-bl-boot-deadline.timer
+    meta-otapulse/recipes-core/otapulse-firstboot/files/otapulse-bl-seed-failure.service
+    meta-otapulse/recipes-core/otapulse-firstboot/files/otapulse-bl-clock-wait.service
     NOTICE
 )
 if [ "$COMMIT" = "$HEAD_COMMIT" ]; then
@@ -161,6 +166,10 @@ grep -q '"UseFileBasedBootEnv": false' "$PKG_DIR/debian/otapulse.conf" || die "d
 for f in soc-ota-provision; do [ -f "$AGENT_FILES/$f" ] || die "$f missing from the inputs"; done
 DATA_SEED="$SRC_TREE/meta-otapulse/recipes-core/otapulse-firstboot/files/otapulse-data-seed"
 [ -f "$DATA_SEED" ] || die "otapulse-data-seed missing from the inputs"
+BL_FILES="$SRC_TREE/meta-otapulse/recipes-core/otapulse-firstboot/files"
+for f in otapulse-bl-guard otapulse-bl-boot-deadline.service otapulse-bl-boot-deadline.timer otapulse-bl-seed-failure.service otapulse-bl-clock-wait.service; do
+    [ -f "$BL_FILES/$f" ] || die "bootloader-mode guard input $f missing"
+done
 for f in socmond socmond-watchdog core-handler.sh soc-ctl soc-deregister config.json custom_metrics.conf.example socmond.service socmond-watchdog.service; do
     [ -f "$SOCMOND_FILES/$f" ] || die "socmond input $f missing"
 done
@@ -213,6 +222,10 @@ build_one() {
     cp -a "$VENDOR_CACHE/vendor" "$top/agent/vendor"
     mkdir -p "$top/upstream/agent" "$top/upstream/socmond"
     cp -a "$AGENT_FILES/soc-ota-provision" "$AGENT_FILES"/Artifact*_01 "$DATA_SEED" "$top/upstream/agent/"
+    mkdir -p "$top/upstream/bl"
+    for f in otapulse-bl-guard otapulse-bl-boot-deadline.service otapulse-bl-boot-deadline.timer otapulse-bl-seed-failure.service otapulse-bl-clock-wait.service; do
+        cp -a "$BL_FILES/$f" "$top/upstream/bl/"
+    done
     cp -a "$SOCMOND_FILES/." "$top/upstream/socmond/"
     cp -a "$SRC_TREE/NOTICE" "$top/upstream/NOTICE"
     cp -a "$PKG_DIR/debian" "$top/debian"

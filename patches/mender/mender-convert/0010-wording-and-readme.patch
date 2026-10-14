@@ -1,0 +1,373 @@
+Wording of the messages that the mechanical rename (0100) cannot phrase, input image tainting check,
+the README.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/.gitignore b/.gitignore
+index e162fe4..ec79762 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,6 +1,6 @@
+ deploy
+ input
+-mender_local_config
++otapulse_local_config
+ *.xml
+ *.html
+ logs/convert.log*
+diff --git a/README.md b/README.md
+index 49da05c..6f6f1f0 100644
+--- a/README.md
++++ b/README.md
+@@ -1,249 +1,44 @@
+-[![Build Status](https://gitlab.com/Northern.tech/Mender/mender-convert/badges/next/pipeline.svg)](https://gitlab.com/Northern.tech/Mender/mender-convert/pipelines)
++# otapulse-convert
+ 
+-# mender-convert
++`otapulse-convert` converts a disk image of a standard Linux distribution (Debian, Raspberry Pi OS)
++into an OTA-Pulse image. The converted image
+ 
+-Mender is an open source over-the-air (OTA) software updater for embedded Linux
+-devices. Mender comprises a client running at the embedded device, as well as a
+-server that manages deployments across many devices.
++- has a boot partition, two root file system partitions (A and B) and a data partition,
++- boots with GRUB (UEFI) or U-Boot, which count the boots of a freshly installed update and revert
++  it on their own when it does not come up (bootloader compatibility mode),
++- carries the OTA-Pulse agent (`soc-ota-agent`) and the monitoring daemon (`socmond`),
++- comes with an OTA-Pulse artifact (`.otapulse`) of its root file system, which is the base for
++  updates and can be signed with your key.
+ 
+-This repository contains mender-convert, which is used to convert pre-built disk
+-images (Debian, Ubuntu, Raspbian, etc) to a Mender compatible image by
+-restructuring partition table and injecting the necessary files.
++## Supported targets
+ 
+-For a full list of tested devices and images please visit [Mender
+-Hub](https://hub.mender.io/c/board-integrations/debian-family). If your device
+-and image combination is not listed as supported, this does not necessarily mean
+-that it will not work, it probably just means that no one has tested and
+-reported it back and usually only small tweaks are necessary to get this running
+-on your device.
++| Configuration | Input image | Bootloader |
++|---------------|-------------|------------|
++| `configs/debian_arm64_uefi_config` | Debian 12 arm64 "genericcloud" or "nocloud" | GRUB (UEFI), the image's own |
++| `configs/raspberrypi/uboot/debian/raspberrypi4_bookworm_64bit_config` | Raspberry Pi OS (Debian 12) arm64 | U-Boot (needs the asset listed in `configs/assets.sha256`) |
+ 
+--------------------------------------------------------------------------------
++## Use
+ 
+-![Mender logo](https://github.com/mendersoftware/mender/raw/master/mender_logo.png)
+-
+-## Requisites
+-
+-`mender-convert` is supported on the following development platform(s):
+-
+-	- Ubuntu 22.04 x86, 64bit
+-
+-Other platforms may work, but are not under active testing. Patches to add additional
+-platforms or fix compatibility issues are welcome.
+-
+-The storage used during the process, specifically the work directories (usually below the clone of
+-`mender-convert`) and the output directory should be located on local, Unix-style filesystem.
+-Using network storage or emulated filesystems might cause permission or owner issues.
+-
+-
+-## Getting started
+-
+-To start using Mender, we recommend that you begin with the Getting started
+-section in [the Mender documentation](https://docs.mender.io/).
+-
+-For more detailed information about `mender-convert` please visit the
+-[Debian family](https://docs.mender.io/artifacts/debian-family) section in
+-[the Mender documentation](https://docs.mender.io/).
+-
+-## Included configurations
+-
+-### Core configurations
+-
+-These configurations are officially supported.
+-
+-| Configuration | Supported OS / hardware |
+-| :------------ | :---------------------- |
+-| generic_x86-64_hdd_config | Generic x86, 64bit distribution *use this as a starting point only!*  |
+-| raspberrypi/uboot/raspberrypi0w_config | RaspberryPi 0w, Raspbian 32bit |
+-| raspberrypi/uboot/debian/raspberrypi3_bookworm_64bit_config | RaspberryPi 3, Raspberry Pi OS "bookworm" 64bit |
+-| raspberrypi/uboot/debian/raspberrypi4_bookworm_64bit_config | RaspberryPi 4, Raspberry Pi OS "bookworm" 64bit |
+-| raspberrypi/uboot/ubuntu/raspberrypi4_ubuntu_32bit_config | RaspberryPi 4, Ubuntu 32bit |
+-
+-### Contributed configurations
+-
+-These configurations have been submitted by community contributors.
+-
+-| Configuration | Supported OS / hardware |
+-| :------------ | :---------------------- |
+-| comfile_pi_config | Comfile Pi, Raspbian 32bit |
+-| rockpro64_emmc_config | RockPro64, Debian 32bit on internal eMMC storage |
+-| rockpro64_sd_config | RockPro64, Debian 32bit on external SD card storage |
+-
+-## Example usage: Raspberry Pi 4, Raspberry Pi OS 64bit
+-
+-### Prepare image and configuration
+-
+-The following steps give a quick start using Raspbian. For a more detailed guide,
+-especially concerning version compatibilities, please visit [the the corresponding thread](https://hub.mender.io/t/raspberry-pi-3-model-b-b-raspbian/140) on the Mender Hub.
+-
+-Download the raw Raspberry Pi disk image into a subdirectory input:
++Docker, a Linux host with loop device support, and the OTA-Pulse packages are needed.
+ 
+ ```bash
+-mkdir -p input
+-cd input
+-wget https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2024-07-04/2024-07-04-raspios-bookworm-arm64-lite.img.xz
+-```
+-
+-Extract the raw Raspberry Pi disk image:
+-
+-```bash
+-xz --decompress 2024-07-04-raspios-bookworm-arm64-lite.img.xz
+-INPUT_DISK_IMAGE=$(ls *raspios-bookworm*.img)
+-cd ..
+-```
+-
+-Bootstrap the demo rootfs overlay that is configured to connect to
+-a Mender server with polling intervals set appropriately for
+-demonstration purposes.  There are three scripts here to support
+-the Mender demo server, the Mender production server, and Mender
+-Professional.
+-
+-**NOTE!** Only run one of these three steps depending on the server
+-type you are implementing.
+-
+-#### Using [hosted Mender](https://mender.io/pricing/plans)
+-```bash
+-./scripts/bootstrap-rootfs-overlay-hosted-server.sh \
+-    --output-dir ${PWD}/input/rootfs_overlay_demo \
+-    --tenant-token "Paste token from Mender Professional"
+-```
++./docker-build                                  # builds the container image once
+ 
+-#### Using the [Mender demo server](https://docs.mender.io/development/server-installation/evaluation-with-docker-compose)
+-```bash
+-./scripts/bootstrap-rootfs-overlay-demo-server.sh \
+-    --output-dir ${PWD}/input/rootfs_overlay_demo \
+-    --server-ip 192.168.1.1
+-```
++cp soc-ota-agent_*_arm64.deb socmond_*_all.deb input/packages/
++cp debian-12-genericcloud-arm64.raw input/
+ 
+-#### Using the [Mender on-premise server](https://docs.mender.io/development/server-installation)
+-```bash
+-./scripts/bootstrap-rootfs-overlay-production-server.sh \
+-    --output-dir ${PWD}/input/rootfs_overlay_demo \
+-    --server-url https://foobar.mender.io \
+-    [ --server-cert ~/server.crt ]
++OTAPULSE_ARTIFACT_NAME="release-1" ./docker-otapulse-convert \
++    --disk-image input/debian-12-genericcloud-arm64.raw \
++    --config configs/debian_arm64_uefi_config
+ ```
+ 
++The image (`*.img`) and the artifact (`*.otapulse`) are written to `deploy/`. The options of a
++conversion are documented in `configs/otapulse_convert_config`; pass your own configuration file
++with `--config` to change them. A root file system overlay (`--overlay DIR`) is copied into the
++image last.
+ 
+-### Docker environment for mender-convert
+-
+-To make using mender-convert easier, a reference setup using a Docker
+-container is provided.
+-
+-You need to [install Docker Engine](https://docs.docker.com/install) to use
+-this environment.
+-
+-
+-#### Build the mender-convert container image
+-
+-Build a container with all required dependencies for `mender-convert`:
+-
+-```bash
+-./docker-build
+-```
+-
+-This will create a container image with the name `mender-convert` which you can
+-use to run `mender-convert` without polluting your host environment with the
+-necessary dependencies.
+-
+-
+-#### Use the mender-convert container image
+-
+-Run mender-convert from inside the container with your desired options, e.g.
+-
+-```bash
+-mkdir -p input/image
+-cp $PATH_TO_DISK_IMAGE/$INPUT_DISK_IMAGE input/image
+-
+-mkdir -p input/config
+-cp $PATH_TO_MY_OWN_CONFIG/$CUSTOM_CONFIG input/config
+-
+-MENDER_ARTIFACT_NAME=release-1 ./docker-mender-convert \
+-   --disk-image input/image/$INPUT_DISK_IMAGE \
+-   --config configs/raspberrypi/uboot/debian/raspberrypi4_bookworm_64bit_config \
+-   --config input/config/$CUSTOM_CONFIG \
+-   --overlay input/rootfs_overlay_demo
+-```
+-
+-The container will use the `work/` directory as a temporary area to unpack and
+-customize the image's content. You can customize the work directory path
+-by setting the `WORK_DIRECTORY` env variable. To reduce the time required to
+-perform the conversion, you can use tempfs or ramfs mount points.
+-
+-Conversion will take 10-30 minutes, depending on image size and resources
+-available. You can watch `log/convert.log.XXXXX` for progress and diagnostics
+-information. The exact log file path is printed before the conversion starts.
+-
+-After it finishes, you can find your images in the `deploy` directory on your
+-host machine!
+-
+-#### Troubleshooting
+-
+-A continuously expanded list of possible problems and how to address those is
+-maintained in the [Mender documentation](https://docs.mender.io/troubleshoot/mender-client)
+-
+-## Using mender-convert without Docker
+-
+-In order to be able to manipulate and create filesystem and disk images,
+-mender-convert has a few dependencies, and their version and name vary between
+-Linux distributions. Here is an example of how to install the dependencies on a
+-Debian based distribution:
+-
+-```bash
+-sudo apt install $(cat requirements-deb.txt)
+-```
+-
+-Start the conversion process with:
+-
+-```bash
+-MENDER_ARTIFACT_NAME=release-1 ./mender-convert \
+-   --disk-image input/$INPUT_DISK_IMAGE \
+-   --config configs/raspberrypi/uboot/debian/raspberrypi4_bookworm_64bit_config \
+-   --overlay input/rootfs_overlay_demo
+-```
+-
+-**NOTE!** You will be prompted to enter `sudo` password during the conversion
+-process. This is required to be able to loopback mount images and for modifying
+-them. Our recommendation is to use the provided Docker container, to run the
+-tool in an isolated environment.
+-
+--------------------------------------------------------------------------------
+-
+-## Contributing
+-
+-We welcome and ask for your contribution. If you would like to contribute to
+-Mender, please read our guide on how to best get started
+-[contributing code or documentation](https://github.com/mendersoftware/mender/blob/master/CONTRIBUTING.md).
+-
+-
+-## License
+-
+-Mender is licensed under the Apache License, Version 2.0. See
+-[LICENSE](https://github.com/mendersoftware/mender-convert/blob/master/LICENSE)
+-for the full license text.
+-
+-
+-## Security disclosure
+-
+-We take security very seriously. If you come across any issue regarding
+-security, please disclose the information by sending an email to
+-[security@mender.io](security@mender.io). Please do not create a new public
+-issue. We thank you in advance for your cooperation.
+-
+-
+-## Connect with us
+-
+-* Join the [Mender Hub discussion forum](https://hub.mender.io)
+-* Follow us on [Twitter](https://twitter.com/mender_io). Please
+-  feel free to tweet us questions.
+-* Fork us on [Github](https://github.com/mendersoftware)
+-* Create an issue in the [bugtracker](https://northerntech.atlassian.net/projects/MEN)
+-* Email us at [contact@mender.io](mailto:contact@mender.io)
+-* Connect to the [#mender IRC channel on Libera](https://web.libera.chat/?#mender)
+-
+-
+-## Authors
++Run `./otapulse-convert --help` for the command line.
+ 
+-Mender was created by the team at [Northern.tech AS](https://northern.tech),
+-with many contributions from the community. Thanks
+-[everyone](https://github.com/mendersoftware/mender/graphs/contributors)!
++## Licenses
+ 
+-[Mender](https://mender.io) is sponsored by [Northern.tech AS](https://northern.tech).
++This tool is derived from open source software. See `NOTICE`.
+diff --git a/mender-convert-modify b/mender-convert-modify
+index 8a22065..31f14b6 100755
+--- a/mender-convert-modify
++++ b/mender-convert-modify
+@@ -175,7 +175,7 @@ if [ "${MENDER_GRUB_EFI_INTEGRATION}" == "y" ]; then
+         # our tools.
+         log_info "Not installing GRUB EFI bootloader, relying on platform provided one."
+ 
+-        log_info "Installing Mender GRUB tools..."
++        log_info "Installing the GRUB environment tools..."
+         grub_install_grub_editenv_binary
+ 
+         log_info "Generating grub config using update-grub..."
+@@ -185,7 +185,7 @@ if [ "${MENDER_GRUB_EFI_INTEGRATION}" == "y" ]; then
+         log_info "Installing GRUB EFI bootloader..."
+         grub_install_standalone_grub
+ 
+-        log_info "Generating the mender-grub config..."
++        log_info "Generating the standalone GRUB config..."
+         grub_create_grub_config
+         grub_install_standalone_grub_config
+     fi
+diff --git a/modules/grub.sh b/modules/grub.sh
+index a01d2f8..76cfdd9 100644
+--- a/modules/grub.sh
++++ b/modules/grub.sh
+@@ -165,7 +165,7 @@ function grub_install_grub_editenv_binary() {
+ 
+ # grub_install_standalone_grub
+ #
+-# Install mender-grub on the converted boot partition
++# Install a standalone GRUB EFI binary on the converted boot partition
+ function grub_install_standalone_grub() {
+     kernel_imagetype=${MENDER_GRUB_KERNEL_IMAGETYPE:-$(probe_kernel_in_boot_and_root)}
+     initrd_imagetype=${MENDER_GRUB_INITRD_IMAGETYPE:-$(probe_initrd_in_boot_and_root)}
+diff --git a/modules/probe.sh b/modules/probe.sh
+index 280bc1e..7aeefec 100644
+--- a/modules/probe.sh
++++ b/modules/probe.sh
+@@ -13,24 +13,25 @@
+ #    See the License for the specific language governing permissions and
+ #    limitations under the License.
+ 
+-# Checks if there is a preexisting mender integration on the golden image
++# Checks if there is a preexisting over-the-air updater on the input image
+ #
+-# mender-convert expects a vanilla image without mender installed by other means.
+-# If you provide as input an image that has mender installed by other means already
+-# it might fail.
+-# This function will just print warnings for traces of things that look like a tainted input image
++# otapulse-convert expects a vanilla image without an OTA-Pulse or another updater installed by
++# other means. If you provide as input an image that has one already, the conversion might fail.
++# This function only prints warnings for traces of things that look like a tainted input image.
+ probe_untainted_rootfs_input() {
+-    # None of these should be present in a clean rootfs
++    # None of these should be present in a clean rootfs. The first two are the state folders of
++    # another updater's add-ons, the others are the ones of this tool.
+     directories=(
+         "work/rootfs/var/lib/mender-monitor"
+         "work/rootfs/var/lib/mender-configure"
+-        "work/data/mender"
++        "work/rootfs/data/otapulse"
++        "work/rootfs/var/lib/otapulse"
+     )
+ 
+     for dir in "${directories[@]}"; do
+         if [ -e "$dir" ]; then
+             log_warn "$dir exists!"
+-            log_warn "Input image contain traces Mender of previous Mender installation"
++            log_warn "The input image contains traces of an earlier updater installation"
+             log_warn "The conversion might fail. Please provide a clean input image."
+         fi
+     done

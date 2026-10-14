@@ -1,0 +1,828 @@
+Keep only the Raspberry Pi 4 (64 bit, Raspberry Pi OS bookworm, U-Boot) configuration of the
+Raspberry Pi family: the UEFI variant, the 32 bit, Pi 3, Pi 5 and older releases are not qualified.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/images/raspberrypi_raspbian_config b/configs/images/raspberrypi_raspbian_config
+deleted file mode 100644
+index 4d12bea..0000000
+--- a/configs/images/raspberrypi_raspbian_config
++++ /dev/null
+@@ -1,32 +0,0 @@
+-# Real life SD cards typically have less than they advertise. First off, they
+-# often use a base of 1000 instead of 1024, and even then they are often smaller
+-# than advertised. The number below is based on a conservative target of 7.9GB
+-# (that's mathematical GB, base 1000), converted to MiB, rounding down.
+-MENDER_STORAGE_TOTAL_SIZE_MB=7534
+-
+-# Use all there is, which gets us almost, but not quite, to 500MiB free space
+-# (about 480MiB at the time of writing).
+-IMAGE_ROOTFS_SIZE=-1
+-IMAGE_ROOTFS_EXTRA_SPACE=0
+-IMAGE_OVERHEAD_FACTOR=1.0
+-
+-# Best compression there is!
+-MENDER_COMPRESS_DISK_IMAGE=lzma
+-
+-# MEN-4256: Do not install the mender-client by default in our images
+-MENDER_CLIENT_INSTALL="n"
+-
+-#
+-# Allow APT Suite change in the release info
+-#
+-# Upstream repository http://raspbian.raspberrypi.org/raspbian has changed buster
+-# release suite from "stable" to "oldstable". The following configuration option
+-# allows APT to update without user interaction.
+-# This is the default un newer versions of apt, see:
+-#   https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=931566
+-#
+-function apt_allow_release_change_suite() {
+-    run_and_log_cmd "echo 'Acquire::AllowReleaseInfoChange::Suite \"true\";' \
+-                     | sudo tee work/rootfs/etc/apt/apt.conf.d/99release-change-suite"
+-}
+-PLATFORM_MODIFY_HOOKS+=(apt_allow_release_change_suite)
+diff --git a/configs/raspberrypi/include/pre_bookworm_config b/configs/raspberrypi/include/pre_bookworm_config
+deleted file mode 100644
+index 849cb44..0000000
+--- a/configs/raspberrypi/include/pre_bookworm_config
++++ /dev/null
+@@ -1,47 +0,0 @@
+-# this is "bullseye" or earlier
+-RASPBERRYPI_OS_MAX_VERSION=11
+-RPI_FIXUP_UBOOT_PATH="y"
+-
+-# this is required up to including Debian 11 "bullseye"
+-function fixup_boot_part_path_references() {
+-    # Raspberry Pi applications expect to find this on the device and in some
+-    # cases parse the options to determine the functionality. Create symlinks
+-    # to all files that don't already exist.
+-    for f in $(ls -1 work/boot); do
+-        if [ ! -f "work/rootfs/boot/${f}" ]; then
+-            run_and_log_cmd "sudo ln -fs /uboot/${f} work/rootfs/boot/${f}"
+-        fi
+-    done
+-
+-    # Raspberry Pi headless configuration and other first boot scripts inspect the boot partition
+-    # for files. Modify the hard-coded mount point for the partition from /boot to /uboot.
+-
+-    # Integrate with systemd services with "/boot/" hardcoded
+-    files_to_modify="$(find work/rootfs/lib/ -type f -name "*.service" -exec grep -l '/boot/' '{}' ';')"
+-
+-    # MEN-5944: Integrate with raspberrypi-sys-mods/firstboot
+-    # See: https://github.com/RPi-Distro/raspberrypi-sys-mods
+-    if [ -f "work/rootfs/usr/lib/raspberrypi-sys-mods/firstboot" ]; then
+-        files_to_modify="$files_to_modify work/rootfs/usr/lib/raspberrypi-sys-mods/firstboot"
+-    fi
+-
+-    # MEN-5954: Integrate with userconf-pi/userconf-service
+-    # See: https://github.com/RPi-Distro/userconf-pi
+-    if [ -f "work/rootfs/usr/lib/userconf-pi/userconf-service" ]; then
+-        files_to_modify="$files_to_modify work/rootfs/usr/lib/userconf-pi/userconf-service"
+-    fi
+-
+-    # MEN-5955: Integrate with raspberrypi-net-mods/wpa_copy
+-    # See: https://github.com/RPi-Distro/raspberrypi-net-mods
+-    if [ -f "work/rootfs/usr/lib/raspberrypi-net-mods/wpa_copy" ]; then
+-        files_to_modify="$files_to_modify work/rootfs/usr/lib/raspberrypi-net-mods/wpa_copy"
+-    fi
+-
+-    # Modify the files and log the changes
+-    for f in $files_to_modify; do
+-        run_and_log_cmd "sed -i.bak 's|/boot|/uboot|g' ${f}"
+-        log_debug "Modified file ${f}\n$(diff -u ${f}.bak ${f})"
+-        rm ${f}.bak
+-    done
+-    log_info "Certain service files have been changed to align with our /uboot boot partition mount point. See convert.log for more information"
+-}
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi3_bookworm_32bit_config b/configs/raspberrypi/uboot/debian/raspberrypi3_bookworm_32bit_config
+deleted file mode 100644
+index 00be838..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi3_bookworm_32bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/uboot/include/bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi3_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi3_bookworm_64bit_config b/configs/raspberrypi/uboot/debian/raspberrypi3_bookworm_64bit_config
+deleted file mode 100644
+index 5a0d143..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi3_bookworm_64bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/uboot/include/bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi3_64_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi3_bullseye_32bit_config b/configs/raspberrypi/uboot/debian/raspberrypi3_bullseye_32bit_config
+deleted file mode 100644
+index 6160431..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi3_bullseye_32bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/include/pre_bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi3_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi3_bullseye_64bit_config b/configs/raspberrypi/uboot/debian/raspberrypi3_bullseye_64bit_config
+deleted file mode 100644
+index cbd99f3..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi3_bullseye_64bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/include/pre_bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi3_64_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi4_bookworm_32bit_config b/configs/raspberrypi/uboot/debian/raspberrypi4_bookworm_32bit_config
+deleted file mode 100644
+index bc776a5..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi4_bookworm_32bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/uboot/include/bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi4_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi4_bullseye_32bit_config b/configs/raspberrypi/uboot/debian/raspberrypi4_bullseye_32bit_config
+deleted file mode 100644
+index 975433f..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi4_bullseye_32bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/include/pre_bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi4_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi4_bullseye_64bit_config b/configs/raspberrypi/uboot/debian/raspberrypi4_bullseye_64bit_config
+deleted file mode 100644
+index 2660fcf..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi4_bullseye_64bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/include/pre_bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi4_64_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi4_trixie_64bit_config b/configs/raspberrypi/uboot/debian/raspberrypi4_trixie_64bit_config
+deleted file mode 100644
+index c3f32cf..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi4_trixie_64bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/uboot/include/bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi4_64_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi5_bookworm_64bit_config b/configs/raspberrypi/uboot/debian/raspberrypi5_bookworm_64bit_config
+deleted file mode 100644
+index 3a6c4af..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi5_bookworm_64bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/uboot/include/bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi5_64_config
+diff --git a/configs/raspberrypi/uboot/debian/raspberrypi5_trixie_64bit_config b/configs/raspberrypi/uboot/debian/raspberrypi5_trixie_64bit_config
+deleted file mode 100644
+index 3a6c4af..0000000
+--- a/configs/raspberrypi/uboot/debian/raspberrypi5_trixie_64bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/uboot/include/bookworm_config
+-source configs/raspberrypi/uboot/include/raspberrypi5_64_config
+diff --git a/configs/raspberrypi/uboot/include/raspberrypi3_64_config b/configs/raspberrypi/uboot/include/raspberrypi3_64_config
+deleted file mode 100644
+index 262eed2..0000000
+--- a/configs/raspberrypi/uboot/include/raspberrypi3_64_config
++++ /dev/null
+@@ -1,4 +0,0 @@
+-MENDER_DEVICE_TYPE="raspberrypi3_64"
+-
+-source configs/raspberrypi/uboot/include/raspberrypi_64_config
+-PLATFORM_MODIFY_HOOKS+=(raspberrypi_64_platform_modify)
+diff --git a/configs/raspberrypi/uboot/include/raspberrypi3_config b/configs/raspberrypi/uboot/include/raspberrypi3_config
+deleted file mode 100644
+index 7ed0897..0000000
+--- a/configs/raspberrypi/uboot/include/raspberrypi3_config
++++ /dev/null
+@@ -1,7 +0,0 @@
+-RASPBERRYPI_CONFIG="raspberrypi3"
+-RASPBERRYPI_KERNEL_IMAGE="kernel7.img"
+-MENDER_KERNEL_IMAGETYPE="zImage"
+-MENDER_DEVICE_TYPE="raspberrypi3"
+-
+-source configs/raspberrypi/uboot/include/raspberrypi_32_config
+-PLATFORM_MODIFY_HOOKS+=(raspberrypi_32_platform_modify)
+diff --git a/configs/raspberrypi/uboot/include/raspberrypi4_config b/configs/raspberrypi/uboot/include/raspberrypi4_config
+deleted file mode 100644
+index ed8d176..0000000
+--- a/configs/raspberrypi/uboot/include/raspberrypi4_config
++++ /dev/null
+@@ -1,7 +0,0 @@
+-RASPBERRYPI_CONFIG="raspberrypi4"
+-RASPBERRYPI_KERNEL_IMAGE="kernel7l.img"
+-MENDER_KERNEL_IMAGETYPE="zImage"
+-MENDER_DEVICE_TYPE="raspberrypi4"
+-
+-source configs/raspberrypi/uboot/include/raspberrypi_32_config
+-PLATFORM_MODIFY_HOOKS+=(raspberrypi_32_platform_modify)
+diff --git a/configs/raspberrypi/uboot/include/raspberrypi5_64_config b/configs/raspberrypi/uboot/include/raspberrypi5_64_config
+deleted file mode 100644
+index a74dfe0..0000000
+--- a/configs/raspberrypi/uboot/include/raspberrypi5_64_config
++++ /dev/null
+@@ -1,18 +0,0 @@
+-MENDER_DEVICE_TYPE="raspberrypi5_64"
+-
+-source configs/raspberrypi/uboot/include/raspberrypi_64_config
+-
+-# Override the U-Boot binary set in raspberrypi_64_config. The binary
+-# has CONFIG_BOOTDELAY=-2 which is needed for U-Boot to work with RPi5
+-# See MEN-8901 and https://github.com/agherzan/meta-raspberrypi/issues/1459
+-RASPBERRYPI_BINARIES="raspberrypi_arm64_rpi5-2024.04-no-bootdelay.tar.gz"
+-RASPBERRYPI_BINARIES_URL="${MENDER_STORAGE_URL}/mender-convert/uboot/raspberrypi64/${RASPBERRYPI_BINARIES}"
+-
+-PLATFORM_MODIFY_HOOKS+=(raspberrypi_64_platform_modify)
+-
+-function log_boot_delay_warning() {
+-    log_warn "The RPi5 integration with mender-convert currently uses a separate U-Boot binary with \`CONFIG_BOOTDELAY=-2\`."
+-    log_warn "This is a workaround for an issue where RPi5 with U-Boot is stuck waiting for uart, see https://github.com/agherzan/meta-raspberrypi/issues/1459."
+-}
+-
+-PLATFORM_MODIFY_HOOKS+=(log_boot_delay_warning)
+diff --git a/configs/raspberrypi/uboot/include/raspberrypi5_64_performance_config b/configs/raspberrypi/uboot/include/raspberrypi5_64_performance_config
+deleted file mode 100644
+index d97f97c..0000000
+--- a/configs/raspberrypi/uboot/include/raspberrypi5_64_performance_config
++++ /dev/null
+@@ -1,23 +0,0 @@
+-# This configuration file intends to use RPi5 optimized kernel kernel_2712.img
+-# instead of the default kernel8.img shared with the RPi4
+-# Reference: https://github.com/mendersoftware/mender-convert/pull/817
+-MENDER_DEVICE_TYPE="raspberrypi5_64"
+-
+-RASPBERRYPI_KERNEL_IMAGE="kernel_2712.img"
+-
+-source configs/raspberrypi/uboot/include/raspberrypi_64_config
+-
+-# Override the U-Boot binary set in raspberrypi_64_config. The binary
+-# has CONFIG_BOOTDELAY=-2 which is needed for U-Boot to work with RPi5
+-# See MEN-8901 and https://github.com/agherzan/meta-raspberrypi/issues/1459
+-RASPBERRYPI_BINARIES="raspberrypi_arm64_rpi5-2024.04-no-bootdelay.tar.gz"
+-RASPBERRYPI_BINARIES_URL="${MENDER_STORAGE_URL}/mender-convert/uboot/raspberrypi64/${RASPBERRYPI_BINARIES}"
+-
+-PLATFORM_MODIFY_HOOKS+=(raspberrypi_64_platform_modify)
+-
+-function log_boot_delay_warning() {
+-    log_warn "The RPi5 integration with mender-convert currently uses a separate U-Boot binary with \`CONFIG_BOOTDELAY=-2\`."
+-    log_warn "This is a workaround for an issue where RPi5 with U-Boot is stuck waiting for uart, see https://github.com/agherzan/meta-raspberrypi/issues/1459."
+-}
+-
+-PLATFORM_MODIFY_HOOKS+=(log_boot_delay_warning)
+diff --git a/configs/raspberrypi/uboot/include/raspberrypi_32_config b/configs/raspberrypi/uboot/include/raspberrypi_32_config
+deleted file mode 100644
+index 6977685..0000000
+--- a/configs/raspberrypi/uboot/include/raspberrypi_32_config
++++ /dev/null
+@@ -1,65 +0,0 @@
+-# Binaries generated with the following script:
+-#    https://github.com/mendersoftware/mender-convert-integration-scripts/blob/master/build-uboot-rpi.sh
+-
+-RASPBERRYPI_BINARIES="${RASPBERRYPI_CONFIG}-2020.01.tar.gz"
+-RASPBERRYPI_BINARIES_URL="${MENDER_STORAGE_URL}/mender-convert/uboot/raspberrypi/${RASPBERRYPI_BINARIES}"
+-
+-RASPBERRYPI_OS_NEEDS_32BIT="y"
+-
+-source configs/raspberrypi/include/common_config
+-source configs/raspberrypi/uboot/include/common_config
+-
+-function raspberrypi_32_setup_bootloader_and_kernel() {
+-    # Ubuntu Server images actually use U-boot by default on RPi3 and the
+-    # layout is slightly different on the boot partition. That is why we need
+-    # additional logic here to determine what we are converting.
+-    if [ -e work/boot/uboot_rpi_4_32b.bin ] && [ -e work/boot/vmlinuz ]; then
+-        RASPBERRYPI_KERNEL_IMAGE="vmlinuz"
+-        RASPBERRYPI_BOOTLOADER_IMAGE="uboot_rpi_4_32b.bin"
+-    elif [ -e work/boot/uboot.bin ] && [ -e work/boot/vmlinuz ]; then
+-        RASPBERRYPI_KERNEL_IMAGE="vmlinuz"
+-        RASPBERRYPI_BOOTLOADER_IMAGE="uboot.bin"
+-    else
+-        RASPBERRYPI_BOOTLOADER_IMAGE="${RASPBERRYPI_KERNEL_IMAGE}"
+-    fi
+-
+-    # Extract Linux kernel and install to /boot directory on rootfs if it doesn't already exist.
+-    # If it already exists, the input image is likely already converted so we just want to use
+-    # the existing kernel image.
+-    if [ ! -f "work/rootfs/boot/${MENDER_KERNEL_IMAGETYPE}" ]; then
+-        run_and_log_cmd "sudo cp work/boot/${RASPBERRYPI_KERNEL_IMAGE} work/rootfs/boot/${MENDER_KERNEL_IMAGETYPE}"
+-    fi
+-
+-    # Make sure the on-board bootloader boots our bootloader (which we do via the kernel option).
+-    sed -i -e '/^kernel=/d' work/boot/config.txt
+-    echo "kernel=${RASPBERRYPI_BOOTLOADER_IMAGE}" >> work/boot/config.txt
+-
+-    # Replace kernel with U-boot and add boot script
+-    run_and_log_cmd "sudo cp work/rpi/binaries/u-boot.bin work/boot/${RASPBERRYPI_BOOTLOADER_IMAGE}"
+-    run_and_log_cmd "sudo cp work/rpi/binaries/boot.scr work/boot"
+-    run_and_log_cmd "sudo cp work/rpi/binaries/fw_env.config work/rootfs/etc/"
+-    run_and_log_cmd "sudo cp work/rpi/binaries/uboot-git-log.txt work/boot"
+-
+-    # Disable 64-bit mode and force 32-bit mode. Even though we check for 32-bit binaries at the
+-    # start of this function, some images use a 64-bit kernel even with 32-bit userspace. Due to our
+-    # custom U-Boot bootloader we need to stick to 32-bit for now.
+-    if ! grep -q '^arm_64bit=0' work/boot/config.txt; then
+-        log_info "Forcing 32-bit kernel"
+-        sed -i -e '/^arm_64bit=/d' work/boot/config.txt
+-        echo "arm_64bit=0" >> work/boot/config.txt
+-    fi
+-
+-    raspberrypi_generic_bootloader_setup
+-}
+-
+-function raspberrypi_32_platform_modify() {
+-    raspberrypi_check_requirements
+-
+-    check_and_extract_asset $RASPBERRYPI_BINARIES $RASPBERRYPI_BINARIES_URL
+-
+-    raspberrypi_update_cmdline
+-
+-    raspberrypi_32_setup_bootloader_and_kernel
+-
+-    raspberrypi_adjust_services
+-}
+diff --git a/configs/raspberrypi/uboot/raspberrypi0w_config b/configs/raspberrypi/uboot/raspberrypi0w_config
+deleted file mode 100644
+index 007695f..0000000
+--- a/configs/raspberrypi/uboot/raspberrypi0w_config
++++ /dev/null
+@@ -1,7 +0,0 @@
+-RASPBERRYPI_CONFIG="raspberrypi0w"
+-RASPBERRYPI_KERNEL_IMAGE="kernel.img"
+-MENDER_KERNEL_IMAGETYPE=zImage
+-MENDER_DEVICE_TYPE="raspberrypi0w"
+-
+-source configs/raspberrypi/uboot/include/raspberrypi_32_config
+-PLATFORM_MODIFY_HOOKS+=(raspberrypi_32_platform_modify)
+diff --git a/configs/raspberrypi/uefi/debian/raspberrypi4_bookworm_64bit_config b/configs/raspberrypi/uefi/debian/raspberrypi4_bookworm_64bit_config
+deleted file mode 100644
+index 164ba21..0000000
+--- a/configs/raspberrypi/uefi/debian/raspberrypi4_bookworm_64bit_config
++++ /dev/null
+@@ -1,2 +0,0 @@
+-source configs/raspberrypi/uefi/include/raspberrypi4_64_config
+-source configs/raspberrypi/uefi/include/bookworm_config
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/DEBIAN/control b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/DEBIAN/control
+deleted file mode 100644
+index cd06d5d..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/DEBIAN/control
++++ /dev/null
+@@ -1,6 +0,0 @@
+-Package: mender-rpi-grub-integration
+-Version: 1.0
+-Architecture: all
+-Maintainer: Northern.tech <contact@northern.tech>
+-Description: Package which makes the Raspberry Pi custom boot scripts integrate better with GRUB
+-Priority: required
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/etc/default/grub.d/mender-rpi-cmdline.cfg b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/etc/default/grub.d/mender-rpi-cmdline.cfg
+deleted file mode 120000
+index 9a9a2e6..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/etc/default/grub.d/mender-rpi-cmdline.cfg
++++ /dev/null
+@@ -1 +0,0 @@
+-../../../usr/share/mender-rpi-grub-integration/etc/default/grub.d/mender-rpi-cmdline.cfg
+\ No newline at end of file
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/etc/grub.d/10_mender_rpi_grub_integration_cmdline b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/etc/grub.d/10_mender_rpi_grub_integration_cmdline
+deleted file mode 120000
+index d2c7434..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/etc/grub.d/10_mender_rpi_grub_integration_cmdline
++++ /dev/null
+@@ -1 +0,0 @@
+-../../usr/share/mender-rpi-grub-integration/etc/grub.d/10_mender_rpi_grub_integration_cmdline
+\ No newline at end of file
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/mender-init-runner.service b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/mender-init-runner.service
+deleted file mode 100644
+index 67fa005..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/mender-init-runner.service
++++ /dev/null
+@@ -1,15 +0,0 @@
+-# This is part of a bigger workaround. To fully understand it, it is advised to read the explanation
+-# in the `rpi_cmdline_txt_workaround` function in the mender-convert repository.
+-
+-[Unit]
+-Description=Mender service which enables running the Raspberry Pi OS firstboot script
+-Wants=sysinit.target mender-update-grub-at-reboot.service
+-After=sysinit.target mender-update-grub-at-reboot.service
+-DefaultDependencies=no
+-
+-[Service]
+-Type=exec
+-StandardInput=tty
+-StandardOutput=journal+console
+-StandardError=journal+console
+-ExecStart=/usr/share/mender-rpi-grub-integration/init-runner
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/mender-update-grub-at-reboot.service b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/mender-update-grub-at-reboot.service
+deleted file mode 100644
+index ed47b45..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/mender-update-grub-at-reboot.service
++++ /dev/null
+@@ -1,27 +0,0 @@
+-# This is part of a bigger workaround. To fully understand it, it is advised to read the explanation
+-# in the `rpi_cmdline_txt_workaround` function in the mender-convert repository.
+-
+-[Unit]
+-Description=Mender service which ensures update-grub is run before reboot
+-Wants=local-fs.target
+-After=local-fs.target
+-DefaultDependencies=no
+-Conflicts=shutdown.target umount.target
+-Before=shutdown.target umount.target
+-
+-[Service]
+-RemainAfterExit=yes
+-
+-# These are needed because the RPi scripts may unmount/remount these outside of systemd.
+-ExecStop=-mount / remount,rw
+-ExecStop=-mount /boot/efi
+-
+-ExecStop=/usr/share/mender-rpi-grub-integration/grub-updater
+-
+-# update-grub can in some cases take quite long (40s+), and is dependent on SD card
+-# performance. So the 90s default timeout feels a bit close for something as important
+-# as updating the bootloader. Raise it a little to be safer.
+-TimeoutStopSec=300
+-
+-[Install]
+-WantedBy=sysinit.target
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/sysinit.target.wants/mender-update-grub-at-reboot.service b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/sysinit.target.wants/mender-update-grub-at-reboot.service
+deleted file mode 120000
+index 434711f..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/lib/systemd/system/sysinit.target.wants/mender-update-grub-at-reboot.service
++++ /dev/null
+@@ -1 +0,0 @@
+-../mender-update-grub-at-reboot.service
+\ No newline at end of file
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/etc/default/grub.d/mender-rpi-cmdline.cfg b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/etc/default/grub.d/mender-rpi-cmdline.cfg
+deleted file mode 100644
+index c79100d..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/etc/default/grub.d/mender-rpi-cmdline.cfg
++++ /dev/null
+@@ -1,41 +0,0 @@
+-#
+-#
+-# Copyright 2024 Northern.tech AS
+-#
+-#  Licensed under the Apache License, Version 2.0 (the "License");
+-#  you may not use this file except in compliance with the License.
+-#  You may obtain a copy of the License at
+-#
+-#      http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#  Unless required by applicable law or agreed to in writing, software
+-#  distributed under the License is distributed on an "AS IS" BASIS,
+-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-#  See the License for the specific language governing permissions and
+-#  limitations under the License.
+-
+-# This is part of a bigger workaround. To fully understand it, it is advised to read the explanation
+-# in the `rpi_cmdline_txt_workaround` function in the mender-convert repository.
+-
+-CMDLINE="$(head -n 1 /boot/efi/cmdline.txt 2>/dev/null || true)"
+-
+-# Remove any `root=` argument. Mender takes care of that.
+-CMDLINE="$(echo "$CMDLINE" | sed -E -e 's/(^| )root=[^ ]*/\1/')"
+-
+-# If there is an `init=` argument, save its value and replace it with our own service, which calls
+-# it.
+-if echo "$CMDLINE" | grep -q -E '(^| )init='; then
+-    INIT_ARG="$(echo "$CMDLINE" | sed -E -e 's/(^|.* )init=([^ ]*).*/\2/')"
+-    CMDLINE="$(echo "$CMDLINE" | sed -E -e 's,(^| )init=[^ ]*,\1systemd.unit=mender-init-runner.service,')"
+-
+-    # Save the original argument somewhere we can find later when booting.
+-    mkdir -p /var/lib/mender-rpi-grub-integration
+-    echo "$INIT_ARG" > /var/lib/mender-rpi-grub-integration/init-argument
+-else
+-    if [ -d /var/lib/mender-rpi-grub-integration ]; then
+-        rm -f /var/lib/mender-rpi-grub-integration/init-argument
+-        rmdir --ignore-fail-on-non-empty /var/lib/mender-rpi-grub-integration
+-    fi
+-fi
+-
+-GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT $CMDLINE"
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/etc/grub.d/10_mender_rpi_grub_integration_cmdline b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/etc/grub.d/10_mender_rpi_grub_integration_cmdline
+deleted file mode 100755
+index 60bbe14..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/etc/grub.d/10_mender_rpi_grub_integration_cmdline
++++ /dev/null
+@@ -1,6 +0,0 @@
+-# This is part of a bigger workaround. To fully understand it, it is advised to read the explanation
+-# in the `rpi_cmdline_txt_workaround` function in the mender-convert repository.
+-
+-# This has no effect on the boot, it is here to record which `cmdline.txt` was used to generate
+-# this. Non-existing is a valid scenario, it counts as an empty file.
+-echo "# RPI_CMDLINE_TXT=\"$(head -n 1 /boot/efi/cmdline.txt 2>/dev/null || true)\""
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/grub-updater b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/grub-updater
+deleted file mode 100755
+index a5be197..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/grub-updater
++++ /dev/null
+@@ -1,28 +0,0 @@
+-#!/bin/sh
+-#
+-# Copyright 2024 Northern.tech AS
+-#
+-#  Licensed under the Apache License, Version 2.0 (the "License");
+-#  you may not use this file except in compliance with the License.
+-#  You may obtain a copy of the License at
+-#
+-#      http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#  Unless required by applicable law or agreed to in writing, software
+-#  distributed under the License is distributed on an "AS IS" BASIS,
+-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-#  See the License for the specific language governing permissions and
+-#  limitations under the License.
+-
+-# This is part of a bigger workaround. To fully understand it, it is advised to read the explanation
+-# in the `rpi_cmdline_txt_workaround` function in the mender-convert repository.
+-
+-# This string should have been generated during the last `update-grub` invocation.
+-EXPECTED_STRING="RPI_CMDLINE_TXT=\"$(head -n 1 /boot/efi/cmdline.txt)\""
+-if grep -q -F "$EXPECTED_STRING" /boot/grub-mender-grubenv.cfg; then
+-    echo "Already up to date with cmdline.txt. No need to run update-grub."
+-    exit 0
+-fi
+-
+-echo "Running update-grub..."
+-exec update-grub
+diff --git a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/init-runner b/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/init-runner
+deleted file mode 100755
+index e9c7e88..0000000
+--- a/configs/raspberrypi/uefi/files/mender-rpi-grub-integration/usr/share/mender-rpi-grub-integration/init-runner
++++ /dev/null
+@@ -1,50 +0,0 @@
+-#!/bin/bash
+-#
+-# Copyright 2024 Northern.tech AS
+-#
+-#  Licensed under the Apache License, Version 2.0 (the "License");
+-#  you may not use this file except in compliance with the License.
+-#  You may obtain a copy of the License at
+-#
+-#      http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#  Unless required by applicable law or agreed to in writing, software
+-#  distributed under the License is distributed on an "AS IS" BASIS,
+-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-#  See the License for the specific language governing permissions and
+-#  limitations under the License.
+-
+-# This is part of a bigger workaround. To fully understand it, it is advised to read the explanation
+-# in the `rpi_cmdline_txt_workaround` function in the mender-convert repository.
+-
+-reboot() {
+-    # RPi scripts call `reboot` with the `-f` argument, because it ordinarily expects to be run
+-    # without systemd present. But when using this init-runner, we are running under systemd. We
+-    # could reboot, but that does not play nicely during upgrades, because the bootloader expects
+-    # exactly one reboot only, so that might end up rolling back. However, at this point we should
+-    # still be very early in the boot, so just switch over to the normal environment instead, which
+-    # should be almost like a reboot. At the time of writing, the Raspberry Pi OS's `firstboot`
+-    # script does a change to the partition UUID, which might not get picked up this way. However,
+-    # Mender does not use this, so it should be fine to ignore.
+-    #
+-    # However, one thing we should do is to run `update-grub` to make sure that the changes that the
+-    # `firstboot` script does to `cmdline.txt` are picked up. Let's do that using the dedicated
+-    # service (better logging).
+-    systemctl restart mender-update-grub-at-reboot
+-
+-    # Now switch to an ordinary boot.
+-    systemctl default --no-block
+-}
+-
+-# Export the custom `reboot` function to prevent the RPi scripts from calling it directly. This
+-# won't work if the recipient is not a shell script.
+-export -f reboot
+-
+-CMD=$(cat /var/lib/mender-rpi-grub-integration/init-argument)
+-if [ $? -ne 0 ]; then
+-    # If the argument grabbing failed, fall back to the standard boot.
+-    systemctl default --no-block
+-    exit 0
+-fi
+-
+-eval exec "$CMD"
+diff --git a/configs/raspberrypi/uefi/include/bookworm_config b/configs/raspberrypi/uefi/include/bookworm_config
+deleted file mode 100644
+index c4a0878..0000000
+--- a/configs/raspberrypi/uefi/include/bookworm_config
++++ /dev/null
+@@ -1,12 +0,0 @@
+-function rpi_firmware_link() {
+-    # Raspbian OS bookworm and onwards have a standard mount point for the boot partition, at
+-    # `/boot/firmware`. This conflicts with the EFI standard mount point, `/boot/efi`. Since EFI is
+-    # arguably *more* standard, and we are booting from it as well, symlink `/boot/firmware` to
+-    # that.
+-    log_info "Installing /boot/firmware -> /boot/efi symlink"
+-    if [ -d work/rootfs/boot/firmware ]; then
+-        run_and_log_cmd "rmdir work/rootfs/boot/firmware"
+-    fi
+-    run_and_log_cmd "ln -s efi work/rootfs/boot/firmware"
+-}
+-PLATFORM_MODIFY_HOOKS+=(rpi_firmware_link)
+diff --git a/configs/raspberrypi/uefi/include/common_config b/configs/raspberrypi/uefi/include/common_config
+deleted file mode 100644
+index c637b5f..0000000
+--- a/configs/raspberrypi/uefi/include/common_config
++++ /dev/null
+@@ -1,139 +0,0 @@
+-# Enable extra boot parameters which force logging to work during the early stages of a UEFI
+-# boot. Defaults to off, but is enabled on the platform combinations where it is known to be a
+-# problem.
+-MENDER_RPI_EFI_LOGGING_WORKAROUND=n
+-
+-# Force this to on. "auto" doesn't work because there is no existing grub.d installation in the
+-# image, so it is detected as not present. This is because by default it uses the Raspberry Pi
+-# specific firmware bootloader.
+-MENDER_GRUB_D_INTEGRATION=y
+-
+-. modules/chroot.sh
+-
+-function rpi_cmdline_txt_workaround() {
+-    # Raspberry Pi OS uses an incredibly hacky method to run first boot initialization: They replace
+-    # the init process (so basically the entire operating system) with a custom bash script. Once it
+-    # has run it removes the special init parameter to the kernel. All of this happens through the
+-    # `cmdline.txt` file. The ideal thing would be for GRUB to read this file during boot and use
+-    # its arguments, which would make it behave more or less like Raspberry Pi OS, but unfortunately
+-    # GRUB does not support reading of arbitrary files (other than environment files, which have a
+-    # special format). So to make GRUB respect `cmdline.txt`, we need to make sure that
+-    # `update-grub` is run while the OS is still running.
+-    #
+-    # The workaround consists of several components:
+-    #
+-    # 1. To make sure that the arguments from `cmdline.txt` are imported into GRUB's boot files with
+-    #    `update-grub`, we use the `GRUB_CMDLINE_LINUX_DEFAULT` configuration setting, with some
+-    #    additional logic around it to grab the setting from `cmdline.txt` and tweak it. This
+-    #    resides under `/etc/default/grub.d`.
+-    #
+-    # 2. We introduce a systemd service, `mender-update-grub-at-reboot.service`, which always runs,
+-    #    and if necessary, runs `update-grub` whenever we are shutting down and `cmdline.txt` has
+-    #    changed. This is not a full proof method, since it will not work if `cmdline.txt` is
+-    #    changed, and then the system is not shut down cleanly. But it's much better than nothing.
+-    #
+-    # 3. We also rely on the (already existing) platform hooks to run `update-grub` after a kernel
+-    #    or GRUB update. We don't have to do anything to make this work, but it's nice to know that
+-    #    these mechanisms are working as intended, even on this Raspberry Pi port. These hooks
+-    #    mainly rely on scripts in `/etc/kernel`, as well as the kernel and GRUB package scripts.
+-    #
+-    # 4. We introduce a another systemd service, `mender-init-runner.service`, whose task it is to
+-    #    run the script which is passed in via the `init=` kernel parameter. On the actual kernel
+-    #    command line, we replace the `init=<CMDLINE>` argument with
+-    #    `systemd.unit=mender-init-runner.service` and we put `<CMDLINE>` in a file. It runs early
+-    #    in the boot process, but not immediately after kernel start, as `init=` would do. There are
+-    #    multiple reasons why this is done:
+-    #
+-    #        a) It allows us to reuse the service from point 2, which would not be possible if the
+-    #           script was called directly (systemd would not be running).
+-    #
+-    #        b) For some reason logging (or any output) doesn't work correctly until the framebuffer
+-    #           is initialized properly. Although the script still runs correctly, there is no
+-    #           output at all, which is quite confusing, and near impossible to debug. Instead of
+-    #           attempting the framebuffer reset manually, let systemd do it in the early boot steps.
+-    #
+-    #        c) In general it just feels safer to have a safety net with a system manager running,
+-    #           and knowing that the most important things are properly initialized (as the logging
+-    #           from the previous point shows).
+-
+-    # This will be turned into a package owned by root, so make sure it is only writable by its
+-    # owner.
+-    run_and_log_cmd "chmod -R go-w configs/raspberrypi/uefi/files/mender-rpi-grub-integration"
+-
+-    # All of mechanics described above are hosted in the package we build here.
+-    run_and_log_cmd "dpkg-deb --root-owner-group --build configs/raspberrypi/uefi/files/mender-rpi-grub-integration"
+-    run_and_log_cmd "mv configs/raspberrypi/uefi/files/mender-rpi-grub-integration.deb work/rootfs/"
+-
+-    run_with_chroot_setup work/rootfs rpi_install_rpi_grub_integration
+-    run_and_log_cmd "rm -f work/rootfs/mender-rpi-grub-integration.deb"
+-}
+-
+-function rpi_install_rpi_grub_integration() {
+-    log_info "Installing cmdline.txt/GRUB integration..."
+-    run_in_chroot_and_log_cmd work/rootfs "dpkg --install /mender-rpi-grub-integration.deb"
+-}
+-
+-function rpi_enable_kernel_logging() {
+-    # As of 2024-10-22-raspios-bookworm, the kernel is not able to pick up that it needs to log to
+-    # UEFI, even when running under the kernel EFI stub. The result is that nothing is printed to
+-    # the console until much later in the boot process, when the final console mode is set. To fix
+-    # this we need to specify EFI specifically. See kernel-parameters.txt (available online and in
+-    # the linux kernel repo) for more information. Note that there may still be a "quiet" argument
+-    # present which will still prevent output.
+-    log_info "Enabling kernel console logging fix for Raspberry Pi"
+-    mkdir -p work/rootfs/etc/default/grub.d
+-    echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT earlycon=efifb keep_bootcon"' \
+-        > work/rootfs/etc/default/grub.d/mender_rpi_kernel_logging.cfg
+-}
+-
+-function rpi_prepare_uefi_firmware() {
+-    run_and_log_cmd "wget -O RPi_UEFI_Firmware.zip $RPI_UEFI_FIRMWARE_URL"
+-    run_and_log_cmd "sha256sum -c -" << EOF
+-$RPI_UEFI_FIRMWARE_CHKSUM  RPi_UEFI_Firmware.zip
+-EOF
+-
+-    # This mixes the UEFI boot files with the existing Raspberry Pi specific boot loader files, but
+-    # it's probably better to keep both, since the OS updater may expect them to be present. They
+-    # will be largely inert files though, because `config.txt` is used to select the UEFI
+-    # bootloader, not the kernel image as the Raspberry Pi stock boot process does. I have not found
+-    # an authoritative source that says that `config.txt` won't be modified, but it seems to be
+-    # "collectively understood" as such, based on both forum posts and ChatGPT. This should be
+-    # enough to keep the updater from messing with the UEFI setup.
+-    #
+-    # Note: `-o` means "overwrite", not "output file".
+-    run_and_log_cmd "( cd work/boot && unzip -o ../../RPi_UEFI_Firmware.zip )"
+-
+-    if [ "$MENDER_RPI_PRECONFIGURED_UEFIVARS" = "y" -a -n "$RPI_UEFIVAR_BLOB_URL" ]; then
+-        if [ -n "$RPI_UEFIVAR_ORIG_FIRMWARE_CHKSUM" ]; then
+-            run_and_log_cmd "sha256sum -c -" << EOF
+-$RPI_UEFIVAR_ORIG_FIRMWARE_CHKSUM  RPi_UEFI_Firmware.zip
+-EOF
+-        fi
+-
+-        run_and_log_cmd "wget -O UEFI-Vars.tar.xz $RPI_UEFIVAR_BLOB_URL"
+-        run_and_log_cmd "sha256sum -c -" << EOF
+-$RPI_UEFIVAR_BLOB_CHKSUM  UEFI-Vars.tar.xz
+-EOF
+-
+-        run_and_log_cmd "( cd work/boot && tar -xJf ../../UEFI-Vars.tar.xz --no-same-owner )"
+-    fi
+-}
+-
+-function rpi_uefi_platform_pre_modify() {
+-    rpi_prepare_uefi_firmware
+-
+-    function rpi_install_grub() {
+-        log_info "Installing GRUB..."
+-        run_in_chroot_and_log_cmd work/rootfs "apt update"
+-        run_in_chroot_and_log_cmd work/rootfs "DEBIAN_FRONTEND=noninteractive apt install -yy grub-efi"
+-    }
+-
+-    run_with_chroot_setup work/rootfs rpi_install_grub
+-
+-    rpi_cmdline_txt_workaround
+-
+-    if [ "$MENDER_RPI_EFI_LOGGING_WORKAROUND" = "y" ]; then
+-        rpi_enable_kernel_logging
+-    fi
+-}
+-PLATFORM_PRE_MODIFY_HOOKS+=(rpi_uefi_platform_pre_modify)
+diff --git a/configs/raspberrypi/uefi/include/raspberrypi4_64_config b/configs/raspberrypi/uefi/include/raspberrypi4_64_config
+deleted file mode 100644
+index 72d6402..0000000
+--- a/configs/raspberrypi/uefi/include/raspberrypi4_64_config
++++ /dev/null
+@@ -1,63 +0,0 @@
+-source configs/raspberrypi/uefi/include/common_config
+-
+-MENDER_RPI_EFI_LOGGING_WORKAROUND=y
+-
+-# This device type is not compatible with the "raspberrypi4_64" device type, which predates UEFI
+-# support and is based on U-Boot. Therefore we use a "uefi" suffix in this device type.
+-MENDER_DEVICE_TYPE=raspberrypi4_64_uefi
+-
+-RPI_UEFI_FIRMWARE_URL="https://github.com/pftf/RPi4/releases/download/v1.38/RPi4_UEFI_Firmware_v1.38.zip"
+-RPI_UEFI_FIRMWARE_CHKSUM=f82404a1f52497308aaed69040baa663a2d8c5c4fd78edddc6132ee8ca62ae2b
+-
+-# --- Custom variables ---
+-#
+-# We want to change a few variables in the UEFI configuration in order to facilitate immediate
+-# successful booting. Otherwise the users first need to enter the Setup menu and change a few
+-# things.
+-#
+-# In some UEFI implementations (x86), the UEFI variables are stored in a separate fd file. In the
+-# RPi case however, the UEFI code and the variables are stored in the same file. This is a bit
+-# unfortunate because every upgrade requires us to update the settings in that file as well.
+-#
+-# In order to minimize the chance of the original files (which consist of many files in addition to
+-# the fd file) and the fd file versions getting out of sync, we repeat the checksum of the original
+-# zip file below, and check it again. Yes, this is redundant, but it's in the name of grouping
+-# things together logically, and minimizing the risk of forgetting something.
+-#
+-# --- Upgrading ---
+-#
+-# When upgrading the original software, this is what needs to be done to upgrade the convenience
+-# file:
+-#
+-# 1. Perform a mender-conversion with MENDER_RPI_PRECONFIGURED_UEFIVARS turned off.
+-#
+-# 2. Flash to an SD card and boot the Raspberry Pi. Enter the Setup menu, change the options
+-#    mentioned below, and save.
+-#
+-# 3. Make sure it boots and runs with no further configuration.
+-#
+-# 4. Extract the `RPI_EFI.fd` file from the SD card, save it in a tarball like the one below, and
+-#    upload to S3.
+-#
+-# 5. Update the checksums, turn MENDER_RPI_PRECONFIGURED_UEFIVARS back on, and do another conversion
+-#    and test to verify.
+-#
+-# --- Specific compatibility options ---
+-#
+-# These are the settings that are adjusted (both options are under UEFI Setup (Esc key) -> Device
+-# Manager -> Raspberry Pi Configuration):
+-#
+-# 1. Limit RAM to 3GB = Disabled. This is a compatibility option, but the kernels that require it
+-#    are already quite old, and none of the OSes we are going to support need it. Better to enable
+-#    access to all the available RAM.
+-#
+-# 2. System Table Selection = ACPI + Devicetree. At least the kernels in Raspberry Pi OS (last
+-#    checked with 2024-10-22-raspios-bookworm) do not come with ACPI support, so make the UEFI
+-#    firmware provide both.
+-#
+-# See https://developer.arm.com/documentation/102677/0100/Set-up-the-Raspberry-Pi for more
+-# information on these compatibility options.
+-RPI_UEFIVAR_BLOB_URL="https://downloads.mender.io/mender-convert/edk2/raspberrypi4_64/RPi4_UEFI_Firmware_v1.38.tar.xz"
+-RPI_UEFIVAR_BLOB_CHKSUM=6769518638a2ff2404a06fcfbaab6522ed015d3ca0f4af0746a5280034918b53
+-RPI_UEFIVAR_ORIG_FIRMWARE_CHKSUM=f82404a1f52497308aaed69040baa663a2d8c5c4fd78edddc6132ee8ca62ae2b
+-MENDER_RPI_PRECONFIGURED_UEFIVARS=y

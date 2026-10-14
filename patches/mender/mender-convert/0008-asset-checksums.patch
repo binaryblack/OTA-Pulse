@@ -1,0 +1,18 @@
+configs/assets.sha256: the checksums of the accepted bootloader assets.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/assets.sha256 b/configs/assets.sha256
+new file mode 100644
+index 0000000..ab8c9cc
+--- /dev/null
++++ b/configs/assets.sha256
+@@ -0,0 +1,8 @@
++# Bootloader assets that otapulse-convert accepts, with their sha256 (see modules/assets.sh).
++# A file that is not listed here, or whose checksum differs, is refused.
++#
++# <sha256>  <file name>
++#
++# U-Boot 2024.04 with the A/B boot environment integration for the Raspberry Pi 3, 4 and 5 (arm64):
++# u-boot.bin, fw_printenv, fw_env.config.
++b11bbd0822345bd1c9b4636a6f6b174f739c79342d3bb1ad5b960c22d836281d  raspberrypi_arm64-2024.04.tar.gz

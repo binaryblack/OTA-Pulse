@@ -1,0 +1,433 @@
+#! /usr/bin/env bash
+#
+# Copyright 2021 Northern.tech AS
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+# Default that can be overridden by providing this method in a
+# configuration file passed with '--config'
+function platform_package() {
+    true
+}
+PLATFORM_PACKAGE_HOOKS=(platform_package)
+
+# Write the OTA-Pulse artifact (the .otapulse file) of the converted root file system. This function
+# is defined here so that a configuration file passed with '--config' can replace it.
+#
+#  $1 - device type(s), space separated
+#  $2 - artifact name
+#  $3 - base name of the output files
+#
+# The state scripts of the soc-ota-agent package are embedded: an update runs the scripts that
+# come with the ARTIFACT, never the ones of the installed image.
+function otapulse_create_artifact() {
+    local -r device_types="${1}"
+    local -r artifact_name="${2}"
+    local -r image_name="${3}"
+    local -a device_type_args=()
+    local -a script_args=()
+    local -a key_args=()
+    local device_type script
+
+    for device_type in ${device_types}; do
+        device_type_args+=(--device-type "${device_type}")
+    done
+    for script in work/rootfs/usr/share/otapulse/state-scripts/*; do
+        [ -f "${script}" ] && script_args+=(--script "${script}")
+    done
+    if [ "${#script_args[@]}" -eq 0 ]; then
+        log_fatal "No state scripts found in /usr/share/otapulse/state-scripts of the image: the soc-ota-agent package is missing."
+    fi
+    if [ -n "${OTAPULSE_ARTIFACT_SIGNING_KEY}" ]; then
+        [ -f "${OTAPULSE_ARTIFACT_SIGNING_KEY}" ] || log_fatal "OTAPULSE_ARTIFACT_SIGNING_KEY: file not found: ${OTAPULSE_ARTIFACT_SIGNING_KEY}"
+        key_args=(--key "${OTAPULSE_ARTIFACT_SIGNING_KEY}")
+    else
+        log_warn "OTAPULSE_ARTIFACT_SIGNING_KEY is not set: the artifact is not signed and an agent that requires signed artifacts will refuse it"
+    fi
+
+    otapulse_artifact=deploy/${image_name}.otapulse
+    log_info "Writing the OTA-Pulse artifact to: ${otapulse_artifact}"
+    log_info "This can take up to 20 minutes depending on which compression method is used"
+
+    run_and_log_cmd "otapulse-artifact write rootfs-image \
+      --compression ${OTAPULSE_ARTIFACT_COMPRESSION} \
+      --no-progress \
+      --file work/rootfs.img \
+      --output-path ${otapulse_artifact} \
+      --artifact-name ${artifact_name} \
+      ${device_type_args[*]} \
+      ${script_args[*]} \
+      ${key_args[*]:-}"
+}
+
+function trap_exit() {
+    echo "otapulse-convert-package has finished. Cleaning up..."
+    sudo umount -f work/boot > /dev/null 2>&1 || true
+    sudo umount -f work/rootfs > /dev/null 2>&1 || true
+}
+
+function trap_term() {
+    true
+}
+
+trap trap_term INT TERM
+trap trap_exit EXIT
+
+echo "Running $(basename $0): $@"
+
+source modules/bootstrap.sh
+source modules/disk.sh
+
+# The otapulse_convert_config is always used and provides all the defaults
+declare -a configs=("configs/otapulse_convert_config")
+
+while (("$#")); do
+    case "$1" in
+        -o | --overlay)
+            overlays+=("${2}")
+            shift 2
+            ;;
+        -c | --config)
+            configs+=("${2}")
+            shift 2
+            ;;
+        -d | --disk-image)
+            disk_image="${2}"
+            shift 2
+            ;;
+        *)
+            log_fatal "Sorry but the provided option is not supported: $1"
+            ;;
+    esac
+done
+
+# Note the use of %q formatting here. This is a bash feature to add
+# proper quoting to the strings so that spaces and special characters
+# will be treated properly.  Primarily for supporting spaces in
+# pathnames and avoid splitting those into multiple parameters.
+source modules/config.sh $(printf "%q " "${configs[@]}")
+
+PARTED="/usr/bin/parted"
+if [ ! -f ${PARTED} ]; then
+    PARTED="/sbin/parted"
+fi
+
+output_dir=work
+
+boot_part=$(disk_boot_part)
+root_part=$(disk_root_part)
+
+# Sysfs device paths
+boot_part_device=$(disk_boot_part_device)
+data_part_device=$(disk_data_part_device)
+root_part_a_device=$(disk_root_part_a_device)
+root_part_b_device=$(disk_root_part_b_device)
+
+# Final output
+mkdir -p deploy
+
+# Create mount points
+mkdir -p work/boot
+mkdir -p work/rootfs
+
+sudo mount ${boot_part} work/boot
+sudo mount ${root_part} work/rootfs
+
+# Convert to 512 blocks
+disk_image_total_sectors=$(disk_mb_to_sectors ${OTAPULSE_STORAGE_TOTAL_SIZE_MB})
+boot_part_sectors=$(disk_mb_to_sectors ${OTAPULSE_BOOT_PART_SIZE_MB})
+data_part_sectors=$(disk_mb_to_sectors ${OTAPULSE_DATA_PART_SIZE_MB})
+alignment_sectors=$((${OTAPULSE_PARTITION_ALIGNMENT} / 512))
+
+if [ "${OTAPULSE_GRUB_EFI_INTEGRATION}" == "y" ]; then
+    boot_part_start=${alignment_sectors}
+    overhead_sectors=$((${alignment_sectors} * 4))
+else
+    # The two first blocks are typically reserved for U-boot environment.
+    boot_part_start=$((${alignment_sectors} * 3))
+    overhead_sectors=$((${alignment_sectors} * 6))
+fi
+
+# Validate boot-gap.bin size, ensuring it will fit between MBR and boot_part_start
+if [ "${OTAPULSE_COPY_BOOT_GAP}" == "y" ]; then
+    # Add one block for MBR
+    boot_gap_sectors=$(($(stat --printf="%b" work/boot-gap.bin) + 1))
+    if [ ${boot_gap_sectors} -ge ${boot_part_start} ]; then
+        log_warn "The work/boot-gap.bin file will overwrite the boot partition"
+        log_fatal "Please increase OTAPULSE_PARTITION_ALIGNMENT (2x will typically solve this))"
+    fi
+fi
+
+# Validate boot part size
+actual_boot_size=$(du --apparent-size -s --block-size=512 ${boot_part} | cut -f 1)
+if [ ${actual_boot_size} -gt ${boot_part_sectors} ]; then
+    log_warn "The allocated boot part size $(disk_sectors_to_mb ${boot_part_sectors}) MiB is too small."
+    log_warn "The actual boot part size is $(disk_sectors_to_mb ${actual_boot_size}) MiB"
+    log_warn "Will adjust OTAPULSE_BOOT_PART_SIZE_MB automatically"
+    log_warn "Consider adjusting the configuration file to avoid this message"
+    boot_part_sectors=${actual_boot_size}
+fi
+
+# Make sure that the boot part sector size is aligned to
+# OTAPULSE_PARTITION_ALIGNMENT, it is possible that the boot part is extracted
+# as-is from the input image, and the input image might not have used the same
+# alignment as our configuration
+boot_part_sectors=$(disk_align_sectors ${boot_part_sectors} ${OTAPULSE_PARTITION_ALIGNMENT})
+
+# Calculate rootfs size
+rootfs_part_sectors=$(((${disk_image_total_sectors} - ${data_part_sectors} - \
+    ${boot_part_sectors} - ${overhead_sectors}) / 2))
+
+# Make sure rootfs size is aligned to OTAPULSE_PARTITION_ALIGNMENT
+rootfs_part_sectors=$(disk_align_sectors ${rootfs_part_sectors} ${OTAPULSE_PARTITION_ALIGNMENT})
+
+device_type=$(cat work/rootfs/data/otapulse/device_type | sed 's/[^=]*=//')
+
+# Get the name from the input disk_image
+temp_img_name=$(basename "$disk_image")
+
+# Check if user has chosen custom filename
+if [ -z "${DEPLOY_IMAGE_NAME}" ]; then
+    # Strip the image suffix from temp_img_name and set the original image name as
+    # the output image name
+    image_name="${temp_img_name%.*}"
+
+    # Add device types to the filename and replaces whitespace with + to seperate device types.
+    image_name="${image_name}-$(sed 's| |+|g' <<< $device_type)-otapulse"
+else
+    # User has choosen custom filename in config file
+    image_name=$DEPLOY_IMAGE_NAME
+fi
+
+# NOTE: Since the data partition has a dependency on the rootfs.img checksum
+# when writing the bootstrap Artifact we have to move the datadir out of the
+# way, and write the rootfs image first.
+run_and_log_cmd "mv --force work/rootfs/data work/data"
+
+# Make a folder we can mount it on though.
+run_and_log_cmd "mkdir work/rootfs/data"
+
+actual_rootfs_size=$(sudo du -s --block-size=512 work/rootfs | cut -f 1)
+
+# KiB -> 512 sectors
+image_rootfs_size_sectors=$((${IMAGE_ROOTFS_SIZE} * 2))
+
+if [ "${IMAGE_ROOTFS_SIZE}" -eq -1 ]; then
+    rootfs_image_sectors="${rootfs_part_sectors}"
+elif [ "${image_rootfs_size_sectors}" -lt "${actual_rootfs_size}" ]; then
+    rootfs_image_sectors="${actual_rootfs_size}"
+else
+    rootfs_image_sectors="${image_rootfs_size_sectors}"
+fi
+
+rootfs_image_sectors=$((${rootfs_image_sectors} + ${IMAGE_ROOTFS_EXTRA_SPACE} * 2))
+
+rootfs_image_sectors_overhead=$(awk -v r1="$actual_rootfs_size" "BEGIN{printf \"%.0f\", r1 * ${IMAGE_OVERHEAD_FACTOR}}")
+if [ "${rootfs_image_sectors_overhead}" -gt "${rootfs_image_sectors}" ]; then
+    rootfs_image_sectors="${rootfs_image_sectors_overhead}"
+fi
+
+if [ ${rootfs_image_sectors} -gt ${rootfs_part_sectors} ]; then
+    log_warn "The calculated rootfs partition size $(disk_sectors_to_mb ${rootfs_part_sectors}) MiB is too small."
+    log_warn "The actual rootfs image size is $(disk_sectors_to_mb ${rootfs_image_sectors}) MiB"
+    log_fatal "You can try adjusting the OTAPULSE_STORAGE_TOTAL_SIZE_MB variable to increase available space, or modify one of the variables IMAGE_ROOTFS_SIZE, IMAGE_ROOTFS_EXTRA_SPACE or IMAGE_OVERHEAD_FACTOR to reduce the size of the root filesystem."
+fi
+
+log_info "Rootfs filesystem size will be $(disk_sectors_to_mb ${rootfs_image_sectors}) MiB"
+
+# Extract file-system type from rootfs
+if file ${root_part} | grep -q ext4; then
+    image_fs_type="ext4"
+elif file ${root_part} | grep -q ext3; then
+    image_fs_type="ext3"
+elif file ${root_part} | grep -q XFS; then
+    image_fs_type="xfs"
+elif file ${root_part} | grep -q BTRFS; then
+    image_fs_type="btrfs"
+else
+    log_warn "$(file ${root_part})"
+    log_fatal "Could not determine root file-system type. Aborting..."
+fi
+
+disk_create_file_system_from_folder "work/rootfs/" "work/rootfs.img" \
+    "${rootfs_image_sectors}" "${image_fs_type}"
+
+log_info "Copying root filesystem image to deploy directory"
+run_and_log_cmd "cp --sparse=always work/rootfs.img deploy/${image_name}.${image_fs_type}"
+
+# Add the bootstrap Artifact to the data.img before packaging
+# the data image
+log_info "Installing the bootstrap Artifact"
+rootfs_img_checksum=$(sha256sum work/rootfs.img | cut -d ' ' -f1)
+run_and_log_cmd "otapulse-artifact write bootstrap-artifact \
+                    --artifact-name "${OTAPULSE_ARTIFACT_NAME}" \
+                    --no-progress \
+                    --device-type "${device_type}" \
+                    --provides rootfs-image.version:"${OTAPULSE_ARTIFACT_NAME}" \
+                    --provides rootfs-image.checksum:${rootfs_img_checksum} \
+                    --clears-provides 'rootfs-image.*' \
+                    --output-path work/data/otapulse/bootstrap.otapulse"
+
+disk_create_file_system_from_folder "work/data/" "work/data.img" \
+    "${data_part_sectors}" "${image_fs_type}"
+run_and_log_cmd "rm -rf work/data"
+
+otapulse_create_artifact "${device_type}" "${OTAPULSE_ARTIFACT_NAME}" "${image_name}"
+
+log_info "Creating OTA-Pulse compatible disk-image"
+
+img_path="deploy/${image_name}.img"
+
+log_info "Total disk size: $(disk_sectors_to_mb ${disk_image_total_sectors}) MiB"
+log_info "  Boot partition    $(disk_sectors_to_mb ${boot_part_sectors}) MiB"
+log_info "  RootFS partitions $(disk_sectors_to_mb ${rootfs_part_sectors}) MiB x 2"
+log_info "  Data partition    $(disk_sectors_to_mb ${data_part_sectors}) MiB"
+
+# Initialize sdcard image file
+run_and_log_cmd \
+    "dd if=/dev/zero of=${img_path} bs=512 count=0 seek=${disk_image_total_sectors} status=none"
+
+# boot_part_start, is defined at the beginning of this file
+boot_part_end=$((${boot_part_start} + ${boot_part_sectors} - 1))
+
+rootfsa_start=$(disk_align_sectors ${boot_part_end} ${OTAPULSE_PARTITION_ALIGNMENT})
+rootfsa_end=$((${rootfsa_start} + ${rootfs_part_sectors} - 1))
+
+rootfsb_start=$(disk_align_sectors ${rootfsa_end} ${OTAPULSE_PARTITION_ALIGNMENT})
+rootfsb_end=$((${rootfsb_start} + ${rootfs_part_sectors} - 1))
+
+data_start=$(disk_align_sectors ${rootfsb_end} ${OTAPULSE_PARTITION_ALIGNMENT})
+data_end=$((${data_start} + ${data_part_sectors} - 1))
+
+if [ -n "${OTAPULSE_PARTITION_SCHEME}" ]; then
+    # Force partition scheme to the one from configs
+    partition_scheme="${OTAPULSE_PARTITION_SCHEME}"
+    log_info "Forcing partition scheme defined by OTAPULSE_PARTITION_SCHEME to: ${partition_scheme}"
+else
+    # By default use the partition scheme from the input image
+    partition_scheme=$(disk_get_part_value ${disk_image} 1 SCHEME)
+    log_info "Using input diskimage partition scheme (${partition_scheme})"
+fi
+
+# Create partition table.
+if [ "${partition_scheme}" == "gpt" ]; then
+    log_info "Writing GPT partition table"
+    run_and_log_cmd "${PARTED} -s ${img_path} mklabel gpt"
+    run_and_log_cmd "${PARTED} -s ${img_path} unit s mkpart ESP fat32 ${boot_part_start} ${boot_part_end}"
+    # Keep the uuid of the original gpt table for the boot partition
+    boot_partuuid=$(disk_get_part_value "${disk_image}" 1 UUID)
+    log_info "Updating GPT partition uuid of the boot partition in image: ${img_path} to ${boot_partuuid}"
+    run_and_log_cmd "sgdisk -u ${OTAPULSE_BOOT_PART_NUMBER}:${boot_partuuid} '${img_path}'"
+else
+    log_info "Writing DOS (MBR) partition table"
+    run_and_log_cmd "${PARTED} -s ${img_path} mklabel msdos"
+    run_and_log_cmd "${PARTED} -s ${img_path} unit s mkpart primary fat32 ${boot_part_start} ${boot_part_end}"
+fi
+run_and_log_cmd "${PARTED} -s ${img_path} set 1 boot on"
+run_and_log_cmd "${PARTED} -s ${img_path} -- unit s mkpart primary ext4 ${rootfsa_start} ${rootfsa_end}"
+run_and_log_cmd "${PARTED} -s ${img_path} -- unit s mkpart primary ext4 ${rootfsb_start} ${rootfsb_end}"
+run_and_log_cmd "${PARTED} -s ${img_path} -- unit s mkpart primary ext4 ${data_start} ${data_end}"
+run_and_log_cmd "${PARTED} -s ${img_path} print"
+
+# Byte swap a 32-bit integer
+#
+# $1 - the number to be byte swapped
+swap_int32() {
+    v=$(((($1 & 0xff) << 24) | (($1 & 0xff00) << 8) | (($1 & 0xff0000) >> 8) | (($1 >> 24) & 0xff)))
+    printf "%08x" $v
+}
+
+# Update partition uuids if required
+if [ "${OTAPULSE_ENABLE_PARTUUID}" == "y" ]; then
+    boot_partuuid=$(disk_get_partuuid_from_device "${boot_part_device}")
+    rootfsa_partuuid=$(disk_get_partuuid_from_device "${root_part_a_device}")
+    rootfsb_partuuid=$(disk_get_partuuid_from_device "${root_part_b_device}")
+    data_partuuid=$(disk_get_partuuid_from_device "${data_part_device}")
+
+    if [ "${partition_scheme}" == "gpt" ]; then
+        log_info "Updating GPT partition uuids in image: '${img_path}'"
+        run_and_log_cmd "sgdisk -u ${OTAPULSE_BOOT_PART_NUMBER}:${boot_partuuid} '${img_path}'"
+        run_and_log_cmd "sgdisk -u ${OTAPULSE_ROOTFS_PART_A_NUMBER}:${rootfsa_partuuid} '${img_path}'"
+        run_and_log_cmd "sgdisk -u ${OTAPULSE_ROOTFS_PART_B_NUMBER}:${rootfsb_partuuid} '${img_path}'"
+        run_and_log_cmd "sgdisk -u ${OTAPULSE_DATA_PART_NUMBER}:${data_partuuid} '${img_path}'"
+    else
+        diskid=$(disk_get_partuuid_dos_diskid_from_device "${root_part_a_device}")
+        log_info "Updating MBR disk identifier for partition uuid support to: '0x${diskid}'"
+        run_and_log_cmd "swap_int32 0x${diskid} | xxd -r -p | dd of='${img_path}' bs=1 seek=440 count=4 conv=notrunc"
+    fi
+fi
+
+# Write boot-gap
+if [ "${OTAPULSE_COPY_BOOT_GAP}" == "y" ]; then
+    log_info "Writing boot gap of size: ${boot_part_sectors} (sectors)"
+    disk_write_at_offset "${output_dir}/boot-gap.bin" "${img_path}" "1"
+fi
+
+# Unmount filesystem image files
+run_and_log_cmd "sudo umount -f work/boot"
+run_and_log_cmd "sudo umount -f work/rootfs"
+
+# Burn Partitions
+log_info "Writing boot partition image"
+disk_write_at_offset "${boot_part}" "${img_path}" "${boot_part_start}"
+log_info "Writing rootfsa partition image"
+disk_write_at_offset "${output_dir}/rootfs.img" "${img_path}" "${rootfsa_start}"
+if [ "${OTAPULSE_ROOTFS_PART_B_INCLUDE}" == "y" ]; then
+    log_info "Writing rootfsb partition image"
+    disk_write_at_offset "${output_dir}/rootfs.img" "${img_path}" "${rootfsb_start}"
+fi
+log_info "Writing data partition image"
+disk_write_at_offset "${output_dir}/data.img" "${img_path}" "${data_start}"
+
+log_info "Performing platform specific package operations (if any)"
+for hook in "${PLATFORM_PACKAGE_HOOKS[@]}"; do
+    log_info "Running hook: $hook"
+    eval $hook
+done
+
+# Create bmap index
+if [ "${OTAPULSE_USE_BMAP}" == "y" ]; then
+    BMAP_TOOL="/usr/bin/bmaptool"
+    if [ ! -e "${BMAP_TOOL}" ]; then
+        log_error "You have enabled the OTAPULSE_USE_BMAP option, but we could not find the required 'bmaptool'"
+        log_fatal "You can install 'bmaptool' with: apt-get install bmap-tools (on Debian based distributions)"
+    fi
+    run_and_log_cmd "${BMAP_TOOL} create ${img_path} > ${img_path}.bmap"
+fi
+
+case "${OTAPULSE_COMPRESS_DISK_IMAGE}" in
+    gzip)
+        log_info "Compressing ${img_path}.gz"
+        run_and_log_cmd "pigz --best --force ${img_path}"
+        ;;
+    zip)
+        log_info "Compressing ${img_path}.zip"
+        zip -9 "${img_path}.zip" "${img_path}"
+        ;;
+    lzma)
+        log_info "Compressing ${img_path}.xz"
+        run_and_log_cmd "xz -T0 -9 --force ${img_path}"
+        ;;
+    zstd)
+        log_info "Compressing ${img_path}.zst"
+        run_and_log_cmd "zstd -10 -zfT0 --no-progress --rm ${img_path}"
+        ;;
+    none)
+        :
+        ;;
+    *)
+        log_fatal "Unknown OTAPULSE_COMPRESS_DISK_IMAGE value: ${OTAPULSE_COMPRESS_DISK_IMAGE}"
+        ;;
+esac
+
+log_info "Conversion has completed! \o/"

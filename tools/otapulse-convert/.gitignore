@@ -1,0 +1,6 @@
+deploy
+input
+otapulse_local_config
+*.xml
+*.html
+logs/convert.log*

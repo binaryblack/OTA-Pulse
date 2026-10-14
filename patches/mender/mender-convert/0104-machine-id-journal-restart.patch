@@ -1,0 +1,42 @@
+Hand written, applies after the generated rename. When the persistent machine-id helper changes the
+machine-id, systemd-journald is restarted so that journalctl finds the logs of the rest of the boot.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/support/otapulse-machine-id b/support/otapulse-machine-id
+index f48eda1..13658d9 100755
+--- a/support/otapulse-machine-id
++++ b/support/otapulse-machine-id
+@@ -31,6 +31,9 @@ is_valid_machine_id() {
+     LC_ALL=C head -c 32 "$1" 2>/dev/null | LC_ALL=C grep -Eq '^[0-9a-f]{32}$'
+ }
+ 
++CHANGED="${OTAPULSE_MACHINE_ID_CHANGED_FILE:-/run/otapulse-machine-id.changed}"
++BEFORE="$(cat "$TARGET" 2>/dev/null || true)"
++
+ mkdir -p "$(dirname "$PERSIST")"
+ 
+ if is_valid_machine_id "$PERSIST"; then
+@@ -51,3 +54,10 @@ else
+     cp "$TARGET" "$PERSIST"
+     log "Saved the machine-id to $PERSIST"
+ fi
++
++# The journal was opened under the machine-id of the first start of this boot. When the machine-id
++# changed, the unit restarts the journal daemon so that logs written from now on are found by
++# journalctl under the persistent one.
++if [ "$(cat "$TARGET" 2>/dev/null || true)" != "$BEFORE" ]; then
++    : > "$CHANGED"
++fi
+diff --git a/support/otapulse-machine-id.service b/support/otapulse-machine-id.service
+index 7e908d6..aec5ae8 100644
+--- a/support/otapulse-machine-id.service
++++ b/support/otapulse-machine-id.service
+@@ -15,6 +15,7 @@ RemainAfterExit=yes
+ # read-only transient file mounted over /etc/machine-id. Drop it so that the restore can write.
+ ExecStartPre=-/bin/sh -c "grep -q ' /etc/machine-id ' /proc/self/mountinfo && umount /etc/machine-id"
+ ExecStart=/usr/lib/otapulse/otapulse-machine-id
++ExecStartPost=-/bin/sh -c 'if [ -e /run/otapulse-machine-id.changed ]; then rm -f /run/otapulse-machine-id.changed; systemctl --no-block restart systemd-journald.service; fi'
+ StandardOutput=journal
+ StandardError=journal
+ 

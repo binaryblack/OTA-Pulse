@@ -1,0 +1,34 @@
+Hand written, applies after the generated rename. The container base image is pinned by digest
+(ubuntu 24.04), and docker-build refuses an unpinned base like scripts/build-otapulse-convert.sh and
+ota-pulse/scripts/build-debs.sh do. The apt packages installed in the image are not pinned (disclosed gap).
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/Dockerfile b/Dockerfile
+index 0716ca8..0b4edea 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,4 +1,6 @@
+-FROM ubuntu:24.04
++# The base image is pinned by digest (ubuntu:24.04). The apt packages installed below come from the
++# package repositories at build time and are not pinned.
++FROM ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+ 
+ RUN apt-get update && env DEBIAN_FRONTEND=noninteractive apt-get install --assume-yes \
+     sudo \
+diff --git a/docker-build b/docker-build
+index 5f8abee..1bbda0e 100755
+--- a/docker-build
++++ b/docker-build
+@@ -27,5 +27,11 @@ if [ ! -x bin/otapulse-artifact ]; then
+   exit 1
+ fi
+ 
++# The base image of the container must be pinned by digest.
++if grep -E '^FROM ' Dockerfile | grep -Evq '^FROM [^ ]+@sha256:[0-9a-f]{64}( .*)?$'; then
++  echo "Dockerfile: the base image must be pinned by sha256 digest." 1>&2
++  exit 1
++fi
++
+ echo "Building ${IMAGE_NAME}" 1>&2
+ docker build -t "${IMAGE_NAME}" .

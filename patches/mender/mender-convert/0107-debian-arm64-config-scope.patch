@@ -1,0 +1,23 @@
+Hand written, applies after the generated rename. The Debian arm64 configuration is for virtio disks;
+say so and point to the variables that a real UEFI board needs.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/debian_arm64_uefi_config b/configs/debian_arm64_uefi_config
+index 0ec5bb0..7b1bc23 100644
+--- a/configs/debian_arm64_uefi_config
++++ b/configs/debian_arm64_uefi_config
+@@ -1,5 +1,11 @@
+-# Debian 12 (bookworm) for 64-bit ARM (arm64) with UEFI and GRUB, for virtual machines and for
+-# ARM boards with a UEFI firmware.
++# Debian 12 (bookworm) for 64-bit ARM (arm64) with UEFI and GRUB, for virtual machines with a
++# virtio disk (QEMU "virt", cloud hypervisors).
++#
++# This configuration names the disk /dev/vda (OTAPULSE_STORAGE_DEVICE_BASE below) and a serial
++# console of the QEMU "virt" machine. For an ARM board with a UEFI firmware, start from a copy and set
++# OTAPULSE_STORAGE_DEVICE_BASE to its disk (for example /dev/nvme0n1p), or set OTAPULSE_ENABLE_PARTUUID=y
++# together with OTAPULSE_BOOT_PART, OTAPULSE_ROOTFS_PART_A, OTAPULSE_ROOTFS_PART_B and
++# OTAPULSE_DATA_PART (/dev/disk/by-partuuid/... paths), and change the console arguments.
+ #
+ # Input: the "genericcloud" or "nocloud" arm64 image of Debian 12, for example
+ #

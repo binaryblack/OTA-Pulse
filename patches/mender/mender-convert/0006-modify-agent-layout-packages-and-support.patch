@@ -1,0 +1,359 @@
+Image modification: state folders of the agent on the data partition (/data/otapulse), device_type files
+(/etc/otapulse, /var/lib/otapulse, /data/otapulse), installation of the OTA-Pulse .deb packages instead
+of an upstream client, a check that the packages are installed and in bootloader mode, the persistent
+machine-id helper and the socmond watchdog default (modules/support.sh, support/).
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/mender-convert-modify b/mender-convert-modify
+index f62e68b..0a916db 100755
+--- a/mender-convert-modify
++++ b/mender-convert-modify
+@@ -58,6 +58,7 @@ source modules/probe.sh
+ source modules/deb.sh
+ source modules/testscfg.sh
+ source modules/grub.sh
++source modules/support.sh
+ 
+ # The mender_convert_config is always used and provides all the defaults
+ declare -a configs=("configs/mender_convert_config")
+@@ -88,6 +89,10 @@ done
+ # pathnames and avoid splitting those into multiple parameters.
+ source modules/config.sh $(printf "%q " "${configs[@]}")
+ 
++if ! [[ "${OTAPULSE_PANIC_TIMEOUT_S}" =~ ^[1-9][0-9]*$ ]]; then
++    log_fatal "OTAPULSE_PANIC_TIMEOUT_S must be a positive number of seconds (got \"${OTAPULSE_PANIC_TIMEOUT_S}\"). Bootloader compatibility mode needs a kernel panic timeout: a kernel that panics without one stops forever and a failed update is never reverted."
++fi
++
+ boot_part=$(disk_boot_part)
+ root_part=$(disk_root_part)
+ 
+@@ -147,19 +152,12 @@ for hook in "${PLATFORM_PRE_MODIFY_HOOKS[@]}"; do
+     eval $hook
+ done
+ 
+-# Create links from /var/lib/* to /data/* unconditionally for various Mender
+-# components. The reason is that if one of these Debian packages is installed
+-# later, its related folder in /data and link from /var/lib has to preexist.
+-# It is part of the rootfs setup, independent of the software actually
+-# installed at any given moment.
+-log_info "Creating state folder in the data partition for Mender add-ons"
+-run_and_log_cmd "sudo mkdir -p work/rootfs/var/lib"
+-run_and_log_cmd "sudo mkdir -p work/rootfs/data/mender-configure"
+-run_and_log_cmd "sudo ln -sf /data/mender-configure work/rootfs/var/lib"
+-run_and_log_cmd "sudo mkdir -p work/rootfs/data/mender-monitor"
+-run_and_log_cmd "sudo ln -sf /data/mender-monitor work/rootfs/var/lib"
+-run_and_log_cmd "sudo mkdir -p work/rootfs/data/mender-orchestrator"
+-run_and_log_cmd "sudo ln -sf /data/mender-orchestrator work/rootfs/var/lib"
++# The persistent state of the OTA-Pulse agent lives on the data partition (the agent runs with
++# OTAPULSE_DATASTORE_DIR=/data/otapulse), so it survives the replacement of the root file system by
++# an update. The directories exist in the image so that the data partition image carries them.
++log_info "Creating the state folders on the data partition"
++run_and_log_cmd "sudo mkdir -p work/rootfs/data/otapulse work/rootfs/data/ota work/rootfs/var/lib/otapulse"
++run_and_log_cmd "sudo chmod 0700 work/rootfs/data/otapulse"
+ 
+ if [ "${MENDER_GRUB_EFI_INTEGRATION}" == "y" ]; then
+     # Check for known U-Boot problems in all files on the boot partition.
+@@ -180,7 +178,7 @@ if [ "${MENDER_GRUB_EFI_INTEGRATION}" == "y" ]; then
+         grub_install_grub_d_config
+     else
+         log_info "Installing GRUB EFI bootloader..."
+-        grub_install_mender_grub
++        grub_install_standalone_grub
+ 
+         log_info "Generating the mender-grub config..."
+         grub_create_grub_config
+@@ -189,41 +187,21 @@ if [ "${MENDER_GRUB_EFI_INTEGRATION}" == "y" ]; then
+ 
+ fi
+ 
+-run_and_log_cmd "wget --quiet -O work/mender-data-dir.service $MENDER_CLIENT_DATA_DIR_SERVICE_URL"
+-run_and_log_cmd "sudo install -m 644 work/mender-data-dir.service work/rootfs/lib/systemd/system/mender-data-dir.service"
+-for service_name in mender-client mender-updated; do
+-    run_and_log_cmd "sudo mkdir -p work/rootfs/lib/systemd/system/${service_name}.service.wants"
+-    run_and_log_cmd "sudo ln -sf /lib/systemd/system/mender-data-dir.service \
+-        work/rootfs/lib/systemd/system/${service_name}.service.wants/mender-data-dir.service"
+-done
+-
+-run_and_log_cmd "sudo mkdir -p work/rootfs/data/mender"
+-run_and_log_cmd "sudo mkdir -p work/rootfs/var/lib"
+-run_and_log_cmd "sudo ln -sf /data/mender work/rootfs/var/lib"
+-
+-log_info "Using root device A in mender.conf: $root_part_a_device"
+-log_info "Using root device B in mender.conf: $root_part_b_device"
+-
+-cat <<- EOF > work/mender.conf.data
+-{
+-  "RootfsPartA": "${root_part_a_device}",
+-  "RootfsPartB": "${root_part_b_device}"
+-}
+-EOF
++if [[ "${MENDER_DEVICE_TYPE}" =~ [[:space:]] ]]; then
++    log_fatal "OTAPULSE_DEVICE_TYPE must be a single device type (got \"${MENDER_DEVICE_TYPE}\"): the agent of a converted image has one."
++fi
+ 
+-run_and_log_cmd "sudo cp work/mender.conf.data work/rootfs/data/mender/mender.conf"
+-run_and_log_cmd "sudo chmod 600 work/rootfs/data/mender/mender.conf"
++log_info "Using root device A for the agent: $root_part_a_device"
++log_info "Using root device B for the agent: $root_part_b_device"
+ 
++# The device type: /etc/otapulse/device_type belongs to the root file system (the image), the copy
++# on the data partition is what the agent checks artifacts against and is verified against the
++# first at every boot (otapulse-data-seed.service of the soc-ota-agent package).
++run_and_log_cmd "sudo mkdir -p work/rootfs/etc/otapulse"
+ run_and_log_cmd "echo 'device_type=${MENDER_DEVICE_TYPE}' > work/device_type"
+-run_and_log_cmd "sudo install -m 0444 work/device_type work/rootfs/data/mender/"
+-
+-log_info "Creating state scripts version file."
+-case "${MENDER_CLIENT_VERSION}" in
+-    1*)  VERSION_STRING='2' ;;
+-    *)   VERSION_STRING='3' ;;
+-esac
+-run_and_log_cmd "sudo mkdir -p work/rootfs/etc/mender/scripts/"
+-run_and_log_cmd "echo -n ${VERSION_STRING} | sudo tee work/rootfs/etc/mender/scripts/version"
++run_and_log_cmd "sudo install -m 0444 work/device_type work/rootfs/etc/otapulse/device_type"
++run_and_log_cmd "sudo install -m 0444 work/device_type work/rootfs/var/lib/otapulse/device_type"
++run_and_log_cmd "sudo install -m 0644 work/device_type work/rootfs/data/otapulse/device_type"
+ 
+ log_info "Installing a custom /etc/fstab (see ${MENDER_CONVERT_LOG_FILE} for more info)"
+ 
+@@ -266,92 +244,23 @@ ${data_part_device}   /data          auto       ${MENDER_DATA_PART_FSTAB_OPTS}
+ $fstab
+ EOF
+ 
+-log_info "Installing Mender client and related files"
++log_info "Installing the OTA-Pulse packages and related files"
+ 
+ # Prepare the image's root before we start deb operations
+ deb_prepare "work/rootfs"
+ 
+-# Collect package installation requests
+-declare -A pkgs_to_install=()
+-if [ "${MENDER_CLIENT_INSTALL}" = "y" ]; then
+-    if [ "$MENDER_CLIENT_VERSION" = "auto" ]; then
+-        # "auto" currently means "latest" on all supported distributions
+-        MENDER_CLIENT_VERSION="latest"
+-    fi
+-    mender_client_deb_version="$MENDER_CLIENT_VERSION"
+-
+-    log_info "Installing Mender Client version ${mender_client_deb_version}"
+-    pkgs_to_install["mender-client4"]="$mender_client_deb_version"
+-    pkgs_to_install["mender-auth"]="$mender_client_deb_version"
+-    pkgs_to_install["mender-update"]="$mender_client_deb_version"
+-
+-    log_info "Installing Mender Flash version ${MENDER_FLASH_VERSION}"
+-    pkgs_to_install["mender-flash"]="${MENDER_FLASH_VERSION}"
+-
+-    if [ "$MENDER_SETUP_INSTALL" = "auto" ] || [ "$MENDER_SETUP_INSTALL" = "y" ]; then
+-        log_info "Installing Mender Setup version ${MENDER_SETUP_VERSION}"
+-        pkgs_to_install["mender-setup"]="${MENDER_SETUP_VERSION}"
+-    fi
+-
+-    if [ "$MENDER_SNAPSHOT_INSTALL" = "auto" ] || [ "$MENDER_SNAPSHOT_INSTALL" = "y" ]; then
+-        log_info "Installing Mender Snapshot version ${MENDER_SNAPSHOT_VERSION}"
+-        pkgs_to_install["mender-snapshot"]="${MENDER_SNAPSHOT_VERSION}"
+-    fi
+-fi
+-
+-if [ "${MENDER_ADDON_CONNECT_INSTALL}" = "y" ]; then
+-    log_info "Installing Mender Connect addon"
+-    pkgs_to_install["mender-connect"]="${MENDER_ADDON_CONNECT_VERSION}"
+-fi
+-
+-if [ "${MENDER_ADDON_CONFIGURE_INSTALL}" = "y" ]; then
+-    log_info "Installing Mender Configure addon"
+-    pkgs_to_install["mender-configure"]="${MENDER_ADDON_CONFIGURE_VERSION}"
+-fi
+-
+-if [ "${MENDER_DOCKER_COMPOSE_INSTALL}" = "y" ]; then
+-    log_info "Installing docker-compose Update Module version ${MENDER_DOCKER_COMPOSE_VERSION}"
+-    pkgs_to_install["mender-docker-compose"]="${MENDER_DOCKER_COMPOSE_VERSION}"
+-fi
+-
+-if [ "${MENDER_CLIENT_VERSION_INVENTORY_SCRIPT_INSTALL}" = "y" ]; then
+-    # Note that there is no explicit handling of "auto" option; apt will install
+-    # it only when all the other packages being installed are compatible with it
+-    log_info "Installing mender-client-version-inventory-script version ${MENDER_CLIENT_VERSION_INVENTORY_SCRIPT_VERSION}"
+-    pkgs_to_install["mender-client-version-inventory-script"]="${MENDER_CLIENT_VERSION_INVENTORY_SCRIPT_VERSION}"
+-fi
+-
+-if [[ ${#pkgs_to_install[@]} -gt 0 ]]; then
+-    deb_ensure_repo_enabled
+-    if [[ ${pkgs_to_install[@]} =~ "master" ]] || [[ ${pkgs_to_install[@]} =~ "main" ]]; then
+-        deb_ensure_repo_enabled "experimental"
+-    fi
+-
+-    # Collect exact package versions to install
+-    pkgs_with_versions=""
+-    for pkg in ${!pkgs_to_install[@]}; do
+-        pkgs_with_versions="${pkgs_with_versions} $(deb_get_repo_package "$pkg" "${pkgs_to_install[$pkg]}")"
+-    done
+-
+-    # Save installed client version for tests in Yocto variable format
+-    if [[ "${pkgs_with_versions}" =~ "mender-client4" ]]; then
+-        mender_client_version="$(echo ${pkgs_with_versions} | sed -r 's/.*mender-client4=([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+-        if [[ -n "$mender_client_version" ]]; then
+-            testscfg_add "PREFERRED_VERSION:mender-client" "$mender_client_version"
+-        fi
+-    fi
+-
+-    # Install packages
+-    deb_install_repo_packages "$pkgs_with_versions"
+-fi
+-
+-if [ "${MENDER_INSTALL_INPUT_PACKAGES}" = "y" ]; then
+-    deb_get_and_install_input_package ${MENDER_INSTALL_INPUT_PACKAGES_PATH}
++if [ "${OTAPULSE_INSTALL_INPUT_PACKAGES}" = "y" ]; then
++    deb_get_and_install_input_package ${OTAPULSE_INSTALL_INPUT_PACKAGES_PATH}
+ fi
+ 
+ # Done with package installations.
+ deb_cleanup work/rootfs
+ 
++if [ "${OTAPULSE_INSTALL_INPUT_PACKAGES}" = "y" ]; then
++    otapulse_check_packages_installed work/rootfs
++fi
++otapulse_install_image_support work/rootfs
++
+ #
+ # Make sure to re-label rootfs when selinux is in enforcing mode
+ # e.g. CentOS8 after conversion cannot start login shell due selinux
+diff --git a/modules/support.sh b/modules/support.sh
+new file mode 100644
+index 0000000..c3c5835
+--- /dev/null
++++ b/modules/support.sh
+@@ -0,0 +1,46 @@
++# SPDX-License-Identifier: Apache-2.0
++#
++# Checks and additions that make a converted image behave like an OTA-Pulse device image, beyond
++# what the soc-ota-agent and socmond packages bring.
++
++# Fail unless the OTA-Pulse packages are installed in the image and in bootloader mode.
++#
++#  $1 - image root directory
++function otapulse_check_packages_installed() {
++    local -r root="$1"
++    local pkg status
++
++    for pkg in soc-ota-agent socmond; do
++        status=$(dpkg-query --admindir="${root}/var/lib/dpkg" -W -f='${db:Status-Status}' "${pkg}" 2>/dev/null || true)
++        if [ "${status}" != "installed" ]; then
++            log_error "The package ${pkg} is not installed in the image (status: '${status:-unknown}')."
++            log_fatal "Put the soc-ota-agent and socmond .deb files for the image architecture into ${OTAPULSE_INSTALL_INPUT_PACKAGES_PATH}."
++        fi
++    done
++    if [ "$(tr -d '[:space:]' < "${root}/etc/otapulse/boot_mode" 2>/dev/null)" != "bootloader" ]; then
++        log_fatal "/etc/otapulse/boot_mode of the image is not 'bootloader'. The converted image must run in bootloader compatibility mode."
++    fi
++    log_info "The soc-ota-agent and socmond packages are installed, bootloader compatibility mode"
++}
++
++# Install the helpers and defaults of a converted image.
++#
++#  $1 - image root directory
++function otapulse_install_image_support() {
++    local -r root="$1"
++    local -r wants="${root}/etc/systemd/system"
++
++    if [ "${OTAPULSE_MACHINE_ID_PERSIST}" = "y" ]; then
++        log_info "Keeping the machine-id on the data partition across updates"
++        run_and_log_cmd "sudo install -D -m 755 support/otapulse-machine-id ${root}/usr/lib/otapulse/otapulse-machine-id"
++        run_and_log_cmd "sudo install -D -m 644 support/otapulse-machine-id.service ${root}/lib/systemd/system/otapulse-machine-id.service"
++        run_and_log_cmd "sudo mkdir -p ${wants}/sysinit.target.wants"
++        run_and_log_cmd "sudo ln -sf /lib/systemd/system/otapulse-machine-id.service ${wants}/sysinit.target.wants/otapulse-machine-id.service"
++    fi
++
++    # The package enables the watchdog like on a device image. See OTAPULSE_SOCMOND_WATCHDOG.
++    if [ "${OTAPULSE_SOCMOND_WATCHDOG}" != "y" ]; then
++        log_info "Disabling the monitoring watchdog (OTAPULSE_SOCMOND_WATCHDOG is not 'y')"
++        run_and_log_cmd "sudo rm -f ${wants}/multi-user.target.wants/socmond-watchdog.service"
++    fi
++}
+diff --git a/support/otapulse-machine-id b/support/otapulse-machine-id
+new file mode 100755
+index 0000000..f48eda1
+--- /dev/null
++++ b/support/otapulse-machine-id
+@@ -0,0 +1,53 @@
++#!/bin/sh
++# SPDX-License-Identifier: Apache-2.0
++#
++# otapulse-machine-id - keep one machine-id across OTA-Pulse root file system updates.
++#
++# The root file system is replaced by every update, and the copy that an update writes carries
++# the machine-id the image had when it was converted (none). Without this unit the device would
++# generate a new machine-id after every update and show up in the OTA-Pulse backend under a new
++# identity (the monitoring daemon identifies the device by its machine-id).
++#
++# The persistent copy lives on the data partition (/data/etc/machine-id):
++#   - first boot: remember the machine-id the system generated;
++#   - later boots, and the first boot of an updated slot: put the remembered one back.
++# Only the machine-id is handled here, nothing else about the network interfaces.
++
++set -e
++
++PERSIST="${OTAPULSE_MACHINE_ID_PERSIST_FILE:-/data/etc/machine-id}"
++TARGET="${OTAPULSE_MACHINE_ID_FILE:-/etc/machine-id}"
++LOG_TAG="otapulse-machine-id"
++
++log() {
++    logger -t "$LOG_TAG" "$1" 2>/dev/null || true
++    echo "[$LOG_TAG] $1"
++}
++
++# A valid machine-id is exactly 32 lowercase hex characters, optionally followed by one newline.
++# An "uninitialized" marker or an empty file is not valid.
++is_valid_machine_id() {
++    [ -s "$1" ] || return 1
++    LC_ALL=C head -c 32 "$1" 2>/dev/null | LC_ALL=C grep -Eq '^[0-9a-f]{32}$'
++}
++
++mkdir -p "$(dirname "$PERSIST")"
++
++if is_valid_machine_id "$PERSIST"; then
++    if ! cmp -s "$PERSIST" "$TARGET"; then
++        cp "$PERSIST" "$TARGET"
++        log "Restored the machine-id from $PERSIST"
++    fi
++else
++    [ ! -e "$PERSIST" ] || log "$PERSIST is not a valid machine-id, replacing it"
++    if ! is_valid_machine_id "$TARGET"; then
++        if command -v systemd-machine-id-setup >/dev/null 2>&1; then
++            systemd-machine-id-setup >/dev/null 2>&1 || true
++        fi
++    fi
++    if ! is_valid_machine_id "$TARGET"; then
++        tr -d '-' < /proc/sys/kernel/random/uuid > "$TARGET"
++    fi
++    cp "$TARGET" "$PERSIST"
++    log "Saved the machine-id to $PERSIST"
++fi
+diff --git a/support/otapulse-machine-id.service b/support/otapulse-machine-id.service
+new file mode 100644
+index 0000000..7e908d6
+--- /dev/null
++++ b/support/otapulse-machine-id.service
+@@ -0,0 +1,22 @@
++[Unit]
++Description=OTA-Pulse persistent machine-id
++Documentation=https://github.com/binaryblack/OTA-Pulse
++DefaultDependencies=no
++RequiresMountsFor=/data
++After=local-fs.target
++Before=sysinit.target soc-ota-agent.service socmond.service systemd-machine-id-commit.service
++Conflicts=shutdown.target
++Before=shutdown.target
++
++[Service]
++Type=oneshot
++RemainAfterExit=yes
++# The first boot of an updated slot starts with an empty machine-id, which systemd answers with a
++# read-only transient file mounted over /etc/machine-id. Drop it so that the restore can write.
++ExecStartPre=-/bin/sh -c "grep -q ' /etc/machine-id ' /proc/self/mountinfo && umount /etc/machine-id"
++ExecStart=/usr/lib/otapulse/otapulse-machine-id
++StandardOutput=journal
++StandardError=journal
++
++[Install]
++WantedBy=sysinit.target

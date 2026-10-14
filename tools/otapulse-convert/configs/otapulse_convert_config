@@ -1,0 +1,218 @@
+# Default configuration of otapulse-convert. Override any option by passing your own
+# configuration file with '--config'. Options are plain shell variable assignments; every
+# option has the prefix OTAPULSE_ (the variables IMAGE_ROOTFS_SIZE, IMAGE_ROOTFS_EXTRA_SPACE and
+# IMAGE_OVERHEAD_FACTOR are the exceptions: they mirror the Yocto Project names).
+#
+# NOTE! This file is always sourced first.
+
+# ---------------------------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------------------------
+
+# Compress the generated disk image.
+#
+# Possible values:
+# 'none' - No compression
+# 'gzip' - Compress with gzip
+# 'lzma' - Compress with xz (LZMA)
+# 'zstd' - Compress with zstd
+OTAPULSE_COMPRESS_DISK_IMAGE=gzip
+
+# Compression of the OTA-Pulse artifact (the .otapulse file).
+#
+# Supported values: lzma, gzip (default), none
+#
+# LZMA produces a smaller artifact (2-3x) but takes about 10 times longer to write.
+OTAPULSE_ARTIFACT_COMPRESSION="gzip"
+
+# The name of the image or update. The device reports this as the running software version, and
+# different updates must have different names.
+#
+# This variable must be defined or the conversion fails. Do not put it into a configuration
+# file; pass it to the tool instead, for example
+#
+#  OTAPULSE_ARTIFACT_NAME="release-1" ./docker-otapulse-convert ...
+#
+#OTAPULSE_ARTIFACT_NAME=""
+
+# The device type of the image. The OTA-Pulse agent only installs an artifact whose device type
+# list contains this value. Several types can be given as a space separated string.
+#
+# Defaults to the content of '/etc/hostname' of the input image.
+OTAPULSE_DEVICE_TYPE=""
+
+# Base name of the generated files. When empty, the name is derived from the input image file
+# name and the device type.
+DEPLOY_IMAGE_NAME=""
+
+# Private key (PEM, RSA) used to sign the generated artifact and the bootstrap artifact. The
+# path is as seen by the tool (inside the container: below /otapulse-convert/input). The agent
+# of a production image only installs signed artifacts, so set this for anything that is
+# deployed. Empty: the artifact is not signed.
+OTAPULSE_ARTIFACT_SIGNING_KEY=""
+
+# ---------------------------------------------------------------------------------------------
+# Device configuration
+# ---------------------------------------------------------------------------------------------
+
+# URL of the OTA-Pulse server the agent and the monitoring daemon talk to. It is written into
+# the configuration of the installed packages on the first installation. Empty: keep the
+# placeholder of the packages and edit /etc/otapulse/otapulse.conf and /etc/socmond/config.json
+# on the device (or on the finished image) afterwards. Plain URL characters only.
+OTAPULSE_SERVER_URL=""
+
+# Kernel panic timeout in seconds, added to the kernel command line as panic=N.
+#
+# In bootloader compatibility mode the bootloader counts the boots of a freshly installed update
+# and reverts it when it keeps failing. A kernel that panics without a timeout stops forever, the
+# bootloader never gets another turn and a bad update is never reverted. The conversion fails
+# if this is not a positive number.
+OTAPULSE_PANIC_TIMEOUT_S="10"
+
+# Keep the machine-id on the data partition across updates (y/n).
+#
+# The root file system is replaced by every update. Without this, the monitoring daemon would
+# see a new machine-id after each update and register the device again under a new identity.
+OTAPULSE_MACHINE_ID_PERSIST="y"
+
+# Enable the monitoring watchdog service (socmond-watchdog) of the installed packages (y/n).
+#
+# The watchdog reboots the device when the monitoring daemon dies and forces a reboot when the
+# free memory or the free space of the root file system drops below 5 percent. That suits a
+# dedicated appliance; on a general purpose system it can reboot a machine that is merely full.
+# It is therefore disabled by default and can be enabled here.
+OTAPULSE_SOCMOND_WATCHDOG="n"
+
+# ---------------------------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------------------------
+
+# Install the OTA-Pulse packages (soc-ota-agent, socmond) and any other .deb files found in
+# OTAPULSE_INSTALL_INPUT_PACKAGES_PATH into the image. Only packages for the architecture of the
+# image (and architecture independent ones) are installed; dependencies are fetched from the
+# package repositories configured in the image. The conversion fails when the directory holds no
+# soc-ota-agent package for the image architecture.
+OTAPULSE_INSTALL_INPUT_PACKAGES="y"
+
+# Directory holding the .deb files, relative to the tool (inside the container: the 'input'
+# volume).
+OTAPULSE_INSTALL_INPUT_PACKAGES_PATH="input/packages"
+
+# ---------------------------------------------------------------------------------------------
+# Partitioning
+# ---------------------------------------------------------------------------------------------
+
+# The partition scheme of the converted image: "gpt" or "dos". By default the scheme of the input
+# image is used.
+OTAPULSE_PARTITION_SCHEME=""
+
+# Total size of the storage medium the image will be written to, in MiB. The size of the two root
+# file system partitions is calculated by subtracting the boot and data partitions.
+OTAPULSE_STORAGE_TOTAL_SIZE_MB="8192"
+
+# Size of the boot partition, in MiB.
+OTAPULSE_BOOT_PART_SIZE_MB="40"
+
+# Size of the persistent data partition in the generated image, in MiB. It is grown to the end of
+# the storage medium on the first boot.
+OTAPULSE_DATA_PART_SIZE_MB="128"
+
+# Alignment of the partitions, in bytes. Default is 8 MiB.
+OTAPULSE_PARTITION_ALIGNMENT="8388608"
+
+# Grow the data partition and its file system to the end of the storage medium on the first boot
+# (needs systemd 242 or newer).
+OTAPULSE_DATA_PART_GROWFS=y
+
+# fstab options of the boot partition
+OTAPULSE_BOOT_PART_FSTAB_OPTS="defaults,sync"
+
+# Extra mkfs options for the root file system partitions
+OTAPULSE_ROOT_PART_MKFS_OPTS=""
+
+# fstab options of the root file system partition
+OTAPULSE_ROOT_PART_FSTAB_OPTS="defaults"
+
+# fsck pass number of the root file system; 0 disables fsck (recommended for a read-only root)
+OTAPULSE_ROOT_PART_FS_PASSNO="1"
+
+# fstab options of the data partition
+OTAPULSE_DATA_PART_FSTAB_OPTS="defaults"
+
+# Extra mkfs options for the data partition
+OTAPULSE_DATA_PART_MKFS_OPTS=""
+
+# Device file of the storage the image runs from, without the partition number. This is what the
+# partition numbers below are appended to, in the bootloader, the fstab and the agent
+# configuration.
+OTAPULSE_STORAGE_DEVICE_BASE=/dev/mmcblk0p
+
+# Partition numbers of the converted image
+OTAPULSE_BOOT_PART_NUMBER="1"
+OTAPULSE_ROOTFS_PART_A_NUMBER="2"
+OTAPULSE_ROOTFS_PART_B_NUMBER="3"
+OTAPULSE_DATA_PART_NUMBER="4"
+
+# Write the second root file system partition (B) with the same content as A (y), or leave it
+# empty (n).
+OTAPULSE_ROOTFS_PART_B_INCLUDE="y"
+
+# Use partition UUIDs (/dev/disk/by-partuuid/...) instead of device names and partition numbers.
+# Needs the four variables below.
+OTAPULSE_ENABLE_PARTUUID="n"
+OTAPULSE_BOOT_PART=""
+OTAPULSE_ROOTFS_PART_A=""
+OTAPULSE_ROOTFS_PART_B=""
+OTAPULSE_DATA_PART=""
+
+# Where the boot partition is mounted in the root file system. Defaults to /boot/efi for GRUB
+# EFI images and /uboot otherwise.
+#OTAPULSE_BOOT_PART_MOUNT_LOCATION=""
+
+# Basename of the device tree blob the bootloader loads.
+OTAPULSE_DTB_NAME=kernel.dtb
+
+# Generate a block map file next to the image (needs bmap-tools)
+OTAPULSE_USE_BMAP="n"
+
+# Copy the area between the partition table and the first partition. Some images keep the
+# bootloader there. In most cases this should stay enabled.
+OTAPULSE_COPY_BOOT_GAP="y"
+
+# Write sparse image files: empty areas of the image are not allocated. Some tools handle sparse
+# files badly.
+OTAPULSE_SPARSE_IMAGE="n"
+
+# Size of each root file system, in KiB. 0: use the size of the content. -1: use the largest size
+# that fits the partition. Modified by IMAGE_ROOTFS_EXTRA_SPACE and IMAGE_OVERHEAD_FACTOR.
+IMAGE_ROOTFS_SIZE="0"
+
+# Extra free space on the root file system, in KiB, added to IMAGE_ROOTFS_SIZE. Note that "df"
+# reports less because of the blocks reserved for the root user.
+IMAGE_ROOTFS_EXTRA_SPACE="0"
+
+# The used space of the root file system is multiplied by this factor. If the result is larger
+# than IMAGE_ROOTFS_SIZE + IMAGE_ROOTFS_EXTRA_SPACE it is used as the size instead.
+IMAGE_OVERHEAD_FACTOR="1.5"
+
+# Extra space for the root file system while it is being modified (installing packages needs
+# temporary room). This does not change the size of the final image. Units as in truncate(1),
+# for example 512M. Empty: do not expand.
+OTAPULSE_EXPAND_WORK_ROOTFS=""
+
+# ---------------------------------------------------------------------------------------------
+# Bootloader assets
+# ---------------------------------------------------------------------------------------------
+
+# Some targets need prebuilt bootloader files (U-Boot for the Raspberry Pi, a standalone GRUB EFI
+# binary). They are never taken from a fixed address: every file is looked up by name in the
+# 'assets' directory, or, when OTAPULSE_ASSETS_BASE_URL is set, downloaded from there, and in
+# both cases its sha256 must match configs/assets.sha256. A missing or modified file stops the
+# conversion.
+OTAPULSE_ASSETS_BASE_URL=""
+
+# The bootloader environment scripts (GRUB) are part of the tool: directory with the files.
+OTAPULSE_GRUBENV_DIR="bootloader/grubenv"
+
+source configs/otapulse_grub_config
+source configs/systemd_common_config

@@ -27,8 +27,10 @@
 #                                                   UPSTREAM extras for legacy 7-column rows
 #                                                   (offline; refuses unless the tree verifies)
 #
-# Components (the only five that may ever be synced; anything else is refused):
+# Components (the only six that may ever be synced; anything else is refused):
 #   meta-mender-core meta-mender-qemu meta-mender-raspberrypi meta-mender-nxp grub-mender-grubenv
+#   mender-convert   (TASK-S109-025: the image conversion tool behind "otapulse-convert", vendored
+#                     to tools/otapulse-convert, outside meta-otapulse-bsp/)
 #   meta-mender-commercial is NEVER vendored: refused by --sync, and --verify fails
 #   if any path containing "commercial" exists under meta-otapulse-bsp/.
 #
@@ -68,13 +70,14 @@ BSP_REL="meta-otapulse-bsp"
 TREEPY="$SCRIPT_DIR/mender_tree_hash.py"
 LOCKPY="$SCRIPT_DIR/mender_lock.py"
 
-KNOWN_COMPONENTS=(meta-mender-core meta-mender-qemu meta-mender-raspberrypi meta-mender-nxp grub-mender-grubenv)
+KNOWN_COMPONENTS=(meta-mender-core meta-mender-qemu meta-mender-raspberrypi meta-mender-nxp grub-mender-grubenv mender-convert)
 declare -A C_URL=(
     [meta-mender-core]="https://github.com/mendersoftware/meta-mender"
     [meta-mender-qemu]="https://github.com/mendersoftware/meta-mender"
     [meta-mender-raspberrypi]="https://github.com/mendersoftware/meta-mender-community"
     [meta-mender-nxp]="https://github.com/mendersoftware/meta-mender-community"
     [grub-mender-grubenv]="https://github.com/mendersoftware/grub-mender-grubenv"
+    [mender-convert]="https://github.com/mendersoftware/mender-convert"
 )
 declare -A C_SUB=(
     [meta-mender-core]="meta-mender-core"
@@ -82,6 +85,7 @@ declare -A C_SUB=(
     [meta-mender-raspberrypi]="meta-mender-raspberrypi"
     [meta-mender-nxp]="meta-mender-nxp"
     [grub-mender-grubenv]="."
+    [mender-convert]="."
 )
 declare -A C_DIR=(
     [meta-mender-core]="$BSP_REL/core"
@@ -89,6 +93,7 @@ declare -A C_DIR=(
     [meta-mender-raspberrypi]="$BSP_REL/boards/raspberrypi"
     [meta-mender-nxp]="$BSP_REL/boards/nxp"
     [grub-mender-grubenv]="$BSP_REL/grub-mender-grubenv"
+    [mender-convert]="tools/otapulse-convert"
 )
 # add = the subpath has no LICENSE of its own: copy the upstream repo-root LICENSE in.
 # own = the tree carries its own LICENSE.
@@ -98,6 +103,7 @@ declare -A C_LIC=(
     [meta-mender-raspberrypi]="add"
     [meta-mender-nxp]="add"
     [grub-mender-grubenv]="own"
+    [mender-convert]="own"
 )
 
 FAILS=0

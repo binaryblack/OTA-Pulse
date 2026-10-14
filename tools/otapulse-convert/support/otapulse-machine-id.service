@@ -1,0 +1,23 @@
+[Unit]
+Description=OTA-Pulse persistent machine-id
+Documentation=https://github.com/binaryblack/OTA-Pulse
+DefaultDependencies=no
+RequiresMountsFor=/data
+After=local-fs.target
+Before=sysinit.target soc-ota-agent.service socmond.service systemd-machine-id-commit.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The first boot of an updated slot starts with an empty machine-id, which systemd answers with a
+# read-only transient file mounted over /etc/machine-id. Drop it so that the restore can write.
+ExecStartPre=-/bin/sh -c "grep -q ' /etc/machine-id ' /proc/self/mountinfo && umount /etc/machine-id"
+ExecStart=/usr/lib/otapulse/otapulse-machine-id
+ExecStartPost=-/bin/sh -c 'if [ -e /run/otapulse-machine-id.changed ]; then rm -f /run/otapulse-machine-id.changed; systemctl --no-block restart systemd-journald.service; fi'
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target

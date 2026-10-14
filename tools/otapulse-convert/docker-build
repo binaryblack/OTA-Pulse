@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# Copyright 2019 Northern.tech AS
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+# Build the container image of otapulse-convert from this directory. The directory must hold
+# bin/otapulse-artifact (the build script puts it there).
+
+set -e
+
+OTAPULSE_CONVERT_VERSION="$(cat VERSION)"
+IMAGE_NAME=${IMAGE_NAME:-"otapulse/otapulse-convert:${OTAPULSE_CONVERT_VERSION}"}
+
+if [ ! -x bin/otapulse-artifact ]; then
+  echo "bin/otapulse-artifact is missing: this tool was not built completely." 1>&2
+  exit 1
+fi
+
+# The base image of the container must be pinned by digest.
+if grep -E '^FROM ' Dockerfile | grep -Evq '^FROM [^ ]+@sha256:[0-9a-f]{64}( .*)?$'; then
+  echo "Dockerfile: the base image must be pinned by sha256 digest." 1>&2
+  exit 1
+fi
+
+echo "Building ${IMAGE_NAME}" 1>&2
+docker build -t "${IMAGE_NAME}" .

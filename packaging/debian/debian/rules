@@ -70,6 +70,20 @@ override_dh_dwz:
 override_dh_installinit:
 	@true
 
+# A package upgrade must never interrupt an update that the agent is installing: the agent unit is not
+# stopped or restarted by dpkg (--no-stop-on-upgrade); the new binary runs from the next start of the
+# unit, i.e. the next boot. (--no-restart-after-upgrade would still stop it in prerm.) Every other unit
+# keeps the default.
+override_dh_installsystemd:
+	dh_installsystemd -psoc-ota-agent --no-stop-on-upgrade soc-ota-agent.service
+	dh_installsystemd -psoc-ota-agent otapulse-data-seed.service
+	# The guard timer and the clock wait only take effect from the next boot. The two other guard units
+	# are static (no [Install]): the timer's job and the failure handler of the data seed unit. They are
+	# deliberately NOT handed to dh_installsystemd, which would start them at installation, and starting
+	# the failure handler reboots a device whose update is still uncommitted.
+	dh_installsystemd -psoc-ota-agent --no-start otapulse-bl-boot-deadline.timer otapulse-bl-clock-wait.service
+	dh_installsystemd -psocmond
+
 # dh_fixperms resets every non-executable file to 0644; the agent configuration and the socmond configuration
 # may later hold a token, so they ship 0600.
 override_dh_fixperms:
@@ -83,6 +97,16 @@ override_dh_auto_install:
 	install -D -m 0755 upstream/agent/soc-ota-provision $(CURDIR)/debian/soc-ota-agent/usr/bin/soc-ota-provision
 	install -D -m 0755 upstream/agent/otapulse-data-seed $(CURDIR)/debian/soc-ota-agent/usr/lib/otapulse/otapulse-data-seed
 	install -D -m 0644 debian/otapulse-data-seed.service $(CURDIR)/debian/soc-ota-agent/lib/systemd/system/otapulse-data-seed.service
+	# The userspace half of the bootloader's rollback net (reboots an uncommitted update that wedged userspace
+	# or kept the agent from starting). Same script and units as the OTA-Pulse images; the units start it
+	# from /usr/lib/otapulse here, like the data seed script.
+	install -D -m 0755 upstream/bl/otapulse-bl-guard $(CURDIR)/debian/soc-ota-agent/usr/lib/otapulse/otapulse-bl-guard
+	for u in otapulse-bl-boot-deadline.service otapulse-bl-boot-deadline.timer otapulse-bl-seed-failure.service otapulse-bl-clock-wait.service; do \
+	  install -D -m 0644 upstream/bl/$$u $(CURDIR)/debian/soc-ota-agent/lib/systemd/system/$$u; done
+	for u in otapulse-bl-boot-deadline.service otapulse-bl-seed-failure.service otapulse-bl-clock-wait.service; do \
+	  grep -q '^ExecStart=/usr/bin/otapulse-bl-guard ' $(CURDIR)/debian/soc-ota-agent/lib/systemd/system/$$u; \
+	  sed -i 's|^ExecStart=/usr/bin/otapulse-bl-guard |ExecStart=/usr/lib/otapulse/otapulse-bl-guard |' $(CURDIR)/debian/soc-ota-agent/lib/systemd/system/$$u; \
+	  grep -q '^ExecStart=/usr/lib/otapulse/otapulse-bl-guard ' $(CURDIR)/debian/soc-ota-agent/lib/systemd/system/$$u; done
 	install -D -m 0600 debian/otapulse.conf $(CURDIR)/debian/soc-ota-agent/etc/otapulse/otapulse.conf
 	install -D -m 0644 debian/boot_mode $(CURDIR)/debian/soc-ota-agent/etc/otapulse/boot_mode
 	for s in ArtifactReboot_Enter_01 ArtifactRollbackReboot_Enter_01 ArtifactCommit_Enter_01; do \

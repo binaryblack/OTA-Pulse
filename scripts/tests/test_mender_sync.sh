@@ -109,14 +109,29 @@ mk_fixtures() {
     )
     git clone -q --bare "$w/gg" "$up/gg.git"
 
+    # --- fake mender-convert (TASK-S109-025): a whole-repo component, tag pinned, own LICENSE
+    git init -q -b master "$w/cv"
+    (
+        cd "$w/cv" || exit 1
+        mkdir -p modules configs
+        printf 'APACHE LICENSE (fake)\n' >LICENSE
+        printf '#!/bin/bash\necho convert\n' >mender-convert
+        chmod 755 mender-convert
+        printf 'x=1\n' >modules/log.sh
+        git add -A && "${GITC[@]}" commit -qm cv1
+        "${GITC[@]}" tag -a 5.3.0 -m "release 5.3.0"
+    )
+    git clone -q --bare "$w/cv" "$up/cv.git"
+
     local r
-    for r in mm mc gg; do git -C "$up/$r.git" config uploadpack.allowAnySHA1InWant true; done
+    for r in mm mc gg cv; do git -C "$up/$r.git" config uploadpack.allowAnySHA1InWant true; done
 
     export MENDER_SYNC_URL_META_MENDER_CORE="file://$up/mm.git"
     export MENDER_SYNC_URL_META_MENDER_QEMU="file://$up/mm.git"
     export MENDER_SYNC_URL_META_MENDER_RASPBERRYPI="file://$up/mc.git"
     export MENDER_SYNC_URL_META_MENDER_NXP="file://$up/mc.git"
     export MENDER_SYNC_URL_GRUB_MENDER_GRUBENV="file://$up/gg.git"
+    export MENDER_SYNC_URL_MENDER_CONVERT="file://$up/cv.git"
 }
 
 # make a patch (git diff against a scratch repo of the pristine tree) for meta-mender-core
@@ -140,7 +155,7 @@ mk_core_patch() {
 }
 
 ms() { MENDER_SYNC_ROOT="$ROOT" "$SYNC" "$@"; }
-COMPONENTS=(meta-mender-core meta-mender-qemu meta-mender-raspberrypi meta-mender-nxp grub-mender-grubenv)
+COMPONENTS=(meta-mender-core meta-mender-qemu meta-mender-raspberrypi meta-mender-nxp grub-mender-grubenv mender-convert)
 
 mk_root() {
     ROOT="$T/root"
@@ -160,6 +175,10 @@ run ms --sync meta-mender-qemu scarthgap-v2026.09;  expect_rc0 "sync qemu by ann
 run ms --sync meta-mender-raspberrypi "$(cat "$T/mc.sha1")"; expect_rc0 "sync raspberrypi by full sha"
 run ms --sync meta-mender-nxp scarthgap;            expect_rc0 "sync nxp by branch name"
 run ms --sync grub-mender-grubenv master;           expect_rc0 "sync grub-mender-grubenv by branch name"
+run ms --sync mender-convert 5.3.0;                 expect_rc0 "sync mender-convert (whole repo, outside the bsp dir) by tag"
+[ -x "$ROOT/tools/otapulse-convert/mender-convert" ] && pass "mender-convert vendored at tools/otapulse-convert" || bad "mender-convert not vendored"
+expect_eq "mender-convert keeps its own LICENSE; license col is '-'" "$(lock_col "$ROOT/mender-upstream.lock" mender-convert 10)" "-"
+expect_eq "mender-convert labelled tag:5.3.0" "$(lock_col "$ROOT/mender-upstream.lock" mender-convert 3)" "tag:5.3.0"
 run ms --verify;                                    expect_rc0 "--verify passes after bootstrap"
 expect_out "verify says OK" "--verify OK"
 [ ! -e "$ROOT/meta-otapulse-bsp/core/meta-mender-commercial" ] && pass "commercial dir of the fake upstream not vendored" || bad "commercial dir vendored"
@@ -473,7 +492,7 @@ mk_hk() {
     rm -rf "$T/hk"; mkdir -p "$T/hk/scripts"
     cp -a "$OTA_ROOT/scripts/hooks" "$OTA_ROOT/scripts/mender-sync.sh" "$OTA_ROOT/scripts/mender_tree_hash.py" \
         "$OTA_ROOT/scripts/mender_lock.py" "$T/hk/scripts/"
-    cp -a "$ROOT/meta-otapulse-bsp" "$ROOT/mender-upstream.lock" "$ROOT/mender-upstream.manifests" "$ROOT/patches" "$T/hk/"
+    cp -a "$ROOT/meta-otapulse-bsp" "$ROOT/tools" "$ROOT/mender-upstream.lock" "$ROOT/mender-upstream.manifests" "$ROOT/patches" "$T/hk/"
     (cd "$T/hk" && git init -q -b main && git add -A && "${GITC[@]}" commit -qm base --no-verify)
     # shellcheck disable=SC2016  # the $ expansions belong to the generated hook, not to this shell
     printf '#!/usr/bin/env bash\nhook="$(git rev-parse --show-toplevel)/scripts/hooks/mender-verify-hook.sh"\n[ -x "$hook" ] || exit 0\nexec "$hook" "$@"\n' >"$T/hk/.git/hooks/pre-commit"
@@ -690,7 +709,7 @@ run env -u MENDER_SYNC_ROOT -u MENDER_SYNC_URL_META_MENDER_CORE -u MENDER_SYNC_U
     -u MENDER_SYNC_URL_META_MENDER_RASPBERRYPI -u MENDER_SYNC_URL_META_MENDER_NXP \
     -u MENDER_SYNC_URL_GRUB_MENDER_GRUBENV "$SYNC" --verify
 expect_rc0 "scripts/mender-sync.sh --verify on the actual repo state"
-expect_out "5 trees" "5 vendored trees match"
+expect_out "6 trees" "6 vendored trees match"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAILED"
 [ "$FAILED" -eq 0 ]

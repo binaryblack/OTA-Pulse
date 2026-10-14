@@ -1,0 +1,308 @@
+#! /usr/bin/env bash
+#
+# Copyright 2025 Northern.tech AS
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+# Default that can be overridden by providing this method in a
+# configuration file passed with '--config'
+function platform_pre_modify() {
+    true
+}
+PLATFORM_PRE_MODIFY_HOOKS=(platform_pre_modify)
+
+function platform_modify() {
+    true
+}
+PLATFORM_MODIFY_HOOKS=(platform_modify)
+
+function user_local_modify() {
+    true
+}
+USER_LOCAL_MODIFY_HOOKS=(user_local_modify)
+
+function overlay_modify() {
+    true
+}
+OVERLAY_MODIFY_HOOKS=(overlay_modify)
+
+function trap_exit() {
+    echo "otapulse-convert-modify has finished. Cleaning up..."
+    deb_cleanup work/rootfs
+    sudo umount -f work/boot
+    sudo umount -f work/rootfs
+}
+
+function trap_term() {
+    true
+}
+
+trap trap_term INT TERM
+trap trap_exit EXIT
+
+echo "Running $(basename $0): $@"
+
+source modules/bootstrap.sh
+source modules/disk.sh
+source modules/probe.sh
+source modules/deb.sh
+source modules/grub.sh
+source modules/support.sh
+
+# The otapulse_convert_config is always used and provides all the defaults
+declare -a configs=("configs/otapulse_convert_config")
+
+while (("$#")); do
+    case "$1" in
+        -o | --overlay)
+            overlays+=("${2}")
+            shift 2
+            ;;
+        -c | --config)
+            configs+=("${2}")
+            shift 2
+            ;;
+        -d | --disk-image)
+            disk_image="${2}"
+            shift 2
+            ;;
+        *)
+            log_fatal "Sorry, but the provided option is not supported: $1"
+            ;;
+    esac
+done
+
+# Note the use of %q formatting here. This is a bash feature to add
+# proper quoting to the strings so that spaces and special characters
+# will be treated properly.  Primarily for supporting spaces in
+# pathnames and avoid splitting those into multiple parameters.
+source modules/config.sh $(printf "%q " "${configs[@]}")
+
+# The URL ends up in a configuration file and in a shell command of the package installation, so
+# only plain URL characters are accepted (the soc-ota-agent package applies the same rule).
+if ! [[ "${OTAPULSE_SERVER_URL}" =~ ^[A-Za-z0-9._:/@+=%,~-]*$ ]]; then
+    log_fatal "OTAPULSE_SERVER_URL contains characters that are not allowed (letters, digits and ._:/@+=%,~- only)."
+fi
+
+if ! [[ "${OTAPULSE_PANIC_TIMEOUT_S}" =~ ^[1-9][0-9]*$ ]]; then
+    log_fatal "OTAPULSE_PANIC_TIMEOUT_S must be a positive number of seconds (got \"${OTAPULSE_PANIC_TIMEOUT_S}\"). Bootloader compatibility mode needs a kernel panic timeout: a kernel that panics without one stops forever and a failed update is never reverted."
+fi
+
+boot_part=$(disk_boot_part)
+root_part=$(disk_root_part)
+
+log_info "Boot partition set to: ${boot_part}"
+log_info "Root partition set to: ${root_part}"
+
+# Sysfs device paths
+boot_part_device=$(disk_boot_part_device)
+data_part_device=$(disk_data_part_device)
+root_part_a_device=$(disk_root_part_a_device)
+root_part_b_device=$(disk_root_part_b_device)
+
+# Create mount points
+mkdir -p work/boot
+mkdir -p work/rootfs
+
+if [ -n "${OTAPULSE_EXPAND_WORK_ROOTFS}" ]; then
+    truncate -s +"${OTAPULSE_EXPAND_WORK_ROOTFS}" "$root_part" > /dev/null || log_fatal "Failed to expand filesystem"
+fi
+
+sudo mount ${boot_part} work/boot
+sudo mount ${root_part} work/rootfs
+
+# Expand the working root filesystem if needed.
+# This provides temporary space which might be needed when
+# installing packages and their dependencies.
+# Note that this doesn't increase the final image size, as that
+# is calculated independently based on actual disk usage.
+if [ -n "${OTAPULSE_EXPAND_WORK_ROOTFS}" ]; then
+    log_info "Expanding mounted root filesystem by ${OTAPULSE_EXPAND_WORK_ROOTFS}"
+    if file ${root_part} | grep -qE ext[34]; then
+        sudo resize2fs "$root_part" > /dev/null || log_fatal "Failed to resize ext filesystem"
+    elif file ${root_part} | grep -q BTRFS; then
+        sudo btrfs filesystem resize max work/rootfs > /dev/null || log_fatal "Failed to resize BTRFS filesystem"
+    elif file ${root_part} | grep -q XFS; then
+        sudo xfs_growfs work/rootfs > /dev/null || log_fatal "Failed to grow XFS filesystem"
+    else
+        log_warn "$(file ${root_part})"
+        log_fatal "Could not determine root file-system type. Aborting..."
+    fi
+fi
+
+probe_untainted_rootfs_input
+
+if [ -z "${OTAPULSE_DEVICE_TYPE}" ]; then
+    # Observed systems who do not have this file, e.g images generated with mkosi
+    if [ -f work/rootfs/etc/hostname ]; then
+        OTAPULSE_DEVICE_TYPE=$(cat work/rootfs/etc/hostname)
+    else
+        OTAPULSE_DEVICE_TYPE="default"
+    fi
+fi
+
+log_info "Performing platform specific pre-modifications (if any)"
+for hook in "${PLATFORM_PRE_MODIFY_HOOKS[@]}"; do
+    log_info "Running hook: $hook"
+    eval $hook
+done
+
+# The persistent state of the OTA-Pulse agent lives on the data partition (the agent runs with
+# OTAPULSE_DATASTORE_DIR=/data/otapulse), so it survives the replacement of the root file system by
+# an update. The directories exist in the image so that the data partition image carries them.
+log_info "Creating the state folders on the data partition"
+run_and_log_cmd "sudo mkdir -p work/rootfs/data/otapulse work/rootfs/data/ota work/rootfs/var/lib/otapulse"
+run_and_log_cmd "sudo chmod 0700 work/rootfs/data/otapulse"
+
+if [ "${OTAPULSE_GRUB_EFI_INTEGRATION}" == "y" ]; then
+    # Check for known U-Boot problems in all files on the boot partition.
+    check_for_broken_uboot_uefi_support work/boot
+
+    if [ "$OTAPULSE_GRUB_D_INTEGRATION" = y ] || ( [ "$OTAPULSE_GRUB_D_INTEGRATION" = auto ] \
+        && supports_grub_d_and_efi "work/boot" "work/rootfs" ); then
+
+        # No need to install Grub, use the one already present, and only install
+        # our tools.
+        log_info "Not installing GRUB EFI bootloader, relying on platform provided one."
+
+        log_info "Installing the GRUB environment tools..."
+        grub_install_grub_editenv_binary
+
+        log_info "Generating grub config using update-grub..."
+        grub_create_grub_config
+        grub_install_grub_d_config
+    else
+        log_info "Installing GRUB EFI bootloader..."
+        grub_install_standalone_grub
+
+        log_info "Generating the standalone GRUB config..."
+        grub_create_grub_config
+        grub_install_standalone_grub_config
+    fi
+
+fi
+
+if [[ "${OTAPULSE_DEVICE_TYPE}" =~ [[:space:]] ]]; then
+    log_fatal "OTAPULSE_DEVICE_TYPE must be a single device type (got \"${OTAPULSE_DEVICE_TYPE}\"): the agent of a converted image has one."
+fi
+
+log_info "Using root device A for the agent: $root_part_a_device"
+log_info "Using root device B for the agent: $root_part_b_device"
+
+# The device type: /etc/otapulse/device_type belongs to the root file system (the image), the copy
+# on the data partition is what the agent checks artifacts against and is verified against the
+# first at every boot (otapulse-data-seed.service of the soc-ota-agent package).
+run_and_log_cmd "sudo mkdir -p work/rootfs/etc/otapulse"
+run_and_log_cmd "echo 'device_type=${OTAPULSE_DEVICE_TYPE}' > work/device_type"
+run_and_log_cmd "sudo install -m 0444 work/device_type work/rootfs/etc/otapulse/device_type"
+run_and_log_cmd "sudo install -m 0444 work/device_type work/rootfs/var/lib/otapulse/device_type"
+run_and_log_cmd "sudo install -m 0644 work/device_type work/rootfs/data/otapulse/device_type"
+
+log_info "Installing a custom /etc/fstab (see ${OTAPULSE_CONVERT_LOG_FILE} for more info)"
+
+if [ -z "${OTAPULSE_BOOT_PART_MOUNT_LOCATION:-}" ]; then
+    if [ "${OTAPULSE_GRUB_EFI_INTEGRATION}" == "y" ]; then
+        OTAPULSE_BOOT_PART_MOUNT_LOCATION="/boot/efi"
+    else
+        OTAPULSE_BOOT_PART_MOUNT_LOCATION="/uboot"
+    fi
+fi
+
+run_and_log_cmd "sudo mkdir -p work/rootfs/${OTAPULSE_BOOT_PART_MOUNT_LOCATION}"
+
+if [ "${OTAPULSE_DATA_PART_GROWFS}" == "y" ]; then
+    PLATFORM_MODIFY_HOOKS+=(grow_data_partition)
+    OTAPULSE_DATA_PART_FSTAB_OPTS="${OTAPULSE_DATA_PART_FSTAB_OPTS},x-systemd.growfs"
+fi
+
+if echo ${OTAPULSE_ROOT_PART_FSTAB_OPTS} | tr ',' '\n' | egrep -q "^ro$"; then
+    if ! echo "${OTAPULSE_ROOT_PART_MKFS_OPTS}" | fgrep -q -- "^has_journal"; then
+        log_warn "EXT4 journal feature is known to create unstable checksums on read-only file systems, add \"-O ^has_journal\" to OTAPULSE_ROOT_PART_MKFS_OPTS to remove it"
+    fi
+fi
+
+log_info "Using boot partition device in fstab: $boot_part_device"
+log_info "Using data partition device in fstab: $data_part_device"
+
+# On systemd-repart based distros fstab may be runtime created and missing in the image file
+fstab=""
+if [ -f work/rootfs/etc/fstab ]; then
+    fstab=$(sed -e '/\/boot/d' -e '/.*\s\/\s.*/d' work/rootfs/etc/fstab)
+fi
+cat <<- EOF > work/rootfs/etc/fstab
+${boot_part_device}   ${OTAPULSE_BOOT_PART_MOUNT_LOCATION}          auto       ${OTAPULSE_BOOT_PART_FSTAB_OPTS}    0  0
+/dev/root            /                    auto       ${OTAPULSE_ROOT_PART_FSTAB_OPTS} 1  ${OTAPULSE_ROOT_PART_FS_PASSNO}
+
+${data_part_device}   /data          auto       ${OTAPULSE_DATA_PART_FSTAB_OPTS}      0  0
+
+# entries kept from original fstab
+$fstab
+EOF
+
+log_info "Installing the OTA-Pulse packages and related files"
+
+# Prepare the image's root before we start deb operations
+deb_prepare "work/rootfs"
+
+if [ "${OTAPULSE_INSTALL_INPUT_PACKAGES}" = "y" ]; then
+    deb_get_and_install_input_package ${OTAPULSE_INSTALL_INPUT_PACKAGES_PATH}
+fi
+
+# The data partition is grown on the first boot with parted and sgdisk.
+if [ "${OTAPULSE_DATA_PART_GROWFS}" == "y" ]; then
+    deb_install_distro_packages parted gdisk
+fi
+
+# Done with package installations.
+deb_cleanup work/rootfs
+
+if [ "${OTAPULSE_INSTALL_INPUT_PACKAGES}" = "y" ]; then
+    otapulse_check_packages_installed work/rootfs
+fi
+otapulse_install_image_support work/rootfs
+
+#
+# Make sure to re-label rootfs when selinux is in enforcing mode
+# e.g. CentOS8 after conversion cannot start login shell due selinux
+# inspired by: https://forums.centos.org/viewtopic.php?t=48714
+#
+if [ -f work/rootfs/etc/selinux/config ]; then
+    grep -r 'SELINUX=Enforcing' work/rootfs/etc/selinux/config || true
+    if [ $? -eq 0 ]; then
+        log_info "Selinux is in enforcing mode. Enable autorelabel"
+        touch work/rootfs/.autorelabel
+    fi
+fi
+
+log_info "Performing platform specific modifications (if any)"
+for hook in "${PLATFORM_MODIFY_HOOKS[@]}"; do
+    log_info "Running hook: $hook"
+    eval $hook
+done
+
+log_info "Performing user/local specific modifications (if any)"
+for hook in "${USER_LOCAL_MODIFY_HOOKS[@]}"; do
+    log_info "Running hook: $hook"
+    eval $hook
+done
+
+for overlay in "${overlays[@]}"; do
+    log_info "Applying rootfs overlay: ${overlay}"
+    run_and_log_cmd "sudo rsync --archive --keep-dirlinks --verbose ${overlay}/ work/rootfs/"
+done
+
+log_info "Performing overlay specific modifications (if any)"
+for hook in "${OVERLAY_MODIFY_HOOKS[@]}"; do
+    log_info "Running hook: $hook"
+    eval $hook
+done

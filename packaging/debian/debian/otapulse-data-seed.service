@@ -8,6 +8,10 @@ Documentation=man:soc-ota-agent(1)
 RequiresMountsFor=/data
 After=data.mount
 Before=soc-ota-agent.service socmond.service
+# A seed failure keeps the agent down (it Requires= this unit). On an uncommitted update nothing would
+# ever commit or reboot it, so the failure handler reboots and the bootloader reverts the update; on a
+# committed slot it only logs loudly (otapulse-bl-guard).
+OnFailure=otapulse-bl-seed-failure.service
 
 [Service]
 Type=oneshot

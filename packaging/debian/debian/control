@@ -20,6 +20,7 @@ Depends: ${misc:Depends},
          jq,
          systemd
 Recommends: libubootenv-tool
+Suggests: grub-common
 Description: OTA-Pulse device update agent (bootloader compatibility mode)
  The OTA-Pulse agent polls the OTA-Pulse backend for firmware deployments,
  installs signed A/B root filesystem updates, reports status and inventory,
@@ -33,7 +34,9 @@ Description: OTA-Pulse device update agent (bootloader compatibility mode)
  .
  The package ships the agent, its systemd unit, the configuration template,
  the inventory and identity scripts, the update state scripts that are
- embedded into OTA artifacts, and a provisioning helper.
+ embedded into OTA artifacts, a provisioning helper, and the boot guard: a
+ timer that reboots a device whose freshly installed update is still not
+ committed after 20 minutes, so that the bootloader reverts it.
  .
  It does not contain a bootloader, partition layout or board support; those
  come from the image the package is installed into.

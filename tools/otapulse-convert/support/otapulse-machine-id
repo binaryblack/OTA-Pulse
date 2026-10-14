@@ -1,0 +1,63 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# otapulse-machine-id - keep one machine-id across OTA-Pulse root file system updates.
+#
+# The root file system is replaced by every update, and the copy that an update writes carries
+# the machine-id the image had when it was converted (none). Without this unit the device would
+# generate a new machine-id after every update and show up in the OTA-Pulse backend under a new
+# identity (the monitoring daemon identifies the device by its machine-id).
+#
+# The persistent copy lives on the data partition (/data/etc/machine-id):
+#   - first boot: remember the machine-id the system generated;
+#   - later boots, and the first boot of an updated slot: put the remembered one back.
+# Only the machine-id is handled here, nothing else about the network interfaces.
+
+set -e
+
+PERSIST="${OTAPULSE_MACHINE_ID_PERSIST_FILE:-/data/etc/machine-id}"
+TARGET="${OTAPULSE_MACHINE_ID_FILE:-/etc/machine-id}"
+LOG_TAG="otapulse-machine-id"
+
+log() {
+    logger -t "$LOG_TAG" "$1" 2>/dev/null || true
+    echo "[$LOG_TAG] $1"
+}
+
+# A valid machine-id is exactly 32 lowercase hex characters, optionally followed by one newline.
+# An "uninitialized" marker or an empty file is not valid.
+is_valid_machine_id() {
+    [ -s "$1" ] || return 1
+    LC_ALL=C head -c 32 "$1" 2>/dev/null | LC_ALL=C grep -Eq '^[0-9a-f]{32}$'
+}
+
+CHANGED="${OTAPULSE_MACHINE_ID_CHANGED_FILE:-/run/otapulse-machine-id.changed}"
+BEFORE="$(cat "$TARGET" 2>/dev/null || true)"
+
+mkdir -p "$(dirname "$PERSIST")"
+
+if is_valid_machine_id "$PERSIST"; then
+    if ! cmp -s "$PERSIST" "$TARGET"; then
+        cp "$PERSIST" "$TARGET"
+        log "Restored the machine-id from $PERSIST"
+    fi
+else
+    [ ! -e "$PERSIST" ] || log "$PERSIST is not a valid machine-id, replacing it"
+    if ! is_valid_machine_id "$TARGET"; then
+        if command -v systemd-machine-id-setup >/dev/null 2>&1; then
+            systemd-machine-id-setup >/dev/null 2>&1 || true
+        fi
+    fi
+    if ! is_valid_machine_id "$TARGET"; then
+        tr -d '-' < /proc/sys/kernel/random/uuid > "$TARGET"
+    fi
+    cp "$TARGET" "$PERSIST"
+    log "Saved the machine-id to $PERSIST"
+fi
+
+# The journal was opened under the machine-id of the first start of this boot. When the machine-id
+# changed, the unit restarts the journal daemon so that logs written from now on are found by
+# journalctl under the persistent one.
+if [ "$(cat "$TARGET" 2>/dev/null || true)" != "$BEFORE" ]; then
+    : > "$CHANGED"
+fi

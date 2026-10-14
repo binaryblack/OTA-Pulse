@@ -9,7 +9,7 @@
 # Two ways it is called:
 #   (no args), cwd inside the ota-pulse checkout
 #       The submodule's own pre-commit hook. Looks at the STAGED file list; if anything under
-#       meta-otapulse-bsp/, patches/mender/, mender-upstream.lock, mender-upstream.manifests/
+#       meta-otapulse-bsp/, tools/otapulse-convert/, patches/mender/, mender-upstream.lock, mender-upstream.manifests/
 #       or the sync tooling itself is staged, it exports the INDEX versions of those paths
 #       to a temp dir and verifies that (MENDER_SYNC_ROOT), so an unstaged working-tree edit
 #       can neither hide nor cause a failure.
@@ -26,9 +26,9 @@ set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYNC="$HOOK_DIR/../mender-sync.sh"
-GUARDED_PATHS=(meta-otapulse-bsp mender-upstream.lock mender-upstream.manifests patches/mender
+GUARDED_PATHS=(meta-otapulse-bsp tools/otapulse-convert mender-upstream.lock mender-upstream.manifests patches/mender
     scripts/mender-sync.sh scripts/mender_tree_hash.py scripts/mender_lock.py)
-GUARD_RE='^(meta-otapulse-bsp/|mender-upstream\.lock$|mender-upstream\.manifests/|patches/mender/|scripts/mender-sync\.sh$|scripts/mender_tree_hash\.py$|scripts/mender_lock\.py$)'
+GUARD_RE='^(meta-otapulse-bsp/|tools/otapulse-convert/|mender-upstream\.lock$|mender-upstream\.manifests/|patches/mender/|scripts/mender-sync\.sh$|scripts/mender_tree_hash\.py$|scripts/mender_lock\.py$)'
 
 TMP=""
 cleanup() { if [ -n "$TMP" ]; then rm -rf -- "$TMP"; fi; }

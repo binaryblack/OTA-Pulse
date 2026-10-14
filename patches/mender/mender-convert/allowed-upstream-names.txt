@@ -1,0 +1,14 @@
+# Occurrences of the upstream product name that are allowed in the finished otapulse-convert tool
+# (scripts/build-otapulse-convert.sh audits the staged tree against this list; stale entries fail it).
+#
+# Columns, TAB separated:  path glob  |  regex (case insensitive, matched against the line or file name)  |  why
+#
+# Everything else - every command, option, variable, message, file name and the --help output -
+# is renamed by the patch series. docs/mender-compat/OTAPULSE-CONVERT.md explains each entry.
+modules/grub.sh	mender_grubenv_defines	Name of the defines file that the bootloader environment scripts (bootloader/grubenv/Makefile) read; the name is fixed by those scripts.
+modules/grub.sh	^\s*mender_(rootfs[ab]_(part|uuid)|boot_uuid|kernel_root_base)=	Variables of that defines file; the GRUB boot scripts on the device read them by these names.
+modules/grub.sh	grub-mender-grubenv	Directory on the boot partition that holds the GRUB environment. The path is compiled into the GRUB boot scripts and the agent reads the environment through it.
+configs/raspberrypi/uboot/include/common_config	mender_kernel_root	U-Boot variable of the boot script. U-Boot expands it at boot time (the tool only writes the text into cmdline.txt).
+modules/probe.sh	mender-(monitor|configure)	Detection of state folders that another updater left in an input image (warning only).
+bootloader/grubenv/*	.	The bootloader environment scripts (U-Boot/GRUB boot logic) are installed on the device unchanged; their file and variable names are read by the agent and by the bootloader and cannot be renamed.
+NOTICE	.	Attribution that the Apache License 2.0 requires for the derived work.

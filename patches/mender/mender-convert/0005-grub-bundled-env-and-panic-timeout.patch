@@ -1,0 +1,174 @@
+GRUB integration: the bootloader environment scripts come with the tool (never downloaded), the image's
+own grub-editenv is used when it has one, a standalone GRUB EFI binary comes from the verified assets,
+and every kernel command line gets panic=N (drop-in for the image's GRUB configuration, fragment 12_ in
+standalone mode).
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/modules/grub.sh b/modules/grub.sh
+index 2cac4e5..a01d2f8 100644
+--- a/modules/grub.sh
++++ b/modules/grub.sh
+@@ -20,10 +20,14 @@ source modules/chroot.sh
+ #
+ function grub_create_grub_config() {
+ 
+-    run_and_log_cmd "wget -Nq '${MENDER_GRUBENV_URL}' -P work/"
+-    run_and_log_cmd "tar xzvf work/${MENDER_GRUBENV_VERSION}.tar.gz -C work/"
++    # The bootloader environment scripts are part of the tool, never downloaded.
++    if [ ! -f "${OTAPULSE_GRUBENV_DIR}/Makefile" ]; then
++        log_fatal "The bootloader environment scripts are missing: ${OTAPULSE_GRUBENV_DIR}/Makefile not found. This tool was not built completely."
++    fi
++    run_and_log_cmd "rm -rf work/grubenv"
++    run_and_log_cmd "cp -a '${OTAPULSE_GRUBENV_DIR}' work/grubenv"
+ 
+-    cat <<- EOF > work/grub-mender-grubenv-${MENDER_GRUBENV_VERSION}/mender_grubenv_defines
++    cat <<- EOF > work/grubenv/mender_grubenv_defines
+ mender_rootfsa_part=${MENDER_ROOTFS_PART_A_NUMBER}
+ mender_rootfsb_part=${MENDER_ROOTFS_PART_B_NUMBER}
+ kernel_imagetype=kernel
+@@ -38,13 +42,13 @@ EOF
+         log_info "Using boot partition partuuid in grubenv: $boot_partuuid"
+         log_info "Using root partition A partuuid in grubenv: $rootfsa_partuuid"
+         log_info "Using root partition B partuuid in grubenv: $rootfsb_partuuid"
+-        cat <<- EOF >> work/grub-mender-grubenv-${MENDER_GRUBENV_VERSION}/mender_grubenv_defines
++        cat <<- EOF >> work/grubenv/mender_grubenv_defines
+ mender_boot_uuid=${boot_partuuid}
+ mender_rootfsa_uuid=${rootfsa_partuuid}
+ mender_rootfsb_uuid=${rootfsb_partuuid}
+ EOF
+     else
+-        cat <<- EOF >> work/grub-mender-grubenv-${MENDER_GRUBENV_VERSION}/mender_grubenv_defines
++        cat <<- EOF >> work/grubenv/mender_grubenv_defines
+ mender_kernel_root_base=${MENDER_STORAGE_DEVICE_BASE}
+ EOF
+     fi
+@@ -54,14 +58,19 @@ EOF
+ #
+ #
+ function grub_install_standalone_grub_config() {
+-    if [ -n "${MENDER_GRUB_KERNEL_BOOT_ARGS}" ]; then
+-        cat <<- EOF > work/grub-mender-grubenv-${MENDER_GRUBENV_VERSION}/11_bootargs_grub.cfg
+-set bootargs="${MENDER_GRUB_KERNEL_BOOT_ARGS}"
++    if [ -n "${OTAPULSE_GRUB_KERNEL_BOOT_ARGS}" ]; then
++        cat <<- EOF > work/grubenv/11_bootargs_grub.cfg
++set bootargs="${OTAPULSE_GRUB_KERNEL_BOOT_ARGS}"
+ EOF
+     fi
+ 
++    # Kernel panic -> reboot after N seconds, so that the boot counter can revert a failed update.
++    # Written last (name order); the kernel honours the last panic= it sees.
++    printf 'set bootargs="${bootargs} panic=%s"\n' "${OTAPULSE_PANIC_TIMEOUT_S}" \
++        > work/grubenv/12_otapulse_panic_bootargs_grub.cfg
++
+     (   
+-        cd work/grub-mender-grubenv-${MENDER_GRUBENV_VERSION}
++        cd work/grubenv
+         run_and_log_cmd "make 2>&1"
+         run_and_log_cmd "sudo make DESTDIR=$PWD/../ BOOT_DIR=boot install-standalone-boot-files"
+         run_and_log_cmd "sudo make DESTDIR=$PWD/../rootfs install-tools"
+@@ -73,10 +82,12 @@ EOF
+ #
+ #
+ function grub_install_grub_d_config() {
+-    if [ -n "${MENDER_GRUB_KERNEL_BOOT_ARGS}" ]; then
+-        log_warn "MENDER_GRUB_KERNEL_BOOT_ARGS is ignored when MENDER_GRUB_D_INTEGRATION is enabled. Set it in the GRUB configuration instead."
++    if [ -n "${OTAPULSE_GRUB_KERNEL_BOOT_ARGS}" ]; then
++        log_warn "OTAPULSE_GRUB_KERNEL_BOOT_ARGS is ignored when OTAPULSE_GRUB_D_INTEGRATION is enabled. Set it in the GRUB configuration instead."
+     fi
+ 
++    grub_install_panic_dropin
++
+     # When using grub.d integration, /boot/efi must point to the boot partition,
+     # and /boot/grub must point to grub-mender-grubenv on the boot partition.
+     if [ ! -d work/rootfs/boot/efi ]; then
+@@ -91,7 +102,7 @@ function grub_install_grub_d_config() {
+     run_and_log_cmd "sudo ln -s efi/grub-mender-grubenv work/rootfs/boot/grub"
+ 
+     (   
+-        cd work/grub-mender-grubenv-${MENDER_GRUBENV_VERSION}
++        cd work/grubenv
+         run_and_log_cmd "make 2>&1"
+         run_and_log_cmd "sudo make DESTDIR=$PWD/../ BOOT_DIR=boot install-boot-env"
+         run_and_log_cmd "sudo make DESTDIR=$PWD/../rootfs install-grub.d-boot-scripts"
+@@ -103,12 +114,23 @@ function grub_install_grub_d_config() {
+     run_with_chroot_setup work/rootfs grub_install_in_chroot
+ 
+     (   
+-        cd work/grub-mender-grubenv-${MENDER_GRUBENV_VERSION}
++        cd work/grubenv
+         # Should be removed after running.
+         run_and_log_cmd "sudo make DESTDIR=$PWD/../rootfs uninstall-offline-files"
+     )
+ }
+ 
++# grub_install_panic_dropin
++#
++# Kernel panic timeout for the GRUB integration: a drop-in for the image's own GRUB configuration
++# (read by update-grub), so that every menu entry it generates carries panic=N.
++function grub_install_panic_dropin() {
++    run_and_log_cmd "sudo mkdir -p work/rootfs/etc/default/grub.d"
++    printf 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+${GRUB_CMDLINE_LINUX} }panic=%s"\n' \
++        "${OTAPULSE_PANIC_TIMEOUT_S}" > work/otapulse-panic.cfg
++    run_and_log_cmd "sudo install -m 644 work/otapulse-panic.cfg work/rootfs/etc/default/grub.d/90-otapulse-panic.cfg"
++}
++
+ function grub_install_in_chroot() {
+     # Use `--no-nvram`, since we cannot update firmware memory in an offline
+     # build. Instead, use `--removable`, which creates entries that automate
+@@ -124,19 +146,27 @@ function grub_install_in_chroot() {
+ #
+ # Install the editenv binary
+ function grub_install_grub_editenv_binary() {
+-    log_info "Installing the GRUB editenv binary"
++    log_info "Checking the GRUB editenv binary"
++
++    # The image's own GRUB environment tool is used when it has one (every Debian and Ubuntu
++    # system with grub-common does). Only an image without it needs the prebuilt binary of the
++    # assets.
++    for candidate in work/rootfs/usr/bin/grub-editenv work/rootfs/bin/grub-editenv; do
++        if [ -x "${candidate}" ]; then
++            log_info "Using the GRUB environment tool of the image: ${candidate#work/rootfs}"
++            return
++        fi
++    done
+ 
+     arch=$(probe_arch)
+-
+-    run_and_log_cmd "wget -Nq ${MENDER_GRUB_BINARY_STORAGE_URL}/${arch}/grub-editenv -P work/"
+-    run_and_log_cmd "sudo install -m 751 work/grub-editenv work/rootfs/usr/bin/"
+-
++    asset=$(otapulse_asset_path "grub-editenv-${arch}")
++    run_and_log_cmd "sudo install -m 751 ${asset} work/rootfs/usr/bin/grub-editenv"
+ }
+ 
+-# grub_install_mender_grub
++# grub_install_standalone_grub
+ #
+ # Install mender-grub on the converted boot partition
+-function grub_install_mender_grub() {
++function grub_install_standalone_grub() {
+     kernel_imagetype=${MENDER_GRUB_KERNEL_IMAGETYPE:-$(probe_kernel_in_boot_and_root)}
+     initrd_imagetype=${MENDER_GRUB_INITRD_IMAGETYPE:-$(probe_initrd_in_boot_and_root)}
+ 
+@@ -161,7 +191,7 @@ function grub_install_mender_grub() {
+ 
+     log_info "Installing GRUB..."
+ 
+-    log_info "Installing mender-grub-editenv"
++    log_info "Installing the GRUB environment tool"
+     grub_install_grub_editenv_binary
+ 
+     local -r arch=$(probe_arch)
+@@ -170,9 +200,9 @@ function grub_install_mender_grub() {
+ 
+     log_info "GRUB EFI: ${efi_target_name}"
+ 
+-    run_and_log_cmd "wget -Nq ${MENDER_GRUB_BINARY_STORAGE_URL}/${arch}/${efi_name} -P work/"
++    efi_asset=$(otapulse_asset_path "${efi_name}")
+     run_and_log_cmd "sudo mkdir -p work/boot/EFI/BOOT"
+-    run_and_log_cmd "sudo cp work/${efi_name} -P work/boot/EFI/BOOT/${efi_target_name}"
++    run_and_log_cmd "sudo cp ${efi_asset} work/boot/EFI/BOOT/${efi_target_name}"
+ 
+     # Copy dtb directory to the boot partition for use by the bootloader.
+     if [ -d work/rootfs/boot/dtbs ]; then

@@ -1,0 +1,11 @@
+# Vendored upstream source. DO NOT EDIT any file in this directory.
+# Local changes go in ota-pulse/patches/mender/ (TASK-S109-004).
+# Verify with: ota-pulse/scripts/mender-sync.sh --verify
+# (compares with ota-pulse/mender-upstream.lock).
+component: mender-convert
+url: https://github.com/mendersoftware/mender-convert
+ref: tag:5.3.0
+commit: 85e8c506cd59dc4a8e66ad07fbe28a3c33488c46
+subpath: .
+license: see the vendored LICENSE
+patches: 0001-drop-upstream-tests-ci-and-unsupported-targets.patch, 0002-defaults-config.patch, 0003-drop-untested-board-configs.patch, 0004-asset-verification.patch, 0005-grub-bundled-env-and-panic-timeout.patch, 0006-modify-agent-layout-packages-and-support.patch, 0007-packages-artifact-container.patch, 0008-asset-checksums.patch, 0009-debian-arm64-uefi-target.patch, 0010-wording-and-readme.patch, 0100-rename-generated.patch, 0101-grub-cmdline-boot-size-and-demo-dir.patch, 0102-install-partition-tools.patch, 0103-virtio-device-base.patch, 0104-machine-id-journal-restart.patch, 0105-drop-ignored-placeholders.patch, 0106-pin-container-base-image.patch, 0107-debian-arm64-config-scope.patch

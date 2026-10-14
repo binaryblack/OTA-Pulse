@@ -1,0 +1,36 @@
+Hand written, applies after the generated rename. /dev/vdX (virtio block devices of virtual machines) is a
+recognised storage device, and a failed device base lookup of the data partition growth service is no longer
+hidden by 'local x=$(...)'.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/systemd_common_config b/configs/systemd_common_config
+index c58d02e..e1bc72c 100644
+--- a/configs/systemd_common_config
++++ b/configs/systemd_common_config
+@@ -6,7 +6,9 @@ function grow_data_partition() {
+     log_info "to fill all the available space on the storage media"
+     run_and_log_cmd "sudo mkdir -p work/rootfs/etc/systemd/system/data.mount.wants/"
+ 
+-    local DEVICE_PATH=$(disk_get_device_base "${OTAPULSE_STORAGE_DEVICE_BASE}")
++    # declared first: "local x=$(cmd)" would hide a failure of cmd (a fatal error of the lookup)
++    local DEVICE_PATH
++    DEVICE_PATH=$(disk_get_device_base "${OTAPULSE_STORAGE_DEVICE_BASE}")
+     local PART_NUM="${OTAPULSE_DATA_PART_NUMBER}"
+ 
+     cat <<- EOF > work/rootfs/etc/systemd/system/otapulse-grow-data.service
+diff --git a/modules/disk.sh b/modules/disk.sh
+index c9f5dd4..0c5bd62 100644
+--- a/modules/disk.sh
++++ b/modules/disk.sh
+@@ -386,6 +386,10 @@ disk_get_device_base() {
+         /dev/[sh]d[a-z]*)
+             dev_base=${1%%[1-9]*}
+             ;;
++        /dev/vd[a-z]*)
++            # virtio block device (virtual machines)
++            dev_base=${1%%[1-9]*}
++            ;;
+         ubi*_*)
+             dev_base=$(echo $1 | cut -d_ -f1)
+             ;;

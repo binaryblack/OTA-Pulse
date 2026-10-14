@@ -1,0 +1,53 @@
+New target configuration: Debian 12 arm64 (genericcloud / nocloud) with UEFI and the image's own GRUB.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/debian_arm64_uefi_config b/configs/debian_arm64_uefi_config
+new file mode 100644
+index 0000000..49d0aa2
+--- /dev/null
++++ b/configs/debian_arm64_uefi_config
+@@ -0,0 +1,43 @@
++# Debian 12 (bookworm) for 64-bit ARM (arm64) with UEFI and GRUB, for virtual machines and for
++# ARM boards with a UEFI firmware.
++#
++# Input: the "genericcloud" or "nocloud" arm64 image of Debian 12, for example
++#
++#    https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.raw
++#
++# (its partitions are: 1 root file system, 14 BIOS boot, 15 EFI system partition). The image's own
++# GRUB is kept and gets the A/B boot scripts of the bootloader environment; nothing is downloaded
++# for the bootloader.
++#
++# Convert with
++#
++#    OTAPULSE_ARTIFACT_NAME=release-1 ./docker-otapulse-convert \
++#        --disk-image input/debian-12-genericcloud-arm64.raw \
++#        --config configs/debian_arm64_uefi_config
++#
++# and start the result in QEMU with
++#
++#    qemu-system-aarch64 -M virt -cpu max -m 2048 -smp 2 -nographic \
++#        -bios /usr/share/AAVMF/AAVMF_CODE.fd \
++#        -drive if=none,id=d0,format=raw,file=deploy/<image>.img -device virtio-blk-pci,drive=d0 \
++#        -netdev user,id=n0 -device virtio-net-pci,netdev=n0
++
++# The disk is a virtio block device
++OTAPULSE_STORAGE_DEVICE_BASE=/dev/vda
++
++OTAPULSE_DEVICE_TYPE="debian-arm64"
++
++# GPT, as in the input image
++OTAPULSE_PARTITION_SCHEME="gpt"
++
++# No bootloader sits in front of the first partition
++OTAPULSE_COPY_BOOT_GAP="n"
++
++OTAPULSE_SPARSE_IMAGE="y"
++
++# The boot partition is the EFI system partition of the image, mounted at /boot/efi
++OTAPULSE_GRUB_EFI_INTEGRATION=y
++OTAPULSE_GRUB_D_INTEGRATION=y
++
++# Packages (soc-ota-agent, socmond) come from input/packages. A file system resize tool and the
++# kernel tools of the image are already there.

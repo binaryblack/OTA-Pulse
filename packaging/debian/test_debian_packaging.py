@@ -215,6 +215,44 @@ def test_rules_ships_the_three_state_scripts_and_not_a_client():
     assert "usr/bin/mender\n" not in rules and "/usr/bin/mender " not in rules.replace("/usr/bin/mender show-provides", "").replace("'/usr/bin/mender'", "")
 
 
+FIRSTBOOT_FILES = OTAPULSE / "meta-otapulse" / "recipes-core" / "otapulse-firstboot" / "files"
+BL_UNITS = ("otapulse-bl-boot-deadline.service", "otapulse-bl-boot-deadline.timer",
+            "otapulse-bl-seed-failure.service", "otapulse-bl-clock-wait.service")
+
+
+def test_rules_ships_the_boot_guard_from_the_image_recipe():
+    """TASK-S109-025: the userspace half of the bootloader rollback net is in the agent package."""
+    rules = read(DEB / "rules")
+    assert "install -D -m 0755 upstream/bl/otapulse-bl-guard" in rules
+    for unit in BL_UNITS:
+        assert unit in rules
+        assert (FIRSTBOOT_FILES / unit).is_file(), unit
+    assert (FIRSTBOOT_FILES / "otapulse-bl-guard").is_file()
+    # the units start the script from the package's own directory, rewritten at build time and checked
+    assert "ExecStart=/usr/lib/otapulse/otapulse-bl-guard " in rules
+    build = read(BUILD_SCRIPT)
+    for name in ("otapulse-bl-guard",) + BL_UNITS:
+        assert f"otapulse-firstboot/files/{name}" in build, name
+
+
+def test_data_seed_failure_reverts_an_uncommitted_update():
+    assert "OnFailure=otapulse-bl-seed-failure.service" in read(DEB / "otapulse-data-seed.service")
+    assert "OnFailure=otapulse-bl-seed-failure.service" in read(FIRSTBOOT_FILES / "otapulse-data-seed.service")
+
+
+def test_agent_package_upgrade_never_stops_or_restarts_the_agent():
+    """dpkg must not interrupt an update the agent is installing (--no-stop-on-upgrade), and the
+    static failure handler must never be started by a maintainer script (it reboots the device)."""
+    rules = read(DEB / "rules")
+    code = "\n".join(l for l in rules.splitlines() if not l.lstrip().startswith("#"))
+    assert re.search(r"dh_installsystemd -psoc-ota-agent --no-stop-on-upgrade soc-ota-agent\.service", code)
+    assert "--no-restart-after-upgrade" not in code
+    # the failure handler and the timer's service are handed to dh_installsystemd nowhere
+    for line in rules.splitlines():
+        if line.startswith("\tdh_installsystemd"):
+            assert "otapulse-bl-seed-failure" not in line and "otapulse-bl-boot-deadline.service" not in line
+
+
 def test_state_scripts_in_the_recipe_carry_the_boot_mode_gate():
     for s in ("ArtifactReboot_Enter_01", "ArtifactRollbackReboot_Enter_01", "ArtifactCommit_Enter_01"):
         text = read(RECIPE_FILES / s)
@@ -410,15 +448,36 @@ def test_built_agent_package(deb, tmp_path):
                  "./usr/share/otapulse/state-scripts/ArtifactReboot_Enter_01",
                  "./usr/share/otapulse/state-scripts/ArtifactRollbackReboot_Enter_01",
                  "./usr/share/otapulse/state-scripts/ArtifactCommit_Enter_01",
-                 "./usr/share/doc/soc-ota-agent/NOTICE.gz", "./usr/share/doc/soc-ota-agent/copyright"):
+                 "./usr/share/doc/soc-ota-agent/NOTICE.gz", "./usr/share/doc/soc-ota-agent/copyright",
+                 "./usr/lib/otapulse/otapulse-bl-guard",
+                 *[f"./lib/systemd/system/{u}" for u in BL_UNITS]):
         assert must in paths, must
     assert "./usr/bin/mender" not in paths
     ctl = tmp_path / "ctl"
     dpkg_deb("-e", str(deb), str(ctl))
     assert set((ctl / "conffiles").read_text().split()) == {"/etc/otapulse/boot_mode", "/etc/otapulse/otapulse.conf"}
     assert "deb-systemd-helper" in (ctl / "postinst").read_text()
+    post, pre = (ctl / "postinst").read_text(), (ctl / "prerm").read_text()
+    # the agent is started but never restarted by dpkg, and only stopped when the package is removed
+    assert "deb-systemd-invoke start 'soc-ota-agent.service'" in post
+    assert not re.search(r"restart[^\n]*soc-ota-agent\.service", post)
+    assert re.search(r'"\$1" = remove \][^\n]*\n\s*deb-systemd-invoke stop \'soc-ota-agent\.service\'', pre)
+    # nothing in a maintainer script starts the failure handler (it reboots the device)
+    assert "otapulse-bl-seed-failure" not in post + pre
+    assert "otapulse-bl-boot-deadline.service" not in post + pre
     root = tmp_path / "root"
     dpkg_deb("-x", str(deb), str(root))
+    guard = root / "usr/lib/otapulse/otapulse-bl-guard"
+    assert guard.read_text().startswith("#!/bin/sh\n") and os.access(guard, os.X_OK)
+    for u in BL_UNITS:
+        text = (root / "lib/systemd/system" / u).read_text()
+        assert "/usr/bin/otapulse-bl-guard" not in text
+        assert not re.search("mender", text, re.I)
+        if u.endswith(".service") and "ExecStart" in text:
+            assert "ExecStart=/usr/lib/otapulse/otapulse-bl-guard " in text, u
+    # enabled by symlink at install time: the timer and the clock wait (not the static handlers)
+    assert "deb-systemd-helper enable 'otapulse-bl-boot-deadline.timer'" in post
+    assert "deb-systemd-helper enable 'otapulse-bl-clock-wait.service'" in post
     # The binary is a stripped ELF of the right machine, without the build directory in it.
     data = (root / "usr/bin/soc-ota-agent").read_bytes()
     assert data[:4] == b"\x7fELF"

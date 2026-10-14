@@ -1,0 +1,135 @@
+Binary bootloader inputs (U-Boot for the Raspberry Pi, a standalone GRUB EFI binary) are looked up by
+name in the assets directory and verified against configs/assets.sha256 (modules/assets.sh); there is no
+fixed download address. The kernel command line of the Raspberry Pi gets panic=N.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the files this patch changes)
+
+diff --git a/configs/raspberrypi/uboot/include/common_config b/configs/raspberrypi/uboot/include/common_config
+index 168e833..1639734 100644
+--- a/configs/raspberrypi/uboot/include/common_config
++++ b/configs/raspberrypi/uboot/include/common_config
+@@ -1,17 +1,14 @@
+ # These configurations are using U-Boot without UEFI.
+ MENDER_GRUB_EFI_INTEGRATION=n
+ 
+-# expects two parameters: 1. filename 2. download path
++# expects one parameter: the file name of the asset (see modules/assets.sh: the file is looked
++# up in the assets directory and its sha256 is checked against configs/assets.sha256)
+ function check_and_extract_asset() {
+     mkdir -p work/rpi/binaries
+ 
+     asset_filename="$1"
+-    asset_download_url="$2"
+-    if [ -f assets/${asset_filename} ]; then
+-        run_and_log_cmd "cp assets/${asset_filename} work/rpi/binaries"
+-    else
+-        run_and_log_cmd "wget -q ${asset_download_url} -P work/rpi/binaries"
+-    fi
++    asset_path=$(otapulse_asset_path "${asset_filename}")
++    run_and_log_cmd "cp ${asset_path} work/rpi/binaries"
+     run_and_log_cmd "tar xzvf work/rpi/binaries/${asset_filename} -C work/rpi/binaries"
+ }
+ 
+@@ -40,6 +37,10 @@ function raspberrypi_update_cmdline() {
+     # Extracted from /usr/lib/raspi-config/init_resize.sh
+     run_and_log_cmd "sed -i 's| init=/usr/lib/raspi-config/init_resize\.sh||' work/rpi/$CMDLINE"
+     run_and_log_cmd "sed -i 's| sdhci\.debug_quirks2=4||' work/rpi/$CMDLINE"
++
++    # Kernel panic -> reboot after N seconds, so that the boot counter can revert a failed update.
++    # The kernel honours the last panic= it sees.
++    run_and_log_cmd "sed -i 's|\$| panic=${OTAPULSE_PANIC_TIMEOUT_S}|' work/rpi/$CMDLINE"
+     if ! grep -q splash work/rpi/$CMDLINE; then
+         run_and_log_cmd "sed -i 's/ quiet//g' work/rpi/$CMDLINE"
+     fi
+diff --git a/configs/raspberrypi/uboot/include/raspberrypi_64_config b/configs/raspberrypi/uboot/include/raspberrypi_64_config
+index 6945794..c376f67 100644
+--- a/configs/raspberrypi/uboot/include/raspberrypi_64_config
++++ b/configs/raspberrypi/uboot/include/raspberrypi_64_config
+@@ -1,11 +1,11 @@
+-# Binaries generated with the following script:
+-#    https://github.com/mendersoftware/mender-convert-integration-scripts/blob/master/build-uboot-rpi64.sh
++# The U-Boot files for the Raspberry Pi come from the assets (see modules/assets.sh). They are
++# a prebuilt U-Boot 2024.04 with the A/B boot environment integration, listed with their
++# sha256 in configs/assets.sha256.
+ 
+ # Default to kernel8.img for aarch64 but allow to overwrite this in other config file
+ RASPBERRYPI_KERNEL_IMAGE="${RASPBERRYPI_KERNEL_IMAGE:-kernel8.img}"
+ 
+ RASPBERRYPI_BINARIES="raspberrypi_arm64-2024.04.tar.gz"
+-RASPBERRYPI_BINARIES_URL="${MENDER_STORAGE_URL}/mender-convert/uboot/raspberrypi64/${RASPBERRYPI_BINARIES}"
+ 
+ RASPBERRYPI_OS_REQUIRED_ID="debian"     # also applies to the "Raspberry Pi OS" images
+ 
+@@ -38,7 +38,7 @@ function raspberrypi_64_setup_bootloader_and_kernel() {
+ function raspberrypi_64_platform_modify() {
+     raspberrypi_check_requirements
+ 
+-    check_and_extract_asset $RASPBERRYPI_BINARIES $RASPBERRYPI_BINARIES_URL
++    check_and_extract_asset $RASPBERRYPI_BINARIES
+ 
+     raspberrypi_update_cmdline
+ 
+diff --git a/modules/assets.sh b/modules/assets.sh
+new file mode 100644
+index 0000000..a48778c
+--- /dev/null
++++ b/modules/assets.sh
+@@ -0,0 +1,49 @@
++# SPDX-License-Identifier: Apache-2.0
++# Copyright 2026 OTA-Pulse
++#
++# Prebuilt bootloader files (U-Boot for the Raspberry Pi, a GRUB EFI binary, ...) are binary
++# inputs of an image. They are never taken from a fixed address and never trusted unchecked:
++#
++#   1. the file is looked up by name in the 'assets' directory;
++#   2. if it is not there and OTAPULSE_ASSETS_BASE_URL is set, it is downloaded from there;
++#   3. in both cases its sha256 must equal the entry for that name in configs/assets.sha256.
++#
++# A name that is not listed, a missing file, or a different checksum stops the conversion.
++
++# Print the path of a verified asset.
++#
++#  $1 - file name of the asset
++function otapulse_asset_path() {
++    if [[ $# -ne 1 ]]; then
++        log_fatal "otapulse_asset_path() requires 1 argument"
++    fi
++    local -r name="$1"
++    local -r list="configs/assets.sha256"
++    local expected
++
++    expected=$(awk -v n="${name}" '!/^#/ && $2 == n {print $1}' "${list}")
++    if [ -z "${expected}" ]; then
++        log_fatal "The asset '${name}' is not listed in ${list}, so it cannot be verified."
++    fi
++
++    if [ ! -f "assets/${name}" ]; then
++        if [ -n "${OTAPULSE_ASSETS_BASE_URL}" ]; then
++            log_info "Downloading the asset ${name} from ${OTAPULSE_ASSETS_BASE_URL}"
++            run_and_log_cmd "wget -q '${OTAPULSE_ASSETS_BASE_URL%/}/${name}' -O 'assets/${name}.part'"
++            run_and_log_cmd "mv 'assets/${name}.part' 'assets/${name}'"
++        else
++            log_error "The asset '${name}' is needed for this target but is not in the assets directory,"
++            log_error "and OTAPULSE_ASSETS_BASE_URL is not set."
++            log_fatal "Put the file into the 'assets' directory (expected sha256 ${expected})."
++        fi
++    fi
++
++    local actual
++    actual=$(sha256sum "assets/${name}" | cut -d ' ' -f1)
++    if [ "${actual}" != "${expected}" ]; then
++        log_error "The asset 'assets/${name}' does not match ${list}."
++        log_error "  expected sha256 ${expected}"
++        log_fatal "  actual   sha256 ${actual}"
++    fi
++    echo "assets/${name}"
++}
+diff --git a/modules/bootstrap.sh b/modules/bootstrap.sh
+index 9f252f2..f54b7b4 100644
+--- a/modules/bootstrap.sh
++++ b/modules/bootstrap.sh
+@@ -49,3 +49,4 @@ export PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+ 
+ source modules/log.sh
+ source modules/run.sh
++source modules/assets.sh

@@ -1,0 +1,30 @@
+# GRUB / UEFI boot loader integration of otapulse-convert.
+#
+# Use the UEFI -> GRUB boot loader integration. On ARM, U-Boot is used as the UEFI provider.
+#
+# Only disable this if you know what you are doing (U-Boot targets do, see the board configs).
+OTAPULSE_GRUB_EFI_INTEGRATION=y
+
+# Integrate with the /etc/grub.d boot scripts of the image's own GRUB. "auto" detects whether the
+# image has a GRUB installation with an EFI system partition; "y" and "n" force it. With "n" a
+# standalone GRUB EFI binary is installed from the assets (see OTAPULSE_ASSETS_BASE_URL).
+OTAPULSE_GRUB_D_INTEGRATION=auto
+
+# Version of the GRUB EFI binary of the assets (standalone mode only).
+GRUB_VERSION=2.12
+
+# Extra Linux kernel arguments, for example a console. With the GRUB integration of the image's own
+# GRUB they are added to its command line (GRUB_CMDLINE_LINUX); in standalone mode they replace the
+# default arguments. The panic timeout (OTAPULSE_PANIC_TIMEOUT_S) is always added last.
+OTAPULSE_GRUB_KERNEL_BOOT_ARGS=""
+
+# Names of the Linux kernel image and the initial ram disk in /boot. The tool detects them; only
+# set these if that fails.
+OTAPULSE_GRUB_KERNEL_IMAGETYPE=""
+OTAPULSE_GRUB_INITRD_IMAGETYPE=""
+
+# Ignore broken UEFI support in certain U-Boot versions (2018.09 - 2019.07)
+OTAPULSE_IGNORE_UBOOT_BROKEN_UEFI="0"
+
+# Ignore a kernel without an EFI stub on ARM
+OTAPULSE_IGNORE_MISSING_EFI_STUB="0"
