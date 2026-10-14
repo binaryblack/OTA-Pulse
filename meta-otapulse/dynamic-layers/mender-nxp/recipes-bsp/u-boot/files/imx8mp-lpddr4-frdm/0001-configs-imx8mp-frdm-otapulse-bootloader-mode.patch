@@ -1,0 +1,72 @@
+From: OTA-Pulse <noreply@ota-pulse.com>
+Subject: [PATCH] configs: imx8mp_frdm: environment for OTA-Pulse bootloader mode
+
+OTA-Pulse bootloader compatibility mode (TODO-157 / S109, TASK-S109-022).
+Manual board integration of the NXP i.MX8M Plus FRDM, the equivalent of the
+vendored "configs: olimex-imx8mp-evb: mender integration" patch.
+
+The stock imx8mp_frdm_defconfig keeps its environment on MMC device 1 (the SD
+slot) at one non-redundant offset (0x700000), also enables the SPI-flash and
+"nowhere" environment locations, and has no boot counter. The bootloader owned
+A/B flow needs:
+
+ * the environment in the eMMC user area (U-Boot mmc device 2, Linux
+   /dev/mmcblk2), the user area being where imx-boot (32 KiB) and the
+   partitions of the OTA-Pulse "sd" image type live; two redundant copies of
+   CONFIG_ENV_SIZE (0x4000) at 8 MiB and 16 MiB, below the first partition
+   (24 MiB), exactly the offsets the board support computes
+   (MENDER_UBOOT_ENV_STORAGE_DEVICE_OFFSET{,_2});
+ * no other environment location (SPI flash, nowhere): U-Boot would pick the
+   first one that works and the agent reads the eMMC copy;
+ * the boot counter in the environment (bootcount / bootlimit /
+   upgrade_available), which is what rolls a failed update back;
+ * a boot command that can only end in the boot script of the FAT partition:
+   the stock "run sr_ir_v2_cmd;run distro_bootcmd;run bsp_bootcmd" falls back,
+   when no boot script is found, to the NXP bsp_bootcmd, which boots a kernel
+   from the FAT partition with a FIXED root=/dev/mmcblk1p2, no slot choice and no
+   panic=N, or even boots over the network (DHCP/TFTP). Neither can be rolled
+   back. "run distro_bootcmd; reset" resets instead, so a board that cannot
+   find its boot script counts a failed boot and the bootloader rollback
+   (bootlimit / altbootcmd) takes over.
+
+License: this patch modifies a U-Boot file, GPL-2.0-or-later.
+---
+diff --git a/configs/imx8mp_frdm_defconfig b/configs/imx8mp_frdm_defconfig
+--- a/configs/imx8mp_frdm_defconfig
++++ b/configs/imx8mp_frdm_defconfig
+@@ -10,7 +10,9 @@
+ CONFIG_SYS_MEMTEST_START=0x60000000
+ CONFIG_SYS_MEMTEST_END=0xC0000000
+ CONFIG_ENV_SIZE=0x4000
+-CONFIG_ENV_OFFSET=0x700000
++CONFIG_ENV_OFFSET=0x800000
++CONFIG_ENV_OFFSET_REDUND=0x1000000
++CONFIG_SYS_REDUNDAND_ENVIRONMENT=y
+ CONFIG_ENV_SECT_SIZE=0x10000
+ CONFIG_DM_GPIO=y
+ CONFIG_SPL_TEXT_BASE=0x920000
+@@ -25,7 +27,7 @@
+ CONFIG_DISTRO_DEFAULTS=y
+ CONFIG_SYS_MONITOR_LEN=524288
+ CONFIG_DEFAULT_DEVICE_TREE="imx8mp-frdm"
+-CONFIG_BOOTCOMMAND="run sr_ir_v2_cmd;run distro_bootcmd;run bsp_bootcmd"
++CONFIG_BOOTCOMMAND="run distro_bootcmd; reset"
+ CONFIG_FIT=y
+ CONFIG_FIT_EXTERNAL_OFFSET=0x3000
+ CONFIG_SPL_LOAD_FIT=y
+@@ -89,11 +91,12 @@
+ CONFIG_OF_CONTROL=y
+ CONFIG_SPL_OF_CONTROL=y
+ CONFIG_ENV_OVERWRITE=y
+-CONFIG_ENV_IS_NOWHERE=y
+ CONFIG_ENV_IS_IN_MMC=y
+-CONFIG_ENV_IS_IN_SPI_FLASH=y
+ CONFIG_SYS_RELOC_GD_ENV_ADDR=y
+-CONFIG_SYS_MMC_ENV_DEV=1
++CONFIG_SYS_MMC_ENV_DEV=2
++CONFIG_SYS_MMC_ENV_PART=0
++CONFIG_BOOTCOUNT_LIMIT=y
++CONFIG_BOOTCOUNT_ENV=y
+ CONFIG_ENV_VARS_UBOOT_RUNTIME_CONFIG=y
+ CONFIG_USE_ETHPRIME=y
+ CONFIG_ETHPRIME="eth1"

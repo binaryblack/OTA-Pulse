@@ -1,0 +1,95 @@
+ jh_root_dtb=imx8mp-frdm-root.dtb
+ loadbootscript=fatload mmc ${mmcdev}:${mmcpart} ${loadaddr} ${bsp_script};
+ nodes=/busfreq /power-domains /soc@0/caam-sm@100000 /soc@0/bus@30000000/caam_secvio /soc@0/bus@30000000/caam-snvs@30370000 /soc@0/bus@30800000/flexspi_nand@30bb0000 /soc@0/bus@32c00000/mipi_dsi@32e60000 /soc@0/bus@32c00000/lcd-controller@32e80000 /soc@0/bus@32c00000/blk-ctl@32ec0000 /soc@0/bus@30800000/i2c@30a20000/pca9450@25 /soc@0/bus@30800000/i2c@30a30000/adv7535@3d /soc@0/bus@30800000/i2c@30a30000/tcpc@50 /wdt-reboot /mcu_rdc /soc@0/bus@30800000/ethernet@30bf0000 /dsi-host /rm67199_panel /cbtl04gp /binman /vpu_g1@38300000 /vpu_g2@38310000 /vpu_vc8000e@38320000 /vpu_v4l2 /gpu3d@38000000 /gpu2d@38008000 /vipsi@38500000 /mix_gpu_ml 
+altbootcmd=run mender_altbootcmd; run bootcmd
+arch=arm
+baudrate=115200
+board=imx8mp_frdm
+board_name=imx8mp_frdm
+boot_a_script=load ${devtype} ${devnum}:${distro_bootpart} ${scriptaddr} ${prefix}${script}; source ${scriptaddr}
+boot_efi_binary=load ${devtype} ${devnum}:${distro_bootpart} ${kernel_addr_r} efi/boot/bootaa64.efi; if fdt addr -q ${fdt_addr_r}; then bootefi ${kernel_addr_r} ${fdt_addr_r};else bootefi ${kernel_addr_r} ${fdtcontroladdr};fi
+boot_efi_bootmgr=if fdt addr -q ${fdt_addr_r}; then bootefi bootmgr ${fdt_addr_r};else bootefi bootmgr;fi
+boot_extlinux=sysboot ${devtype} ${devnum}:${distro_bootpart} any ${scriptaddr} ${prefix}${boot_syslinux_conf}
+boot_fdt=try
+boot_fit=no
+boot_net_usb_start=usb start
+boot_prefixes=/ /boot/
+boot_script_dhcp=boot.scr.uimg
+boot_scripts=boot.scr.uimg boot.scr
+boot_syslinux_conf=extlinux/extlinux.conf
+boot_targets=usb0 mmc1 mmc2 
+bootcmd=run distro_bootcmd; reset
+bootcmd_mfg=run mfgtool_args;if iminfo ${initrd_addr}; then if test ${tee} = yes; then bootm ${tee_addr} ${initrd_addr} ${fdt_addr}; else booti ${loadaddr} ${initrd_addr} ${fdt_addr}; fi; else echo "Run fastboot ..."; fastboot 0; fi;
+bootcmd_mmc1=devnum=1; run mmc_boot
+bootcmd_mmc2=devnum=2; run mmc_boot
+bootcmd_usb0=devnum=0; run usb_boot
+bootcount=0
+bootdelay=2
+bootlimit=1
+bootm_size=0x10000000
+bootscript=echo Running bootscript from mmc ...; source
+bsp_bootcmd=echo Running BSP bootcmd ...; mmc dev ${mmcdev}; if mmc rescan; then if run loadbootscript; then run bootscript; else if run loadimage; then run mmcboot; else run netboot; fi; fi; fi;
+bsp_script=boot.scr
+console=ttymxc1,115200
+cpu=armv8
+distro_bootcmd=for target in ${boot_targets}; do run bootcmd_${target}; done
+efi_dtb_prefixes=/ /dtb/ /dtb/current/
+emmc_dev=2
+ethprime=eth1
+fdt_addr=0x43000000
+fdt_addr_r=0x43000000
+fdt_high=0xffffffffffffffff
+fdtfile=imx8mp-frdm.dtb
+image=Image
+initrd_addr=0x43800000
+initrd_high=0xffffffffffffffff
+jh_clk= 
+jh_mmcboot=setenv fdtfile ${jh_root_dtb};setenv jh_clk clk_ignore_unused mem=1920MB; if run loadimage; then run mmcboot; else run jh_netboot; fi; 
+jh_netboot=setenv fdtfile ${jh_root_dtb}; setenv jh_clk clk_ignore_unused mem=1920MB; run netboot; 
+kboot=booti 
+kernel_addr_r=0x40400000
+load_efi_dtb=load ${devtype} ${devnum}:${distro_bootpart} ${fdt_addr_r} ${prefix}${efi_fdtfile}
+loadaddr=0x40400000
+loadfdt=fatload mmc ${mmcdev}:${mmcpart} ${fdt_addr_r} ${fdtfile}
+loadimage=fatload mmc ${mmcdev}:${mmcpart} ${loadaddr} ${image}
+mender_altbootcmd=if test ${mender_boot_part} = 2; then setenv mender_boot_part 3; setenv mender_boot_part_hex 3; else setenv mender_boot_part 2; setenv mender_boot_part_hex 2; fi; setenv upgrade_available 0; saveenv; run mender_setup
+mender_boot_kernel_type=booti
+mender_boot_part=2
+mender_boot_part_hex=2
+mender_check_saveenv_canary=1
+mender_dtb_name=imx8mp-frdm-iw612-otbr.dtb
+mender_kernel_name=Image
+mender_post_setup_commands=setenv bootargs "${bootargs} panic=7"; 
+mender_pre_setup_commands=
+mender_setup=if test "${mender_saveenv_canary}" != "1"; then setenv mender_saveenv_canary 1; saveenv; fi; if test "${mender_pre_setup_commands}" != ""; then run mender_pre_setup_commands; fi; if test "${mender_systemd_machine_id}" != ""; then setenv bootargs "systemd.machine_id=${mender_systemd_machine_id} ${bootargs}"; fi; setenv mender_kernel_root /dev/mmcblk2p${mender_boot_part}; if test ${mender_boot_part} = 2; then setenv mender_boot_part_name /dev/mmcblk2p2; else setenv mender_boot_part_name /dev/mmcblk2p3; fi; setenv mender_kernel_root_name ${mender_boot_part_name}; setenv mender_uboot_root mmc 2:${mender_boot_part_hex}; setenv mender_uboot_root_name ${mender_boot_part_name}; setenv expand_bootargs "setenv bootargs \\"${bootargs}\\""; run expand_bootargs; setenv expand_bootargs; if test "${mender_post_setup_commands}" != ""; then run mender_post_setup_commands; fi
+mender_try_to_recover=if test ${upgrade_available} = 1; then reset; fi
+mender_uboot_boot=mmc 2:1
+mender_uboot_dev=2
+mender_uboot_if=mmc
+mfgtool_args=setenv bootargs console=${console},${baudrate} rdinit=/linuxrc clk_ignore_unused 
+mmc_boot=if mmc dev ${devnum}; then devtype=mmc; run scan_dev_for_boot_part; fi
+mmcargs=setenv bootargs ${jh_clk} ${mcore_clk} console=${console} root=${mmcroot}
+mmcautodetect=yes
+mmcboot=echo Booting from mmc ...; run mmcargs; if test ${boot_fit} = yes || test ${boot_fit} = try; then bootm ${loadaddr}; else if run loadfdt; then booti ${loadaddr} - ${fdt_addr_r}; else echo WARN: Cannot load the DT; fi; fi;
+mmcdev=2
+mmcpart=1
+mmcroot=/dev/mmcblk1p2 rootwait rw
+mtdids=
+mtdparts=
+nandfit_part=yes
+netargs=setenv bootargs ${jh_clk} ${mcore_clk} console=${console} root=/dev/nfs ip=dhcp nfsroot=${serverip}:${nfsroot},v3,tcp
+netboot=echo Booting from net ...; run netargs;  if test ${ip_dyn} = yes; then setenv get_cmd dhcp; else setenv get_cmd tftp; fi; ${get_cmd} ${loadaddr} ${image}; if test ${boot_fit} = yes || test ${boot_fit} = try; then bootm ${loadaddr}; else if ${get_cmd} ${fdt_addr_r} ${fdtfile}; then booti ${loadaddr} - ${fdt_addr_r}; else echo WARN: Cannot load the DT; fi; fi;
+prepare_mcore=setenv mcore_clk clk-imx8mp.mcore_booted;
+scan_dev_for_boot=echo Scanning ${devtype} ${devnum}:${distro_bootpart}...; for prefix in ${boot_prefixes}; do run scan_dev_for_extlinux; run scan_dev_for_scripts; done;run scan_dev_for_efi;
+scan_dev_for_boot_part=part list ${devtype} ${devnum} -bootable devplist; env exists devplist || setenv devplist 1; for distro_bootpart in ${devplist}; do if fstype ${devtype} ${devnum}:${distro_bootpart} bootfstype; then part uuid ${devtype} ${devnum}:${distro_bootpart} distro_bootpart_uuid ; run scan_dev_for_boot; fi; done; setenv devplist
+scan_dev_for_efi=setenv efi_fdtfile ${fdtfile}; for prefix in ${efi_dtb_prefixes}; do if test -e ${devtype} ${devnum}:${distro_bootpart} ${prefix}${efi_fdtfile}; then run load_efi_dtb; fi;done;run boot_efi_bootmgr;if test -e ${devtype} ${devnum}:${distro_bootpart} efi/boot/bootaa64.efi; then echo Found EFI removable media binary efi/boot/bootaa64.efi; run boot_efi_binary; echo EFI LOAD FAILED: continuing...; fi; setenv efi_fdtfile
+scan_dev_for_extlinux=if test -e ${devtype} ${devnum}:${distro_bootpart} ${prefix}${boot_syslinux_conf}; then echo Found ${prefix}${boot_syslinux_conf}; run boot_extlinux; echo EXTLINUX FAILED: continuing...; fi
+scan_dev_for_scripts=for script in ${boot_scripts}; do if test -e ${devtype} ${devnum}:${distro_bootpart} ${prefix}${script}; then echo Found U-Boot script ${prefix}${script}; run boot_a_script; echo SCRIPT FAILED: continuing...; fi; done
+scriptaddr=0x43500000
+sd_dev=1
+soc=imx8m
+splashimage=0x50000000
+sr_ir_v2_cmd=cp.b ${fdtcontroladdr} ${fdt_addr_r} 0x10000;fdt addr ${fdt_addr_r};fdt set /soc@0/usb@32f10100/usb@38100000 compatible snps,dwc3;fdt set /soc@0/usb@32f10108/usb@38200000 compatible snps,dwc3;for i in ${nodes}; do fdt rm ${i}; done 
+upgrade_available=0
+usb_boot=usb start; if usb dev ${devnum}; then devtype=usb; run scan_dev_for_boot_part; fi
+vendor=freescale

@@ -1011,6 +1011,26 @@ def otapulse_full_rpi_firmware_bootargs():
             "system_heap.max_order=0 smsc95xx.macaddr=00:00:00:00:00:00 vc_mem.mem_base=0x3ec00000 "
             "vc_mem.mem_size=0x40000000")
 
+def otapulse_full_find_deployed_uboot_env(deploy_dir):
+    """The compiled-in U-Boot environment in the image deploy directory: (path, None), or (None, reason).
+    A single-configuration U-Boot deploys "u-boot-initial-env". A multi-configuration one (UBOOT_CONFIG, for
+    example the NXP i.MX8M Plus FRDM) deploys "u-boot-<recipe>-initial-env-<config>" (plus machine/version-stamped
+    copies of it) instead; those are all copies of ONE environment, and are only accepted when they agree."""
+    import glob, os
+    exact = os.path.join(deploy_dir, 'u-boot-initial-env')
+    if os.path.isfile(exact):
+        return exact, None
+    found = {}
+    for path in sorted(glob.glob(os.path.join(deploy_dir, 'u-boot-*initial-env*'))):
+        if os.path.isfile(path):
+            with open(path, errors='replace') as f:
+                found.setdefault(f.read(), path)
+    if not found:
+        return None, "was not found"
+    if len(found) > 1:
+        return None, "exists in %d different versions (%s)" % (len(found), ', '.join(os.path.basename(p) for p in sorted(found.values())))
+    return list(found.values())[0], None
+
 python otapulse_bl_bootfs_checks() {
     """After the disk image is built: the boot script and cmdline.txt that went into the boot partition
     of a board that boots through a boot script (the Raspberry Pi), run the way U-Boot would."""
@@ -1021,10 +1041,10 @@ python otapulse_bl_bootfs_checks() {
         bb.note("otapulse-full: no boot script in the boot partition (the boot command is compiled into U-Boot): "
                 "boot script checks skipped")
         return
-    envf = os.path.join(d.getVar('DEPLOY_DIR_IMAGE'), 'u-boot-initial-env')
-    if not os.path.isfile(envf):
-        bb.fatal("OTAPULSE_PANIC_TIMEOUT_S: the compiled-in U-Boot environment (u-boot-initial-env) was not found "
-                 "in %s, so the boot script of the image cannot be verified." % d.getVar('DEPLOY_DIR_IMAGE'))
+    envf, why = otapulse_full_find_deployed_uboot_env(d.getVar('DEPLOY_DIR_IMAGE'))
+    if not envf:
+        bb.fatal("OTAPULSE_PANIC_TIMEOUT_S: the compiled-in U-Boot environment (u-boot-initial-env) %s "
+                 "in %s, so the boot script of the image cannot be verified." % (why, d.getVar('DEPLOY_DIR_IMAGE')))
     with open(envf, errors='replace') as f:
         env = otapulse_full_uboot_env_dict(f.read())
     cmdline = ''
