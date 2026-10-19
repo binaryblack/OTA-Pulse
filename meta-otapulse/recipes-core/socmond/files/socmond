@@ -160,6 +160,19 @@ ota_update_in_flight() {
         fi
     done
 
+    # S109/TODO-157 (bootloader-compat mode): the store-mtime and state-script checks above
+    # miss the window between the post-OTA reboot and the agent entering ArtifactCommit_Enter
+    # (the store was last written before the reboot and no state script runs yet). A
+    # first-boot provisioning that lands there restarted the agent right as it started
+    # committing; the restarted agent found update-commit interrupted, rolled back and
+    # rebooted onto the old slot (qemuarm64-bl release-gate round 2, E2E-001 "SLOT DID NOT
+    # SWITCH"). In bootloader mode the bootloader env is authoritative: upgrade_available=1
+    # means a trial boot is waiting for the agent's commit, so never restart the agent.
+    # Inert on native images (no /etc/otapulse/boot_mode).
+    if [ "$(cat /etc/otapulse/boot_mode 2>/dev/null)" = "bootloader" ] && command -v otapulse-bl-guard >/dev/null 2>&1; then
+        otapulse-bl-guard status 2>/dev/null | grep -q '^kind=[a-z]* upgrade_available=1 ' && return 0
+    fi
+
     if command -v pgrep >/dev/null 2>&1; then
         pgrep -f 'Artifact(Install|Reboot|Commit|Rollback|RollbackReboot)_(Enter|Leave|Error)' >/dev/null 2>&1 && return 0
     else
