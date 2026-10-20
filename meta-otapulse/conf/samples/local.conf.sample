@@ -77,8 +77,13 @@ SSTATE_DIR ?= "${TOPDIR}/../sstate-cache"
 # License acceptance
 LICENSE_FLAGS_ACCEPTED += "commercial"
 
-# Extra image features for development (remove before production)
-EXTRA_IMAGE_FEATURES += "debug-tweaks ssh-server-openssh"
+# SSH server. Key-only root login is configured in the image hardening step;
+# see "Hardening before production" in the Yocto integration guide.
+EXTRA_IMAGE_FEATURES += "ssh-server-openssh"
+
+# DEVELOPMENT ONLY, isolated bench. debug-tweaks gives root an EMPTY password
+# and sets PermitRootLogin yes / PermitEmptyPasswords yes. Never ship with it.
+# EXTRA_IMAGE_FEATURES += "debug-tweaks"
 
 # =============================================================
 # OTA Signature Configuration
@@ -124,8 +129,7 @@ MENDER_ARTIFACT_COMPRESSION ?= "gzip"
 
 # =============================================================
 
-# For production builds, uncomment:
-# EXTRA_IMAGE_FEATURES:remove = "debug-tweaks"
+# For production builds, uncomment (debug-tweaks is already off by default above):
 # IMAGE_FEATURES:remove = "ssh-server-openssh"
 # IMAGE_INSTALL:remove = "strace gdb"
 
