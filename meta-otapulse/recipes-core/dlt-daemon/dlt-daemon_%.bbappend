@@ -76,3 +76,26 @@ FILES:${PN} += " \
     ${systemd_system_unitdir}/dlt.service.d/50-otapulse-ordering.conf \
     ${systemd_system_unitdir}/dlt-system.service.d/50-otapulse-ordering.conf \
     "
+
+# BUG-546: bootloader-compat (otapulse-bootloader) images only -- restart the
+# DLT daemons after a stall-induced watchdog kill instead of staying failed.
+# Shipped as its own 51-* drop-in (not appended to the 50-* ordering files) so
+# native builds evaluate none of this and their package contents, and so the
+# native-unchanged gate's baseline hashes, stay byte-identical. Same pattern
+# as otapulse-firstboot's 10-otapulse-bl-machine-id.conf. Both drop-ins ship
+# in ${PN}, like the 50-* ones.
+SRC_URI:append:otapulse-bootloader = " file://dlt-bl-restart.conf "
+
+do_install:append:otapulse-bootloader() {
+    install -d -m 0755 ${D}${systemd_system_unitdir}/dlt.service.d
+    install -m 0644 ${WORKDIR}/dlt-bl-restart.conf \
+        ${D}${systemd_system_unitdir}/dlt.service.d/51-otapulse-bl-restart.conf
+    install -d -m 0755 ${D}${systemd_system_unitdir}/dlt-system.service.d
+    install -m 0644 ${WORKDIR}/dlt-bl-restart.conf \
+        ${D}${systemd_system_unitdir}/dlt-system.service.d/51-otapulse-bl-restart.conf
+}
+
+FILES:${PN}:append:otapulse-bootloader = " \
+    ${systemd_system_unitdir}/dlt.service.d/51-otapulse-bl-restart.conf \
+    ${systemd_system_unitdir}/dlt-system.service.d/51-otapulse-bl-restart.conf \
+    "
