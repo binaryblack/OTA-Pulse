@@ -1,0 +1,26 @@
+Hand written, applies after the generated rename. BUG-542: a second conversion into a non-empty
+deploy/ directory produced a corrupt rootfs. otapulse-convert-package created the output image with
+`dd ... count=0 seek=N`, which extends an existing file but never truncates it, and the partitions are
+written with conv=sparse (OTAPULSE_SPARSE_IMAGE=y), which skips all-zero blocks. Every block of the
+previous image that the new content leaves as a hole therefore survived into the new image. The fix
+removes a leftover output image before it is created. The plain copy deploy/NAME.<fs> and the artifact
+were already overwritten, so only the .img was affected.
+
+SPDX-License-Identifier: Apache-2.0 (the licence of the file this patch changes)
+
+diff --git a/otapulse-convert-package b/otapulse-convert-package
+index 1d11d30..9babe93 100755
+--- a/otapulse-convert-package
++++ b/otapulse-convert-package
+@@ -293,7 +293,10 @@ log_info "  Boot partition    $(disk_sectors_to_mb ${boot_part_sectors}) MiB"
+ log_info "  RootFS partitions $(disk_sectors_to_mb ${rootfs_part_sectors}) MiB x 2"
+ log_info "  Data partition    $(disk_sectors_to_mb ${data_part_sectors}) MiB"
+ 
+-# Initialize sdcard image file
++# Initialize sdcard image file. Remove a leftover image of an earlier conversion first: dd with
++# count=0 and seek only extends an existing file, and the partitions below are written sparsely
++# (OTAPULSE_SPARSE_IMAGE), so stale blocks of the old image would survive into the new one.
++run_and_log_cmd "rm -f ${img_path}"
+ run_and_log_cmd \
+     "dd if=/dev/zero of=${img_path} bs=512 count=0 seek=${disk_image_total_sectors} status=none"
+ 
